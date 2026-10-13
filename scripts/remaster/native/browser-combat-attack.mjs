@@ -855,7 +855,7 @@ export async function fightToVictory({
         );
       const target =
         visibleEnemies.find((object) => object.uid === targetUid) ??
-        visibleEnemies.find((object) => object.kind !== 'building') ??
+        visibleEnemies.find((object) => object.kind === 'building') ??
         visibleEnemies[0];
       if (target && (target.uid !== targetUid || performance.now() - lastOrderAt > 8000)) {
         await press('2');

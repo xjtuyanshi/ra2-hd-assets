@@ -26,6 +26,7 @@ const feelSettings = ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase
       .then(JSON.parse)
       .catch(() => ({}))
   : {};
+const screenCourtesy = feelSettings.screenCourtesy === true;
 const viewChoice = process.argv[7] ?? feelSettings.view ?? null;
 assert(viewChoice === null || ['classic', 'moderate', 'wide'].includes(viewChoice), 'Use a player view choice');
 const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
@@ -128,8 +129,158 @@ let peakRss = 0;
 let acceptanceRates = null;
 let humanPointer = { x: 0, y: 0 };
 let directMouseMove;
+let originalForegroundApp = null;
+let screenLease = null;
+const screenOccupancy = [];
+function foregroundApp(timeoutMs = 5000) {
+  const result = spawnSync(
+    '/usr/bin/osascript',
+    [
+      '-l',
+      'JavaScript',
+      '-e',
+      "ObjC.import('AppKit'); const app = $.NSWorkspace.sharedWorkspace.frontmostApplication; JSON.stringify({pid:Number(app.processIdentifier),name:ObjC.unwrap(app.localizedName),bundle:ObjC.unwrap(app.bundleIdentifier)});",
+    ],
+    { encoding: 'utf8', timeout: timeoutMs },
+  );
+  assert(result.status === 0, result.stderr?.trim() || String(result.error ?? 'Cannot read frontmost application'));
+  return JSON.parse(result.stdout.trim());
+}
+async function restoreForegroundApp(app, label) {
+  if (!app || !Number.isSafeInteger(app.pid) || app.pid === ownedChrome?.pid) return null;
+  const result = spawnSync(
+    '/usr/bin/osascript',
+    [
+      '-l',
+      'JavaScript',
+      '-e',
+      `ObjC.import('AppKit'); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${app.pid}); if (!app || app.terminated) throw new Error('Previous foreground application has exited'); app.unhide; const accepted = !!app.activateWithOptions(3); const front = $.NSWorkspace.sharedWorkspace.frontmostApplication; JSON.stringify({accepted,pid:Number(front.processIdentifier),restored:Number(front.processIdentifier)===${app.pid}});`,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  const proof =
+    result.status === 0 ? JSON.parse(result.stdout.trim()) : { error: result.stderr?.trim() || String(result.error) };
+  const pollBeganAtMs = Date.now();
+  const pollDeadline = pollBeganAtMs + 1000;
+  while (proof.accepted && !proof.restored && Date.now() < pollDeadline) {
+    await delay(Math.min(50, pollDeadline - Date.now()));
+    const remainingMs = pollDeadline - Date.now();
+    if (remainingMs <= 0) break;
+    try {
+      proof.pid = foregroundApp(remainingMs).pid;
+      proof.restored = proof.pid === app.pid;
+    } catch (error) {
+      proof.pollError = String(error);
+      break;
+    }
+  }
+  proof.pollElapsedMs = Date.now() - pollBeganAtMs;
+  await record('screen-foreground-restored', { label, previous: app, proof });
+  return proof;
+}
+async function beginOwnedScreen(label, { fullscreen = true } = {}) {
+  if (!screenCourtesy) return activateOwnedChrome(label);
+  if (!screenLease) {
+    await ownerIdle();
+    const before = foregroundApp();
+    screenLease = {
+      label,
+      startedAt: new Date().toISOString(),
+      beganMs: Date.now(),
+      previous: before.pid === ownedChrome?.pid ? originalForegroundApp : before,
+      window: await cdp.send('Browser.getWindowForTarget'),
+    };
+    await activateOwnedChrome(label);
+  }
+  if (fullscreen && !(await page.evaluate(() => !!document.fullscreenElement))) {
+    const toggle = page.locator('#vm-controls-toggle');
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') await locatorClick(toggle);
+    await locatorClick(page.locator('#vm-fullscreen'));
+    await wait('measured real page fullscreen', () => page.evaluate(() => !!document.fullscreenElement));
+  }
+  if (fullscreen)
+    await wait(
+      'measured real fullscreen window',
+      async () =>
+        (await cdp.send('Browser.getWindowForTarget')).bounds.windowState === 'fullscreen' &&
+        (await page.evaluate(
+          () =>
+            !!document.fullscreenElement &&
+            outerWidth === screen.width &&
+            // macOS can retain its menu-bar area outside an actual fullscreen
+            // Chrome window. Both values come from the real display/window.
+            (outerHeight === screen.height || outerHeight === screen.availHeight),
+        )),
+      10000,
+    );
+  await record('screen-occupied', {
+    label,
+    fullscreen,
+    previous: screenLease.previous,
+    browserWindow: await cdp.send('Browser.getWindowForTarget'),
+    viewport: await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })),
+  });
+  return { occupied: true, label, previous: screenLease.previous };
+}
+async function releaseOwnedScreen(label) {
+  if (!screenCourtesy || !screenLease) return { occupied: false };
+  const lease = screenLease;
+  screenLease = null;
+  const failures = [];
+  if (page && !page.isClosed()) {
+    await page
+      .evaluate(async () => {
+        document.exitPointerLock();
+        if (document.fullscreenElement) await document.exitFullscreen();
+      })
+      .catch((error) => failures.push(String(error)));
+    const window = await cdp.send('Browser.getWindowForTarget').catch((error) => {
+      failures.push(String(error));
+      return null;
+    });
+    if (window) {
+      await cdp
+        .send('Browser.setWindowBounds', { windowId: window.windowId, bounds: { windowState: 'normal' } })
+        .catch((error) => failures.push(String(error)));
+      const end = Date.now() + 5000;
+      while (Date.now() < end) {
+        const state = await cdp.send('Browser.getWindowForTarget').catch(() => null);
+        if (state?.bounds.windowState === 'normal') break;
+        await delay(100);
+      }
+      const { left, top, width, height } = lease.window.bounds;
+      await cdp
+        .send('Browser.setWindowBounds', {
+          windowId: window.windowId,
+          bounds: { left, top, width, height },
+        })
+        .catch((error) => failures.push(String(error)));
+    }
+  }
+  const foreground = await restoreForegroundApp(lease.previous, label);
+  const endedAtMs = Date.now();
+  const proof = {
+    label: lease.label,
+    release: label,
+    startedAt: lease.startedAt,
+    endedAt: new Date(endedAtMs).toISOString(),
+    minutes: (endedAtMs - lease.beganMs) / 60000,
+    foreground,
+    failures,
+    window: page && !page.isClosed() ? await cdp.send('Browser.getWindowForTarget').catch(() => null) : null,
+  };
+  screenOccupancy.push(proof);
+  const totalMinutes = screenOccupancy.reduce((sum, item) => sum + item.minutes, 0);
+  await writeFile(
+    join(out, 'screen-occupancy.json'),
+    JSON.stringify({ totalMinutes, periods: screenOccupancy }, null, 2),
+  );
+  await record('screen-released', { ...proof, totalMinutes });
+  return proof;
+}
 async function activateOwnedChrome(label) {
   if (phase !== 'phase34' || !ownedChrome) return;
+  if (screenCourtesy && !screenLease) return;
   await ownerIdle();
   assert(
     Number.isSafeInteger(ownedChrome.pid) && ownedChrome.exitCode === null && ownedChrome.signalCode === null,
@@ -206,9 +357,14 @@ async function setInitialWindowBounds() {
 }
 // Session 26 observes ordinary pointer travel, including moves made by the
 // reused battle helpers. Other sessions retain their existing input protocol.
-async function timedHumanMove(x, y) {
+async function timedHumanMove(x, y, correction = false) {
   const start = { ...humanPointer };
-  const duration = (Math.hypot(x - start.x, y - start.y) / 600) * 1000;
+  const distance = Math.hypot(x - start.x, y - start.y);
+  const duration = screenCourtesy
+    ? correction
+      ? Math.max(16, Math.min(80, (distance / 3500) * 1000))
+      : Math.max(240, Math.min(450, (distance / 3500) * 1000))
+    : (distance / 600) * 1000;
   const steps = Math.max(1, Math.ceil(duration / 8));
   const began = performance.now();
   for (let index = 1; index <= steps; index++) {
@@ -251,7 +407,8 @@ async function humanMove(x, y, options) {
       const dy = ((wanted.y - actual.point.y) * actual.box.height) / actual.height;
       if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
       const target = { x: humanPointer.x + dx, y: humanPointer.y + dy };
-      if (['phase26', 'phase34'].includes(phase)) await timedHumanMove(target.x, target.y);
+      if (['phase26', 'phase34'].includes(phase))
+        await timedHumanMove(target.x, target.y, screenCourtesy && attempt > 0);
       else {
         humanPointer = target;
         await directMouseMove(humanPointer.x, humanPointer.y, attempt ? undefined : options);
@@ -264,7 +421,7 @@ async function humanMove(x, y, options) {
   return directMouseMove(x, y, options);
 }
 async function locatorClick(locator) {
-  if (phase !== 'phase26') return locator.click();
+  if (phase !== 'phase26' && !screenCourtesy) return locator.click();
   await locator.waitFor({ state: 'visible' });
   const box = await locator.boundingBox();
   assert(box && box.width > 0 && box.height > 0, 'Visible page input target required');
@@ -389,7 +546,25 @@ async function shot(label, simple = false) {
     captureBeyondViewport: false,
   });
   await writeFile(path, Buffer.from(capture.data, 'base64'));
-  if (simple) {
+  if (simple || screenCourtesy) {
+    if (screenCourtesy) {
+      const geometry = await page.evaluate(() => ({
+        viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+        display: { width: screen.width, height: screen.height },
+        fullscreen: !!document.fullscreenElement,
+        pointerLocked: !!document.pointerLockElement,
+        pointer: window.__phase32Pointer ?? null,
+        cursor: document.querySelector('#native-page-cursor')?.getBoundingClientRect().toJSON() ?? null,
+        screenBox: document.querySelector('#screen')?.getBoundingClientRect().toJSON() ?? null,
+        presentation: window.__hdBridge?.presentation ?? null,
+        mode: window.__hdBridge?.mode ?? null,
+        timeline: window.__hdBridge?.timeline ?? null,
+        pace: window.__hdBridge?.pace ?? null,
+      }));
+      await writeFile(join(out, label + '-geometry.json'), JSON.stringify(geometry, null, 2));
+      if (!simple && worker())
+        await writeFile(join(out, label + '-controls.json'), JSON.stringify(await state(), null, 2));
+    }
     await record('screenshot-lite', { label, path });
     return path;
   }
@@ -582,9 +757,14 @@ const usable = (c) => c.visible && c.enabled && c.rect?.[2] > c.rect?.[0];
 async function execute(c) {
   if (c.action === 'close') return { closing: true };
   await ownerIdle();
+  if (c.action === 'screen-start')
+    return beginOwnedScreen(c.label ?? 'explicit-screen', { fullscreen: c.fullscreen !== false });
+  if (c.action === 'screen-release') return releaseOwnedScreen(c.label ?? 'explicit-release');
+  if (screenCourtesy && c.measured === true) await beginOwnedScreen(c.label ?? c.action);
   if (phase === 'phase34') await activateOwnedChrome(c.action);
   else if (['phase26', 'phase33'].includes(phase)) await page.bringToFront();
   if (c.action === 'feel-start') {
+    if (screenCourtesy) await beginOwnedScreen(c.label ?? 'feel-match');
     if (c.hdOnly)
       await wait('visible HD scene', () => page.evaluate(() => !!window.__hdBridge?.diagnostics?.shown), 60000);
     const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
@@ -608,6 +788,7 @@ async function execute(c) {
       };
       probe.raf = requestAnimationFrame(animate);
       probe.present = (route) => {
+        if (probe.stoppedAt !== undefined) return;
         const at = performance.now();
         if (probe.previous !== null) {
           const gap = at - probe.previous;
@@ -633,6 +814,7 @@ async function execute(c) {
       });
       observer.observe({ entryTypes: ['longtask'] });
       probe.stop = () => {
+        probe.stoppedAt ??= performance.now();
         document.removeEventListener('pointermove', pointer);
         observer.disconnect();
         cancelAnimationFrame(probe.raf);
@@ -642,16 +824,39 @@ async function execute(c) {
     return execute({ action: 'rates-start', label: c.label ?? 'feel-rates', cadence: true });
   }
   if (c.action === 'feel-stop') {
+    await page.evaluate(() => {
+      const p = window.__phase32Feel;
+      p.stop();
+      const telemetry = window.__feelTelemetry;
+      // Save the endpoint in the page without serializing the large capture.
+      // The screen can be returned before the evidence crosses CDP.
+      p.endpoint = {
+        focused: document.hasFocus(),
+        visible: !document.hidden,
+        notice: document.querySelector('#display-refresh-notice')?.textContent ?? null,
+        pace: structuredClone(window.__hdBridge?.pace ?? null),
+        stalls: structuredClone(window.__hdBridge?.stalls ?? null),
+        telemetry: structuredClone(
+          typeof telemetry?.records === 'function' ? telemetry.records() : (telemetry?.records ?? null),
+        ),
+        viewport: {
+          width: innerWidth,
+          height: innerHeight,
+          dpr: devicePixelRatio,
+          screen: { width: screen.width, height: screen.height },
+        },
+      };
+    });
     const rates = await execute({ action: 'rates-stop', label: c.label ?? 'feel-rates' });
     const { capture, ...evidence } = await page.evaluate(() => {
       const p = window.__phase32Feel;
-      p.stop();
       const values = [...p.frames].sort((a, b) => a - b);
       const percentile = (f) => (values.length ? values[Math.ceil(values.length * f) - 1] : null);
       const result = {
         capture: window.__hdBridge?.diagnostics?.finishCapture() ?? null,
         source: 'Actual completed visible HD draws or classic presenter draws; browser scanout is not instrumented',
-        seconds: (performance.now() - p.startedAt) / 1000,
+        seconds: (p.stoppedAt - p.startedAt) / 1000,
+        frames: p.frames,
         intervals: {
           n: values.length,
           p50: percentile(0.5),
@@ -665,18 +870,7 @@ async function execute(c) {
         longTasks: p.tasks,
         gaps: p.gaps,
         animationFrameIntervals: p.animationFrames,
-        focused: document.hasFocus(),
-        visible: !document.hidden,
-        notice: document.querySelector('#display-refresh-notice')?.textContent ?? null,
-        pace: window.__hdBridge?.pace ?? null,
-        stalls: window.__hdBridge?.stalls ?? null,
-        telemetry: window.__feelTelemetry?.records ?? null,
-        viewport: {
-          width: innerWidth,
-          height: innerHeight,
-          dpr: devicePixelRatio,
-          screen: { width: screen.width, height: screen.height },
-        },
+        ...p.endpoint,
       };
       delete window.__phase32Feel;
       return result;
@@ -686,7 +880,13 @@ async function execute(c) {
       join(out, `${c.label ?? 'feel'}-measurements.json`),
       JSON.stringify({ ...evidence, rates }, null, 2),
     );
-    return { ...evidence, pointer: { count: evidence.pointer.length }, gaps: { count: evidence.gaps.length }, rates };
+    return {
+      ...evidence,
+      frames: { count: evidence.frames.length },
+      pointer: { count: evidence.pointer.length },
+      gaps: { count: evidence.gaps.length },
+      rates,
+    };
   }
   if (c.action === 'feel-edges') {
     const proof = [];
@@ -770,6 +970,7 @@ async function execute(c) {
       ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase) && !acceptanceRates,
       'One owned match observer required',
     );
+    if (screenCourtesy) await beginOwnedScreen(c.label ?? 'played-match');
     const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
     acceptanceRates = await startPhase10MatchRates({
       page,
@@ -819,6 +1020,7 @@ async function execute(c) {
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
     const result = await acceptanceRates.stop();
     acceptanceRates = null;
+    if (screenCourtesy) await releaseOwnedScreen(c.label ?? 'rates-stopped');
     const transitions = await page.evaluate(() => window.__hdBridge?.timeline ?? null);
     await writeFile(join(out, (c.label ?? 'played-match') + '-transitions.json'), JSON.stringify(transitions, null, 2));
     return { ...result, transitions };
@@ -1584,7 +1786,19 @@ async function execute(c) {
   }
   if (c.action === 'attack-visible' || c.action === 'fight-to-victory') {
     const { attackVisibleEnemyBuilding } = await import('./browser-combat-attack.mjs');
-    const current = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+    const current = await wait(
+      'actual six-player combat state',
+      async () => {
+        const candidate = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+        return candidate?.localHouse >= 0 &&
+          candidate.localHouse <= 5 &&
+          candidate.view &&
+          Array.isArray(candidate.objects)
+          ? candidate
+          : null;
+      },
+      10000,
+    );
     assert(current?.localHouse >= 0 && current.localHouse <= 5, 'Actual six-player local house required');
     const vector = Buffer.from(await readBytes(0xa80228, 20));
     assert(vector.readInt32LE(16) > current.localHouse, 'Actual house vector required');
@@ -1862,7 +2076,7 @@ async function execute(c) {
     });
     cdp = await context.newCDPSession(page);
     await page.goto(reopenUrl);
-    await page.bringToFront();
+    if (!screenCourtesy || screenLease) await page.bringToFront();
     await wait(
       'reopened tab native picture',
       async () =>
@@ -2005,31 +2219,46 @@ async function execute(c) {
     const control = before.controls.find((v) => usable(v) && v.id === c.id && v.class === 'ComboBox');
     assert(control, 'Missing real combo ' + c.id);
     if (control.combo?.selection === c.index) return control;
+    const clickedAtMs = performance.now();
     await click(control.rect[2] - 8, (control.rect[1] + control.rect[3]) / 2);
-    await delay(150);
-    const opened = await state();
-    const popup = opened.controls.find(
-      (v) => usable(v) && v.class.toLowerCase() === 'combodropwin' && Math.abs(v.rect[0] - control.rect[0]) < 2,
+    const popup = await wait(
+      'actual combo popup ' + c.id,
+      async () =>
+        (await state()).controls.find(
+          (v) => usable(v) && v.class.toLowerCase() === 'combodropwin' && Math.abs(v.rect[0] - control.rect[0]) < 2,
+        ),
+      3000,
     );
-    if (popup) {
-      // The pinned native skirmish controls draw 23-pixel rows. Their custom
-      // popup does not take keyboard focus, so select its actual visible row.
-      const rowY = popup.rect[1] + 11 + c.index * 23;
-      assert(rowY < popup.rect[3], 'Requested native combo row must be visible');
-      await shot(`combo-${c.id}-open`);
-      await click((popup.rect[0] + popup.rect[2]) / 2, rowY);
-    } else {
-      await page.keyboard.press('Home');
-      for (let i = 0; i < c.index; i++) {
-        await ownerIdle();
-        await page.keyboard.press('ArrowDown');
-      }
-      await page.keyboard.press('Enter');
-    }
-    await delay(300);
-    const after = await state();
-    const selected = after.controls.find((v) => v.hwnd === control.hwnd);
-    await record('combo-selection', { id: c.id, requested: c.index, before: control.combo, after: selected?.combo });
+    const popupWaitMs = performance.now() - clickedAtMs;
+    // The pinned skirmish controls draw 23-pixel rows. Their custom popup
+    // does not take keyboard focus; a late popup must not fall through to keys.
+    const rowY = popup.rect[1] + 11 + c.index * 23;
+    assert(rowY < popup.rect[3], 'Requested native combo row must be visible');
+    const drawCount = await page.evaluate(() => window.__phase7Presentation?.count ?? null);
+    if (drawCount !== null && !webRoute)
+      await wait(
+        'combo picture after popup ' + c.id,
+        () => page.evaluate((count) => (window.__phase7Presentation?.count ?? count) > count, drawCount),
+        3000,
+      );
+    await shot(`combo-${c.id}-open`);
+    await click((popup.rect[0] + popup.rect[2]) / 2, rowY);
+    const selected = await wait(
+      'actual combo selection ' + c.id,
+      async () => {
+        const selected = (await state()).controls.find((v) => v.hwnd === control.hwnd);
+        return selected?.combo?.selection === c.index ? selected : null;
+      },
+      3000,
+    );
+    await record('combo-selection', {
+      id: c.id,
+      requested: c.index,
+      before: control.combo,
+      after: selected?.combo,
+      popupWaitMs,
+      elapsedMs: performance.now() - clickedAtMs,
+    });
     assert.equal(selected?.combo?.selection, c.index, 'Actual combo selection did not match ordinary input');
     return selected;
   }
@@ -2457,6 +2686,7 @@ async function cleanup() {
   if (cleanupPromise) return cleanupPromise;
   return (cleanupPromise = (async () => {
     clearInterval(rssTimer);
+    await releaseOwnedScreen('cleanup').catch((error) => record('screen-release-error', { error: String(error) }));
     if (acceptanceRates) {
       await acceptanceRates.stop().catch((error) => record('played-match-observer-cleanup-error', String(error)));
       acceptanceRates = null;
@@ -2492,6 +2722,7 @@ async function cleanup() {
         if ((await Promise.race([ownedChromeExit, delay(3000).then(() => null)])) === null) ownedChrome.kill('SIGKILL');
       }
     } else await browser?.close().catch(() => {});
+    if (screenCourtesy) await restoreForegroundApp(originalForegroundApp, 'cleanup-after-browser-close');
     await server?.close().catch(() => {});
     if (hdAtlasAlias) await unlink(hdAtlasAlias).catch(() => {});
     if (privateDir) await writeFile(join(privateDir, 'stop'), 'stop\n').catch(() => {});
@@ -2543,6 +2774,11 @@ for (const signal of ['SIGINT', 'SIGTERM'])
   });
 try {
   await ownerIdle();
+  if (screenCourtesy) {
+    assert(phase === 'phase34' && !fullWindow, 'Courtesy-screen runs use the ordinary-window owned Chrome route');
+    originalForegroundApp = foregroundApp();
+    await record('screen-original-foreground', originalForegroundApp);
+  }
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
@@ -2804,6 +3040,7 @@ try {
     });
   });
   page = await context.newPage();
+  if (screenCourtesy) await restoreForegroundApp(originalForegroundApp, 'ordinary-window-created');
   directMouseMove = page.mouse.move.bind(page.mouse);
   if (['phase26', 'phase34'].includes(phase) || ['phase32', 'phase33', 'phase34'].includes(phase)) {
     page.mouse.move = humanMove;
@@ -2944,6 +3181,7 @@ try {
       );
     if (await start.isVisible()) {
       if (phase === 'phase34') {
+        if (screenCourtesy) await beginOwnedScreen('startup-fullscreen-start', { fullscreen: false });
         await activateOwnedChrome('before-start');
         if (feelSettings.smallWindow) await setInitialWindowBounds();
       }
@@ -3061,6 +3299,7 @@ try {
     browserWindow: await cdp.send('Browser.getWindowForTarget'),
     hello: webRoute ? await state() : await worker().evaluate(() => globalThis.__auditCore.hello),
   });
+  if (screenCourtesy) await releaseOwnedScreen('startup-picture-complete');
   await writeFile(join(out, 'ready'), 'ready\n');
   const until = Math.min(harnessDeadline, scopeDeadline);
   const done = new Set();
@@ -3078,6 +3317,9 @@ try {
         await record('command', { file, action: cmd.action });
         if (cmd.action === 'close') close = true;
       } catch (e) {
+        await releaseOwnedScreen('command-error').catch((error) =>
+          record('screen-release-error', { error: String(error) }),
+        );
         await writeFile(
           join(out, file.replace('command-', 'result-')),
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),

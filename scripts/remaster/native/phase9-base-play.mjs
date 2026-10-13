@@ -6,6 +6,8 @@ import { spawnSync } from 'node:child_process';
 const SIDEBAR = 0x87f7e8;
 const STRIPS = SIDEBAR + 0x1544;
 const STRIP_SIZE = 0xf94;
+const PLACEMENT = SIDEBAR + 0x1174;
+const CELL_VTABLE = 0x7e4eec;
 const own = (state) => state.objects.filter((object) => object.owner === state.localHouse && object.health > 0);
 const powerTypes = /^(GAPOWR|NAPOWR|YAPOWR)$/;
 const barracksTypes = /^(GAPILE|NAHAND|YABRCK)$/;
@@ -30,6 +32,12 @@ export async function runPhase9BasePlay(api) {
     met: false,
   };
   const started = performance.now();
+  const infantryCount = api.trainInfantryCount ?? 10;
+  const vehicleCount = api.trainVehicleCount ?? 10;
+  for (const count of [infantryCount, vehicleCount])
+    if (!Number.isInteger(count) || count < 1 || count > 30)
+      throw new Error('Ordinary training counts must be integers from 1 to 30');
+  report.buildTimings = [];
   const guard = async () => {
     await api.ownerIdle?.();
   };
@@ -88,16 +96,43 @@ export async function runPhase9BasePlay(api) {
     const result = await api.point(Math.round(point.x), Math.round(point.y));
     return Array.isArray(result) ? { x: result[0], y: result[1] } : result;
   };
+  let lastBrowserPoint = null;
   const move = async (point) => {
     await guard();
     const browser = await browserPoint(point);
-    await api.page.mouse.move(browser.x, browser.y);
+    // The phase34 adapter already supplies one timed continuous path. Nesting
+    // it inside another path would turn every small step into a full journey.
+    if (api.page.mouse.move.name === 'humanMove') {
+      await api.page.mouse.move(browser.x, browser.y);
+      lastBrowserPoint = browser;
+      return;
+    }
+    if (!lastBrowserPoint) {
+      const pointer = (await peek()).sidebar.pointer;
+      if (!pointer) throw new Error('An observed native pointer is required before continuous movement');
+      lastBrowserPoint = await browserPoint(pointer);
+    }
+    const from = lastBrowserPoint;
+    const distance = Math.hypot(browser.x - from.x, browser.y - from.y);
+    // A practised player crosses the page in a few hundred milliseconds. Every
+    // move follows a timed path; the existing click adapter still owns presses.
+    const duration = Math.min(420, Math.max(120, distance * 0.22));
+    const steps = Math.max(2, Math.ceil(duration / 8));
+    const movementStarted = performance.now();
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      await api.page.mouse.move(from.x + (browser.x - from.x) * t, from.y + (browser.y - from.y) * t);
+      const remaining = movementStarted + duration * t - performance.now();
+      if (remaining > 0) await delay(remaining);
+    }
+    lastBrowserPoint = browser;
   };
   const click = async (point, button = 'left') => {
     await guard();
+    await move(point);
     // Keep the existing battle helper's click adapter contract.
     await api.click(Math.round(point.x), Math.round(point.y), 'quick', button);
-    await delay(120);
+    await delay(80);
   };
   const key = async (value, heldMs = 100) => {
     await guard();
@@ -168,7 +203,120 @@ export async function runPhase9BasePlay(api) {
     x: cameo.x + state.sidebar.layout.cameo.width / 2,
     y: cameo.y + state.sidebar.layout.cameo.height / 2,
   });
+  const placement = async () => {
+    const raw = await memory(PLACEMENT, 0x3c);
+    return {
+      center: { x: raw.readInt16LE(0), y: raw.readInt16LE(2) },
+      offset: { x: raw.readInt16LE(4), y: raw.readInt16LE(6) },
+      foundation: raw.readUInt32LE(8),
+      proximity: raw[0xc] === 1,
+      building: raw.readUInt32LE(0x30),
+      type: raw.readUInt32LE(0x34),
+      owner: raw.readInt32LE(0x38),
+    };
+  };
+  const freeFoundations = async (state, anchors, preview, deadline) => {
+    if (preview.foundation < 0x10000 || preview.foundation % 4 || !preview.building || !preview.type)
+      throw new Error('The original game has not armed a real building foundation');
+    const raw = await memory(preview.foundation, 120 * 4);
+    const footprint = [];
+    let complete = false;
+    for (let index = 0; index < 120; index++) {
+      const x = raw.readInt16LE(index * 4),
+        y = raw.readInt16LE(index * 4 + 2);
+      if (x === 0x7fff && y === 0x7fff) {
+        complete = true;
+        break;
+      }
+      if (Math.abs(x) > 10 || Math.abs(y) > 10) throw new Error('Implausible native placement footprint');
+      footprint.push({ x: x + preview.offset.x, y: y + preview.offset.y });
+    }
+    if (!complete || !footprint.length) throw new Error('Native placement footprint is incomplete');
+    const map = await memory(SIDEBAR + 0x13c, 8);
+    const items = map.readUInt32LE(0),
+      capacity = map.readInt32LE(4);
+    if (items < 0x10000 || items % 4 || capacity < 1 || capacity > 512 * 512)
+      throw new Error('Native map cell array is unavailable');
+    // The native CanThisExistHere return at 0x47CA40 reads this Buildable byte.
+    // No land class or occupation is changed by the driver.
+    const land = await memory(0x89ea60, 12 * 36);
+    const cells = new Map();
+    const readCell = async (x, y) => {
+      const key = `${x},${y}`;
+      if (cells.has(key)) return cells.get(key);
+      if (x < 0 || x >= 512 || y < 0 || y * 512 + x >= capacity) return null;
+      const pointer = await u32(items + (y * 512 + x) * 4);
+      if (pointer < 0x10000 || pointer % 4) return null;
+      const bytes = await memory(pointer, 0x148);
+      if (bytes.readUInt32LE(0) !== CELL_VTABLE || bytes.readInt16LE(0x24) !== x || bytes.readInt16LE(0x26) !== y)
+        return null;
+      const value = {
+        x,
+        y,
+        pointer,
+        level: bytes.readInt8(0x11b),
+        slope: bytes[0x11c],
+        land: bytes.readInt32LE(0xec),
+        firstObject: bytes.readUInt32LE(0xe4),
+        occupation: bytes.readUInt32LE(0x124),
+        altFlags: bytes.readUInt32LE(0x12c),
+        flags: bytes.readUInt32LE(0x140),
+        overlay: bytes.readInt32LE(0x44),
+      };
+      cells.set(key, value);
+      return value;
+    };
+    const candidates = new Map();
+    for (const anchor of own(state).filter((object) => anchors.includes(object.uid))) {
+      for (let dx = -6; dx <= 6; dx++)
+        for (let dy = -6; dy <= 6; dy++) {
+          const distance = Math.max(Math.abs(dx), Math.abs(dy));
+          if (distance < 2) continue;
+          const x = Math.floor(anchor.x / 256) + dx,
+            y = Math.floor(anchor.y / 256) + dy;
+          const key = `${x},${y}`,
+            before = candidates.get(key);
+          if (!before || distance < before.distance) candidates.set(key, { x, y, distance, anchorUid: anchor.uid });
+        }
+    }
+    const available = [];
+    for (const candidate of [...candidates.values()].sort(
+      (a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x,
+    )) {
+      if (performance.now() >= deadline) break;
+      const ground = await readCell(candidate.x, candidate.y);
+      if (!ground) continue;
+      const point = project(
+        { x: candidate.x * 256 + 128, y: candidate.y * 256 + 128, z: ground.level * 104 },
+        state.view,
+      );
+      if (!tactical(point, state, 30)) continue;
+      const observed = [];
+      for (const offset of footprint) {
+        const cell = await readCell(candidate.x + offset.x, candidate.y + offset.y);
+        if (
+          !cell ||
+          cell.firstObject ||
+          cell.occupation ||
+          cell.slope ||
+          cell.flags & 0x500 ||
+          !(cell.altFlags & 8) ||
+          cell.level !== ground.level ||
+          cell.overlay !== -1 ||
+          cell.land < 0 ||
+          cell.land >= 12 ||
+          !land[cell.land * 36]
+        )
+          break;
+        observed.push(cell);
+      }
+      if (observed.length === footprint.length) available.push({ ...candidate, point, cells: observed });
+      if (available.length >= 8) break;
+    }
+    return { footprint, candidates: available, scannedCells: cells.size };
+  };
   const build = async (label, types, anchors) => {
+    const buildStarted = performance.now();
     let state = await openTab(0);
     const cameo = state.sidebar.cameos.find(
       (value) => value.kind === 'building' && types.test(value.id) && !value.darkened,
@@ -178,7 +326,7 @@ export async function runPhase9BasePlay(api) {
         `The actual sidebar has no enabled ${label} cameo: ${state.sidebar.cameos.map((value) => value.id).join(', ')}`,
       );
     const before = await factory(cameo, 0);
-    if (!cameo.ready && !before.pointer) {
+    if (!cameo.ready && (!before.pointer || !before.object)) {
       await click(cameoPoint(cameo, state));
       const begun = await wait(
         'real ' + label + ' production begins',
@@ -217,94 +365,105 @@ export async function runPhase9BasePlay(api) {
         .filter((value) => value.kind === 'building')
         .map((value) => value.uid),
     );
-    const offsets = [
-      [110, 45],
-      [-110, 45],
-      [90, -55],
-      [-90, -55],
-      [0, 95],
-      [0, -85],
-      [140, 0],
-      [-140, 0],
-      [70, 80],
-      [-70, 80],
-      [130, 65],
-      [-130, 65],
-      [70, -85],
-      [-70, -85],
-      [180, 75],
-      [-180, 75],
-      [180, -75],
-      [-180, -75],
-      [0, 130],
-      [0, -130],
-    ];
+    const placementStarted = performance.now(),
+      placementDeadline = placementStarted + 20000;
+    await click(cameoPoint(ready.cameo, ready.state));
+    const armed = await wait(
+      'native armed ' + label + ' foundation',
+      async () => {
+        const value = await placement();
+        return value.building === ready.factory.object && value.foundation ? value : null;
+      },
+      2000,
+    );
+    state = await peek();
+    const search = await freeFoundations(state, anchors, armed, placementDeadline);
+    await record('base-' + label + '-foundation-search', search);
     const attempts = [];
-    for (const anchorUid of anchors) {
-      for (const [dx, dy] of offsets) {
-        state = await peek();
-        const anchor = own(state).find((value) => value.uid === anchorUid);
-        if (!anchor) continue;
-        const origin = project(anchor, state.view);
-        const point = { x: origin.x + dx, y: origin.y + dy };
-        if (!tactical(point, state, 10)) continue;
-        const currentCameo = state.sidebar.cameos.find((value) => value.id === cameo.id && value.ready);
-        if (!currentCameo) throw new Error(`Ready ${label} vanished before actual placement`);
-        await click(cameoPoint(currentCameo, state));
-        await move(point);
-        await delay(200);
-        const preview = await peek();
-        const previewFile = await shot(`${label}-preview-${attempts.length + 1}`);
-        // The original foundation preview is left intact. No terrain legality
-        // is inferred from coordinates or made true by modifying cells.
-        await click(point);
-        let placed = null;
-        try {
-          placed = await stateWait(
-            'new owned ' + label,
-            (next) =>
-              own(next).find(
-                (value) => value.kind === 'building' && value.type === cameo.id && !previous.has(value.uid),
-              ),
-            1800,
-          );
-        } catch {
-          // A rejected foundation is normal game input and remains evidence.
-        }
-        const attempt = {
-          anchorUid,
-          point,
-          previewFrame: preview.frame,
-          pointer: preview.sidebar.pointer,
-          previewFile,
-          placed: placed?.observed ?? null,
+    for (const candidate of search.candidates) {
+      if (performance.now() >= placementDeadline) break;
+      state = await peek();
+      const point = project(
+        { x: candidate.x * 256 + 128, y: candidate.y * 256 + 128, z: candidate.cells[0].level * 104 },
+        state.view,
+      );
+      await move(point);
+      let preview = null;
+      try {
+        preview = await wait(
+          'fresh native foundation preview',
+          async () => {
+            const value = await placement();
+            return value.building === ready.factory.object &&
+              value.center.x === candidate.x &&
+              value.center.y === candidate.y
+              ? value
+              : null;
+          },
+          Math.min(1000, Math.max(1, placementDeadline - performance.now())),
+        );
+      } catch {
+        /* A stale preview is unknown and never authorizes a placement click. */
+      }
+      const attempt = { cell: { x: candidate.x, y: candidate.y }, point, preview, clicked: false, placed: null };
+      attempts.push(attempt);
+      if (!preview?.proximity || preview.owner !== state.localHouse) continue;
+      const previewFile = await shot(label + '-preview-' + attempts.length);
+      attempt.previewFile = previewFile;
+      await click(point);
+      attempt.clicked = true;
+      let placed = null;
+      try {
+        placed = await stateWait(
+          'new owned ' + label,
+          (next) =>
+            own(next).find((value) => value.kind === 'building' && value.type === cameo.id && !previous.has(value.uid)),
+          1500,
+        );
+      } catch {
+        /* A real rejection or changed cell remains a failure, not a success. */
+      }
+      attempt.placed = placed?.observed ?? null;
+      await record('base-' + label + '-placement-attempt', attempt);
+      if (placed) {
+        const completed = await stateWait(
+          label + ' placed and construction complete',
+          (next) => own(next).find((value) => value.uid === placed.observed.uid && constructionComplete(value)),
+          15000,
+        );
+        const timing = {
+          label,
+          productionAndPlacementMs: performance.now() - buildStarted,
+          placementMs: performance.now() - placementStarted,
+          previewCount: attempts.length,
+          placementClicks: attempts.filter((value) => value.clicked).length,
         };
-        attempts.push(attempt);
-        await record('base-' + label + '-placement-attempt', attempt);
-        if (placed) {
-          const completed = await stateWait(
-            label + ' placed and construction complete',
-            (next) => own(next).find((value) => value.uid === placed.observed.uid && constructionComplete(value)),
-            15000,
-          );
-          await record('base-' + label + '-placed', {
-            id: cameo.id,
-            building: completed.observed,
-            frame: completed.state.frame,
-            attempts,
-            verified: true,
-          });
-          await shot(label + '-placed');
-          return completed.observed;
-        }
-        // Cancel the real rejected placement mode before rearming the cameo.
-        await click(point, 'right');
+        report.buildTimings.push(timing);
+        await record('base-' + label + '-placed', {
+          id: cameo.id,
+          building: completed.observed,
+          frame: completed.state.frame,
+          attempts,
+          timing,
+          verified: true,
+        });
+        await shot(label + '-placed');
+        return completed.observed;
+      }
+      if (!(await placement()).building) {
+        const current = await peek();
+        const currentCameo = current.sidebar.cameos.find((value) => value.id === cameo.id && value.ready);
+        if (!currentCameo) throw new Error('Ready building disappeared after a real rejected placement');
+        await click(cameoPoint(currentCameo, current));
       }
     }
-    throw new Error(`The original game rejected every observed ${label} foundation: ${JSON.stringify(attempts)}`);
+    await shot(label + '-placement-failed');
+    throw new Error(
+      `No observed free ${label} footprint passed the native preview within 20000 ms: ${JSON.stringify(attempts)}`,
+    );
   };
 
-  const trainAndMove = async (label, kind, types, tab, originUid) => {
+  const trainAndMove = async (label, kind, types, tab, originUid, count) => {
     let state = await openTab(tab);
     const cameo = state.sidebar.cameos.find((value) => value.kind === kind && types.test(value.id) && !value.darkened);
     if (!cameo) throw new Error(`The actual ${kind} tab has no enabled basic combat ${kind} cameo`);
@@ -313,7 +472,7 @@ export async function runPhase9BasePlay(api) {
         .filter((value) => value.kind === kind)
         .map((value) => value.uid),
     );
-    for (let index = 0; index < 3; index++) {
+    for (let index = 0; index < count; index++) {
       state = await peek();
       const current = state.sidebar.cameos.find((value) => value.id === cameo.id);
       if (!current) throw new Error(`The live ${kind} cameo disappeared while queuing units`);
@@ -322,14 +481,14 @@ export async function runPhase9BasePlay(api) {
     }
     await shot(label + '-producing');
     const trained = await stateWait(
-      'three newly trained owned ' + label,
+      count + ' newly trained owned ' + label,
       (next) => {
         const fresh = own(next).filter(
           (value) => value.kind === kind && value.type === cameo.id && !previousUnits.has(value.uid),
         );
-        return fresh.length >= 3 ? fresh.slice(0, 3) : null;
+        return fresh.length >= count ? fresh.slice(0, count) : null;
       },
-      90000,
+      120000,
     );
     await record('base-' + label + '-trained', {
       id: cameo.id,
@@ -338,27 +497,10 @@ export async function runPhase9BasePlay(api) {
       verified: true,
     });
     await shot(label + '-trained');
-    if (kind === 'vehicle') {
-      // A freshly delivered tank can still be behind the factory's roof. Its
-      // ground point then hits the building, not the tank. Use the original
-      // combat-unit selection hotkey and still verify every newly trained UID.
-      await key('p');
-      await record('base-' + label + '-group-selection', { input: 'Ordinary P combat-unit selection' });
-    } else {
-      await select(trained.observed[0].uid);
-      await guard();
-      await api.page.keyboard.down('Shift');
-      try {
-        for (const unit of trained.observed.slice(1)) {
-          state = await peek();
-          const current = own(state).find((value) => value.uid === unit.uid);
-          if (!current) throw new Error('A newly trained unit was eliminated before group selection');
-          await click(project(current, state.view));
-        }
-      } finally {
-        await api.page.keyboard.up('Shift');
-      }
-    }
+    // P is the original combat selection hotkey. It avoids clicking an emerging
+    // tank through the factory roof and selects an ordinary mixed army for play.
+    await key('p');
+    await record('base-' + label + '-group-selection', { input: 'Ordinary P combat-unit selection', count });
     let retrySelectionAt = performance.now() + 750;
     const selected = await wait('all newly trained units selected', async () => {
       const next = await api.commandState();
@@ -366,10 +508,10 @@ export async function runPhase9BasePlay(api) {
       const selectedUnits = own(next).filter(
         (value) => value.selected && trained.observed.some((unit) => unit.uid === value.uid),
       );
-      if (selectedUnits.length === 3) return { state: next, observed: selectedUnits };
+      if (selectedUnits.length === count) return { state: next, observed: selectedUnits };
       // Newly created vehicles can still be leaving the factory when P first
       // runs. A later exit does not automatically join the earlier selection.
-      if (kind === 'vehicle' && performance.now() >= retrySelectionAt) {
+      if (performance.now() >= retrySelectionAt) {
         await key('p');
         retrySelectionAt = performance.now() + 750;
       }
@@ -490,6 +632,14 @@ export async function runPhase9BasePlay(api) {
 
   try {
     await memorySnapshot('start');
+    for (const [address, bytes] of [
+      [0x4a8bf7, [0x8b, 0x83, 0x7c, 0x11, 0, 0]],
+      [0x47ed82, [0xa0, 0x68, 0x09, 0x88, 0]],
+      [0x47ca40, [0x8a, 0x04, 0x8d, 0x60, 0xea, 0x89, 0]],
+    ]) {
+      if (!(await memory(address, bytes.length)).equals(Buffer.from(bytes)))
+        throw new Error('Pinned YR placement observation signature mismatch');
+    }
     if ((await api.inputState()).modal) throw new Error('A genuine battle must be resumed before base play');
     const zFactor = (await memory(0xb0cd48, 8)).readDoubleLE();
     if (!Number.isFinite(zFactor) || zFactor <= 0 || zFactor > 4)
@@ -511,6 +661,7 @@ export async function runPhase9BasePlay(api) {
       const mcv = own(state).find((object) => object.kind === 'vehicle' && mcvTypes.test(object.type));
       if (!mcv) throw new Error('The actual owned army has no MCV or construction yard');
       const selected = await select(mcv.uid);
+      report.deploymentAtMs = performance.now();
       await key('d', 150);
       try {
         yard = (
@@ -550,6 +701,7 @@ export async function runPhase9BasePlay(api) {
       )
     ).observed;
     report.yard = yard;
+    report.deploymentAtMs ??= performance.now();
     await shot('yard');
     const power = await build('power-plant', powerTypes, [yard.uid]);
     report.powerPlant = power;
@@ -560,11 +712,6 @@ export async function runPhase9BasePlay(api) {
     }
     const barracks = await build('barracks', barracksTypes, [yard.uid, power.uid]);
     report.barracks = barracks;
-    if (!api.buildOnly) {
-      const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid);
-      report.trainedUnits = infantry.trained;
-      report.movedUnits = infantry.moved;
-    }
     const refinery = await build('refinery', refineryTypes, [yard.uid, power.uid, barracks.uid]);
     report.refinery = refinery;
     if (api.stopAfter === 'refinery') {
@@ -574,10 +721,33 @@ export async function runPhase9BasePlay(api) {
     }
     const warFactory = await build('war-factory', warFactoryTypes, [yard.uid, power.uid, barracks.uid, refinery.uid]);
     report.warFactory = warFactory;
+    report.deployToWarFactoryMs = performance.now() - report.deploymentAtMs;
+    await record('base-build-sequence-time', {
+      deployToWarFactoryMs: report.deployToWarFactoryMs,
+      steps: report.buildTimings,
+      source: 'Actual completed owned buildings after ordinary deploy/sidebar input',
+    });
+    if (api.stopAfter === 'war-factory') {
+      report.buildingsOnly = true;
+      report.stoppedAfter = 'war-factory';
+      return report;
+    }
+    const secondRefinery = await build('second-refinery', refineryTypes, [
+      yard.uid,
+      power.uid,
+      barracks.uid,
+      refinery.uid,
+      warFactory.uid,
+    ]);
+    report.secondRefinery = secondRefinery;
     if (!api.buildOnly) {
-      const vehicles = await trainAndMove('vehicles', 'vehicle', combatVehicleTypes, 3, warFactory.uid);
+      const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid, infantryCount);
+      report.trainedUnits = infantry.trained;
+      report.movedUnits = infantry.moved;
+      const vehicles = await trainAndMove('vehicles', 'vehicle', combatVehicleTypes, 3, warFactory.uid, vehicleCount);
       report.trainedVehicles = vehicles.trained;
       report.movedVehicles = vehicles.moved;
+      report.newlyTrainedCount = infantry.trained.length + vehicles.trained.length;
     }
     report.buildingsOnly = !!api.buildOnly;
     report.met = !api.buildOnly;
