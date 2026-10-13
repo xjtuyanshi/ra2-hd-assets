@@ -552,8 +552,9 @@ function superweapon(
   if (m.u32(sw + 0x28) !== type) throw new Error('inconsistent sidebar superweapon');
   const chargeDrain = !!m.u8(type + 0xe5),
     isReady = !!m.u8(sw + 0x6f);
+  // 0x6CBEFC/0x6CC2C6 skip +0x7C for ordinary supers, whose unused state can remain -1.
   const hold = !!m.u8(sw + 0x70),
-    state = bounded(m.i32(sw + 0x7c), 0, 2);
+    state = chargeDrain ? bounded(m.i32(sw + 0x7c), 0, 2) : null;
   // These booleans describe TXT_READY/TXT_HOLD, not firestorm-on or charging captions (contract has no such fields).
   const ready = !hold && (chargeDrain ? state === 1 : isReady);
   let progress: number | null = null;

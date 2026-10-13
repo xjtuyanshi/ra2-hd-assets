@@ -523,6 +523,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let preparationAskedAt = -Infinity;
   let keyFrameAt: number | null = null;
   let hidePending: { at: number; reason: string } | null = null;
+  let healthPending = false;
+  let healthCheckedAt = -Infinity;
+  let completeStateSerial = 0;
   let recoveringState = false;
   let recoveryOriginalFrameSeen = false;
   let presentation: HdBridgeTransition['to'] = 'original';
@@ -887,7 +890,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       setHole(null, reason);
       return;
     }
-    if (hole || passthroughRequest) hidePending ??= { at: performance.now(), reason };
+    if (hole || passthroughRequest) {
+      hidePending ??= { at: performance.now(), reason };
+      // A later explicit failure supersedes an earlier ordinary missing-publication wait.
+      if (reason === 'state-reader-error' || reason === 'state-apply-error') hidePending.reason = reason;
+    }
   };
   const recoverOriginal = (reason: string) => {
     hidePending = null;
@@ -909,6 +916,47 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     ui?.update(null);
     if (live) live.outOfSight = true;
     syncPreparationNotice();
+  };
+  const checkUnavailableState = (reason: string) => {
+    const now = performance.now();
+    if (reason === 'state-reader-error' || reason === 'state-apply-error') {
+      recoverOriginal(reason);
+      return;
+    }
+    if (healthPending || now - healthCheckedAt < STATE_HIDE_HOLD_MS || recoveringState) return;
+    if (typeof host.vm.getDiagnostics !== 'function') return;
+    healthPending = true;
+    healthCheckedAt = now;
+    const epoch = battleEpoch;
+    const serial = completeStateSerial;
+    void host.vm
+      .getDiagnostics('usage')
+      .then((diagnostics) => {
+        if (
+          stopped ||
+          epoch !== battleEpoch ||
+          serial !== completeStateSerial ||
+          !enabled ||
+          !nativeBattleSurface ||
+          nativeDialogSurface
+        )
+          return;
+        const health = diagnostics.native?.renderHealth as { unreadableSinceEpochMs?: number | null } | undefined;
+        const unreadableSince = health?.unreadableSinceEpochMs;
+        // A late or incomplete capture is not an unreadable game. Keep the last complete scene drawing while
+        // subscriptions catch up; only a confirmed persistent read fault may replace it with the original.
+        if (
+          typeof unreadableSince === 'number' &&
+          performance.timeOrigin + performance.now() - unreadableSince >= STATE_HIDE_HOLD_MS
+        )
+          recoverOriginal(reason);
+      })
+      .catch(() => {
+        // Session termination owns the game-closed notice. A failed diagnostic is not a mirror fault diagnosis.
+      })
+      .finally(() => {
+        healthPending = false;
+      });
   };
   const onGameFrame = (picture: VmFrame) => {
     if (stopped) return;
@@ -1151,6 +1199,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (stopped) return;
     // A retained native mirror can outlive Abort/score's switch back to the menu video mode.
     if (nativeMenuSurface || nativeDialogSurface) state = null;
+    if (state?.map && state.view) completeStateSerial++;
+    if (!state && native && nativeBattleSurface && !nativeDialogSurface && revealed && !recoveringState) {
+      // Keep the complete battlefield and sidebar together, including their map identity and draw queue.
+      // Null means no new coherent publication; it must not erase the last one or flash the original art.
+      pollFailed = false;
+      hideForUnavailableState('state-unavailable');
+      return;
+    }
     const receivedAt = performance.now();
     pollFailed = false;
     diagnostics?.state(state);
@@ -1533,10 +1589,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       polling &&
       now - lastPollAt >= STATE_REQUEST_STALL_MS
     )
-      recoverOriginal('state-reader-timeout');
+      checkUnavailableState('state-reader-timeout');
     if (hidePending && now - hidePending.at >= STATE_HIDE_HOLD_MS) {
       const reason = hidePending.reason;
-      recoverOriginal(reason);
+      checkUnavailableState(reason);
     }
     if (hole && !fadeFinished && fadeStartedAt !== null) {
       if (now - fadeStartedAt >= CROSS_FADE_MS) {

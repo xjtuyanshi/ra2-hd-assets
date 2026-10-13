@@ -740,6 +740,23 @@ export async function runPhase9BasePlay(api) {
       warFactory.uid,
     ]);
     report.secondRefinery = secondRefinery;
+    if (api.buildRadar) {
+      const anchors = [yard.uid, power.uid, barracks.uid, refinery.uid, warFactory.uid, secondRefinery.uid];
+      // The same ordinary production and placement path builds the side's real
+      // radar provider; a minimap click is meaningful only after it is powered.
+      report.radarPowerPlant = await build('radar-power-plant', powerTypes, anchors);
+      anchors.push(report.radarPowerPlant.uid);
+      report.radarBuilding = await build('radar', /^(GAAIRC|AMRADR|NARADR|YAPSIS)$/, anchors);
+      anchors.push(report.radarBuilding.uid);
+      if ((await peek()).sidebar.power.low)
+        report.additionalRadarPower = await build('radar-additional-power', powerTypes, anchors);
+      await stateWait(
+        'built and powered native radar',
+        (next) => next.sidebar?.radarActive === true && next.sidebar.power.low === false,
+        15000,
+      );
+      await shot('radar-active');
+    }
     if (!api.buildOnly) {
       const infantry = await trainAndMove('infantry', 'infantry', infantryTypes, 2, barracks.uid, infantryCount);
       report.trainedUnits = infantry.trained;

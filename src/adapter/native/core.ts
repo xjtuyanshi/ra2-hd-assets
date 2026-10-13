@@ -35,6 +35,7 @@ import {
   NativeMirrorMemory,
   NativeMemoryMiss,
   NativeReaderWorkingSet,
+  admitNativeRanges,
   coalesceNativePages,
   readNativeWithRetry,
   runNativeTransaction,
@@ -316,6 +317,7 @@ export class NativeCore {
   private cadenceHandoffFrame: number | null = null;
   private readonly cadenceEvents: NativeCadenceEvent[] = [];
   private lastMirrorFlags = 0;
+  private unreadableSinceEpochMs: number | null = null;
   private previousLogicFrame: number | null = null;
   private menuSurface: boolean | null = null;
   private awaitingBattleMirror = false;
@@ -505,7 +507,10 @@ export class NativeCore {
     this.lastMirrorFlags = update.flags;
     this.cadence.mirrors++;
     if (update.flags & 1) this.cadence.truncatedMirrors++;
-    if (update.flags & 4) this.cadence.invalidMirrors++;
+    if (update.flags & 4) {
+      this.cadence.invalidMirrors++;
+      this.unreadableSinceEpochMs ??= performance.timeOrigin + performance.now();
+    }
     const appliedAt = performance.now();
     const complete = this.memory.apply(update);
     const applyMs = performance.now() - appliedAt;
@@ -847,7 +852,11 @@ export class NativeCore {
     const epoch = this.readerEpoch;
     const operation = async () => {
       if (!this.policy || !this.hello || this.closed || epoch !== this.readerEpoch) return;
-      const next = mergeRanges([...this.policy.ranges, ...this.workingSet.ranges, ...this.additionalRanges]);
+      const desired = mergeRanges([...this.policy.ranges, ...this.workingSet.ranges, ...this.additionalRanges]);
+      if (sameRanges(desired, this.subscribed)) return;
+      // Camera jumps discover scattered render pages. Admit their strict misses before background map pages,
+      // spreading a new footprint across complete publications without changing the agent's capture budget.
+      const next = admitNativeRanges(this.policy.ranges, desired, this.subscribed, this.memory.missingRanges, 256);
       if (sameRanges(next, this.subscribed)) return;
       const beforeReset = this.resetSerial;
       const revisionSupported = this.hello.limits.pageRemovals === true && this.hello.limits.subscribeRevision === true;
@@ -975,6 +984,9 @@ export class NativeCore {
       !this.running ||
       this.closed ||
       this.recovering ||
+      // A bounded capture can fall behind under scrolling. Rebuilding its working set would throw away
+      // catch-up progress; only an actual unreadable range justifies that reset while truncation persists.
+      (this.unreadableSinceEpochMs === null && (this.lastMirrorFlags & 1) !== 0) ||
       this.renderRequestedAt === null ||
       (!this.renderPending && now - this.renderDemandAt >= 1000) ||
       this.menuSurface === true ||
@@ -1097,6 +1109,7 @@ export class NativeCore {
     this.renderRequestedAt = null;
     this.completeRenderAt = -Infinity;
     this.completeRenderFrame = null;
+    this.unreadableSinceEpochMs = null;
     this.battleResumedAt = performance.now();
     // An incomplete reader never reaches working-set retirement. End its allocation scope at the actual video
     // mode/frame epoch instead, before the next map can inherit freed or over-capacity pages.
@@ -1128,6 +1141,7 @@ export class NativeCore {
       return slot.previous;
     }
     let readPublication = -1;
+    let readInvalidMirrors = -1;
     if (slot === this.render) this.cadence.renderAttempts++;
     try {
       await this.preparePolicy();
@@ -1144,6 +1158,7 @@ export class NativeCore {
           if (slot === this.render) {
             this.cadence.renderReaderCalls++;
             readPublication = this.mirrorPublication;
+            readInvalidMirrors = this.cadence.invalidMirrors;
           }
           try {
             slot.reader ??= factory();
@@ -1183,6 +1198,10 @@ export class NativeCore {
         if (cold) slot.coldAt = performance.now();
         await this.subscribe([]);
         if (epoch === this.readerEpoch && slot === this.render) {
+          // A later invalid capture can arrive while admission waits. A result built before that fault
+          // cannot clear its episode, even when the reset rate limit keeps the same reader epoch.
+          if (this.hasCurrentMirror() && readInvalidMirrors === this.cadence.invalidMirrors)
+            this.unreadableSinceEpochMs = null;
           // Subscription waits may receive newer images: cache the publication actually consumed by the reader.
           this.renderPublication = readPublication;
           this.renderPublicationEpoch = epoch;
@@ -1459,6 +1478,7 @@ export class NativeCore {
         mirrorComplete: this.memory.complete,
         awaitingLogicMirror: !this.policyPrepared || !this.memory.complete,
         mirrorMisses: this.memory.misses,
+        renderHealth: { unreadableSinceEpochMs: this.unreadableSinceEpochMs },
         lastReaderError: this.render.error ?? this.command.error ?? this.frame.error,
         readerErrors: { render: this.render.error, command: this.command.error, performance: this.frame.error },
         stateReadMs: this.stateReadMs,

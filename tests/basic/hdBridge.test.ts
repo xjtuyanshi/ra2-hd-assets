@@ -223,6 +223,9 @@ function setup(
     runtimeInfo: { backend: runtimeBackend },
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     getRenderPreparation: vi.fn(async (): Promise<GameRenderPreparation | null> => null),
+    getDiagnostics: vi.fn(async () => ({
+      native: { renderHealth: { unreadableSinceEpochMs: null as number | null } },
+    })),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
   const status = vi.fn((_text: string | null) => undefined);
@@ -2599,9 +2602,72 @@ describe('live original to HD transition', () => {
     harness.stop();
   });
 
-  it('returns an unavailable native battle to live original and fades only a newly complete state back', async () => {
+  it('keeps drawing the last complete native scene through late and incomplete mirrors without an art transition', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);
+    const view = await goLive(harness);
+    const before = harness.bridge()!.timeline.transitions.length;
+    const scene = harness.stop.scene();
+    const draws = view.render.mock.calls.length;
+    harness.setState(null);
+    await advance(17, 100);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.stop.scene()).toMatchObject({ map: scene!.map, objects: scene!.objects });
+    expect(view.render.mock.calls.length).toBeGreaterThan(draws);
+    expect(harness.bridge()!.timeline.transitions).toHaveLength(before);
+    harness.setState(battle(99));
+    await advance(17, 3);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(99);
+    expect(harness.bridge()!.timeline.transitions).toHaveLength(before);
+    harness.stop();
+  });
+
+  it('ignores fault diagnostics that arrive after a newer complete native state', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    let reply!: (value: { native: { renderHealth: { unreadableSinceEpochMs: number } } }) => void;
+    harness.vm.getDiagnostics.mockImplementationOnce(() => new Promise((resolve) => (reply = resolve)));
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    harness.setState(battle(88));
+    await advance(17, 2);
+    reply({ native: { renderHealth: { unreadableSinceEpochMs: performance.timeOrigin } } });
+    await settle();
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(88);
+    expect(harness.bridge()!.timeline.transitions.at(-1)?.to).toBe('hd');
+    harness.stop();
+  });
+
+  it('restores the original for an explicit reader failure after an ordinary missing publication', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    harness.setState(null);
+    await advance(17);
+    harness.vm.getRenderState.mockRejectedValue(new RangeError('Invalid native cell pointer-table descriptor'));
+    await advance(17);
+    await advance(501);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    expect(harness.bridge()!.timeline.transitions.at(-1)?.reason).toBe('state-reader-error');
+    expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
+    harness.nativeFrame(false);
+    harness.vm.getRenderState.mockResolvedValue(battle(99));
+    await advance(17, 3);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(99);
+    harness.stop();
+  });
+
+  it('returns a persistently unreadable native battle to live original and fades only a newly complete state back', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    harness.vm.getDiagnostics.mockImplementation(async () => ({
+      native: { renderHealth: { unreadableSinceEpochMs: performance.timeOrigin } },
+    }));
     const view = await goLive(harness);
     const firstFade = harness.bridge()!.timeline.fadeStartedAt!;
     harness.setState(null);
@@ -2648,6 +2714,9 @@ describe('live original to HD transition', () => {
   it('never waits on a pending native reader with the dead HD picture and rejects its late reply', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);
+    harness.vm.getDiagnostics.mockImplementation(async () => ({
+      native: { renderHealth: { unreadableSinceEpochMs: performance.timeOrigin } },
+    }));
     const view = await goLive(harness);
     let reply!: (state: GameRenderState) => void;
     harness.vm.getRenderState.mockImplementationOnce(() => new Promise((resolve) => (reply = resolve)));
@@ -2675,6 +2744,9 @@ describe('live original to HD transition', () => {
   it('keeps recovery notices subordinate to an original-view choice, dialogs, menus and disposal', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);
+    harness.vm.getDiagnostics.mockImplementation(async () => ({
+      native: { renderHealth: { unreadableSinceEpochMs: performance.timeOrigin } },
+    }));
     await goLive(harness);
     harness.setState(null);
     await advance(17);

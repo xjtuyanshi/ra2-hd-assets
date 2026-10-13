@@ -69,6 +69,9 @@ export async function toggleImmersiveFullscreen(canvas: HTMLCanvasElement): Prom
   } else {
     try {
       await (canvas.parentElement ?? canvas).requestFullscreen({ navigationUI: 'hide' });
+      // The toolbar button retains keyboard focus when its frame enters fullscreen.
+      // Return it to the game so the next real key, including Esc, reaches the VM.
+      if ((document.fullscreenElement as Element | null)?.contains(canvas)) canvas.focus({ preventScroll: true });
     } catch (error) {
       console.warn(t('[VM UI] 全屏请求被拒绝'), error);
     }

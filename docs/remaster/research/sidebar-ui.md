@@ -228,7 +228,10 @@ ready normal weapons have no clock. Charge-drain state2 uses
 `min(53,trunc(54*R/(T*Rules.multiplier)))/54`. A not-present instance yields frame0.
 Zero/negative durations and nonfinite multipliers are host corruption guards.
 Suspension selects Hold; charge-drain state1 selects Ready; ordinary Ready follows
-IsReady. The fixed contract cannot express `TXT_CHARGING` or `TXT_FIRESTORM_ON`;
+IsReady. Ordinary supers do not read or validate charge-drain state: the pinned
+branches at `0x6CBEFC` and `0x6CC2C6` skip `SW+0x7C` when `type+0xE5` is zero;
+that unused field can remain `-1`, including a ready American paradrop.
+The fixed contract cannot express `TXT_CHARGING` or `TXT_FIRESTORM_ON`;
 those captions are **not represented** by Ready/Hold. The reader never labels
 firestorm-on as Ready. Flashing reports an active FlashEndFrame window; the native
 blink phase itself is frame remainder16>8. Tab flashing similarly reports an

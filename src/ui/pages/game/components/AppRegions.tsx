@@ -1,4 +1,4 @@
-import { t, localizeText } from '../../../shared/i18n/translate';
+import { t } from '../../../shared/i18n/translate';
 import { createPortal } from 'react-dom';
 import { lazy, Suspense } from 'react';
 import { useStore } from '../../../shared/state/useStore';
@@ -94,7 +94,6 @@ export function BootRegion() {
 export function ScreenStatus() {
   const network = useStore(state.networkStatus),
     resource = useStore(state.resourceStatus);
-  const upscale = useStore(state.upscaleStatus);
   const hd = useStore(state.hdStatus);
   const runtime = useStore(state.runtimeNotice);
   const pictureNotice = runtime ?? hd;
@@ -123,9 +122,6 @@ export function ScreenStatus() {
           <p style={{ margin: '4px 0 0' }}>{t('鼠标锁定时，先按 Esc 解锁，再点按钮或再按 Esc。')}</p>
         </aside>
       )}
-      <output id="vm-upscale-status" role="status" aria-live="polite" hidden={upscale === null}>
-        {upscale && localizeText(upscale)}
-      </output>
       <output id="vm-hd-status" role="status" aria-live="polite" hidden={pictureNotice === null}>
         {pictureNotice}
       </output>

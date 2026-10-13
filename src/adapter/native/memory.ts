@@ -280,6 +280,43 @@ export function coalesceNativePages(pages: readonly number[]): NativeRange[] {
   }
   return ranges;
 }
+/** Keep current membership while admitting bounded new pages, reader misses before background discovery.
+ * This schedules subscriptions only: every admitted page still comes from one complete logic-boundary mirror. */
+export function admitNativeRanges(
+  required: readonly NativeRange[],
+  desired: readonly NativeRange[],
+  previous: readonly NativeRange[],
+  priority: readonly NativeRange[],
+  newPageLimit: number,
+): NativeRange[] {
+  if (!Number.isSafeInteger(newPageLimit) || newPageLimit < 1) throw new RangeError('Invalid native admission limit');
+  const pages = (ranges: readonly NativeRange[]) => {
+    const result = new Set<number>();
+    for (const range of ranges) {
+      checkRange(range.address, range.length);
+      for (
+        let address = Math.floor(range.address / NATIVE_PAGE_SIZE) * NATIVE_PAGE_SIZE;
+        address < range.address + range.length && range.length > 0;
+        address += NATIVE_PAGE_SIZE
+      )
+        result.add(address);
+    }
+    return result;
+  };
+  const wanted = pages(desired),
+    admitted = pages(required);
+  for (const page of pages(previous)) if (wanted.has(page)) admitted.add(page);
+  let remaining = newPageLimit;
+  for (const source of [pages(priority), wanted]) {
+    for (const page of source) {
+      if (remaining === 0) break;
+      if (!wanted.has(page) || admitted.has(page)) continue;
+      admitted.add(page);
+      remaining--;
+    }
+  }
+  return coalesceNativePages([...admitted]);
+}
 /** Reader caches own their footprints. A cold complete pass replaces only that owner's former heap pages. */
 export class NativeReaderWorkingSet {
   private learned = new Set<number>();

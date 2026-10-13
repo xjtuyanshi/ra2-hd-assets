@@ -430,6 +430,7 @@ describe('YR 1.001 read-only sidebar', () => {
     f.i32(TYPE + 0xb0, 100);
     f.ascii(TYPE + 0xcc, 'NUKEICON');
     f.i32(SW + 0x24, -1);
+    f.i32(SW + 0x7c, -1); // Ordinary supers do not initialize or consult the charge-drain state.
     f.u8(SW + 0x6d, 1);
     f.i32(SW + 0x30, 50);
     f.i32(SW + 0x38, 100);
@@ -446,6 +447,7 @@ describe('YR 1.001 read-only sidebar', () => {
     expect(f.read()!.cameos[0]).toMatchObject({ ready: false, hold: true });
     f.u8(TYPE + 0xe5, 1);
     f.u8(SW + 0x70, 0);
+    expect(f.read()).toBeNull(); // A charge-drain super still requires its own valid state.
     f.i32(SW + 0x7c, 1);
     expect(f.read()!.cameos[0]).toMatchObject({ ready: true, progress: 0.5 });
     f.i32(SW + 0x7c, 2);

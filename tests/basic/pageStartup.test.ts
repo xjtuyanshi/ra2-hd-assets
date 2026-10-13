@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
 import { startSessionRuntime } from '../../src/app/session/startSessionRuntime';
+import {
+  createVmRuntimeCallbacks,
+  type VmPageRuntimeCallbackDeps,
+} from '../../src/ui/pages/game/vmPageRuntimeCallbacks';
+import type { VmFrame } from '../../src/vm86/win32';
 
 function shell(): VmShell {
   return {
@@ -49,6 +54,39 @@ afterEach(() => {
 });
 
 describe('page VM startup boundary', () => {
+  it.each(['indexed', 'rgba', 'rgb565'] as const)(
+    'keeps loading visible through initial black %s frames and reveals the first picture once',
+    (format) => {
+      const onHideBootOverlay = vi.fn();
+      const callbacks = createVmRuntimeCallbacks({
+        canvas: { dataset: {} },
+        debugAutoOpen: false,
+        getGameFrameSize: () => ({ width: 1, height: 1 }),
+        presenter: { submit: vi.fn() },
+        onScheduleRender: vi.fn(),
+        onHideBootOverlay,
+      } as unknown as VmPageRuntimeCallbackDeps);
+      const frame: VmFrame = {
+        width: 1,
+        height: 1,
+        pixels: new Uint8Array([1]),
+        palette: new Uint8Array(1024),
+        ...(format === 'rgba' ? { rgba: new Uint8Array([0, 0, 0, 255]) } : {}),
+        ...(format === 'rgb565' ? { rgb565: new Uint16Array([0]) } : {}),
+      };
+      frame.palette[7] = 255; // Opaque black is still an empty picture.
+      callbacks.onFrame?.(frame);
+      callbacks.onFrame?.(frame);
+      expect(onHideBootOverlay).not.toHaveBeenCalled();
+      if (frame.rgba) frame.rgba[0] = 1;
+      else if (frame.rgb565) frame.rgb565[0] = 1;
+      else frame.palette[4] = 1;
+      callbacks.onFrame?.(frame);
+      callbacks.onFrame?.(frame);
+      expect(onHideBootOverlay).toHaveBeenCalledOnce();
+    },
+  );
+
   it('keeps the original startup error, cleans once, and never installs input after failure', async () => {
     const error = new Error('page start failed');
     const showError = vi.fn();

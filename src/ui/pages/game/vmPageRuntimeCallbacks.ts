@@ -46,6 +46,12 @@ export interface VmPageRuntimeCallbackDeps {
 }
 
 export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameVmCallbacks {
+  let pictureStarted = false;
+  const revealPicture = () => {
+    if (pictureStarted) return;
+    pictureStarted = true;
+    deps.onHideBootOverlay();
+  };
   const {
     canvas,
     debugAutoOpen,
@@ -66,7 +72,6 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     getRefitActiveCanvas,
     onUpdateBootOverlay,
     onScheduleRender,
-    onHideBootOverlay,
     onFinishExited,
     onExposeRuntimeCallProbe,
     onAppendCall,
@@ -97,6 +102,8 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
     },
     onMoviePlayback(playing) {
       canvas.dataset.moviePlaying = String(playing);
+      // A movie can begin with black frames; its Skip control must remain available.
+      if (playing) revealPicture();
       movieSkip.set(
         playing
           ? () => {
@@ -173,8 +180,29 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
         const battlefield = measureRa2BattlefieldFrame(frame);
         canvas.dataset.vmBattlefield = `${battlefield.rightEdgeRatio.toFixed(4)},${battlefield.fieldRatio.toFixed(4)}`;
       }
-      onHideBootOverlay();
+      // DirectDraw creates and presents an empty primary surface before the game
+      // has loaded its menu. Keep the loading/cancel panel until picture content
+      // arrives instead of leaving the player on an unexplained black page.
+      if (!pictureStarted && frameHasPicture(frame)) revealPicture();
       onScheduleRender();
     },
   };
+}
+
+function frameHasPicture(frame: VmFrame): boolean {
+  if (frame.rgba) {
+    for (let offset = 0; offset < frame.rgba.length; offset += 4) {
+      if (frame.rgba[offset] || frame.rgba[offset + 1] || frame.rgba[offset + 2]) return true;
+    }
+  } else if (frame.rgb565) {
+    for (const pixel of frame.rgb565) if (pixel) return true;
+  } else {
+    const lit = new Uint8Array(256);
+    for (let index = 0; index < lit.length; index++) {
+      const offset = index * 4;
+      lit[index] = frame.palette[offset] || frame.palette[offset + 1] || frame.palette[offset + 2] ? 1 : 0;
+    }
+    for (const pixel of frame.pixels) if (lit[pixel]) return true;
+  }
+  return false;
 }

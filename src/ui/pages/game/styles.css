@@ -107,7 +107,6 @@ canvas {
   z-index: 10001;
 }
 /* Inside the fullscreen container and ignoring mouse input, status hints do not affect game clicks or pointer locking. */
-#vm-upscale-status,
 #vm-hd-status {
   position: absolute;
   top: 8px;
@@ -130,10 +129,6 @@ canvas {
 #vm-upscale-status[hidden],
 #vm-hd-status[hidden] {
   display: none;
-}
-/* Both notices can be up at once (an upscale fallback and a map without an HD view): stack them. */
-#vm-upscale-status:not([hidden]) ~ #vm-hd-status {
-  top: 42px;
 }
 /* Include the Esc permission hint in the fullscreen container so browser fullscreen does not hide a sibling hint behind the canvas. */
 #screen-frame:fullscreen {

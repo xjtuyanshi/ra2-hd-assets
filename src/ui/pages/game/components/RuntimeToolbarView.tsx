@@ -11,7 +11,7 @@ import { PerformanceDiagnostics } from './PerformanceDiagnostics';
 import { GameSelect } from './GameSelect';
 import type { UpscaleMode } from '../vmFrameRenderer';
 import { DISPLAY_RESOLUTION } from '../vmPageResolution';
-import { controlsCollapsed, hotkeySheet, hotkeySheetVisible } from '../state/uiState';
+import { controlsCollapsed, hotkeySheet, hotkeySheetVisible, upscaleStatus } from '../state/uiState';
 import { DEFAULT_VOLUME_PERCENT } from '../../../../adapter/audio';
 import { useStore } from '../../../shared/state/useStore';
 import { isDesktopEdge, showEdgeMouseNotice } from './edgeMouseNotice';
@@ -222,6 +222,7 @@ export function RuntimeToolbarView({
   setResolution(value: string): void;
 }) {
   const collapsed = useStore(controlsCollapsed);
+  const upscale = useStore(upscaleStatus);
   const hotkeys = useStore(hotkeySheet) !== null;
   const hotkeysShown = useStore(hotkeySheetVisible);
   const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
@@ -362,6 +363,9 @@ export function RuntimeToolbarView({
           ]}
           onChange={(value) => callbacks.onUpscaleMode?.(value as UpscaleMode)}
         />
+        <output id="vm-upscale-status" role="status" aria-live="polite" hidden={upscale === null}>
+          {upscale && localizeText(upscale)}
+        </output>
         {hdShown && model.upscaleMode !== 'off' && (
           <output id="vm-upscale-hd-note" role="status">
             {t('高清画面显示时不运行（只作用于原版画面）')}

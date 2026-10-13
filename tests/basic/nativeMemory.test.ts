@@ -5,6 +5,7 @@ import {
   NativeMemoryMiss,
   NativeMemoryTransaction,
   NativeAllocationMiss,
+  admitNativeRanges,
   readNativeWithRetry,
   runNativeTransaction,
   type NativeTransactionHost,
@@ -12,6 +13,28 @@ import {
 function page(address: number, value = 0) {
   return { address, bytes: new Uint8Array(4096).fill(value) };
 }
+it('admits current strict misses ahead of background pages while retaining only the active prior footprint', () => {
+  const required = [{ address: 0x1001, length: 4 }],
+    desired = [{ address: 0x1000, length: 8 * 4096 }],
+    previous = [
+      { address: 0x1000, length: 4096 },
+      { address: 0xc000, length: 4096 },
+    ];
+  const first = admitNativeRanges(required, desired, previous, [{ address: 0x7000, length: 8192 }], 2);
+  expect(first).toEqual([
+    { address: 0x1000, length: 4096 },
+    { address: 0x7000, length: 8192 },
+  ]);
+  const second = admitNativeRanges(required, desired, first, [{ address: 0x5000, length: 4096 }], 2);
+  expect(second).toEqual([
+    { address: 0x1000, length: 8192 },
+    { address: 0x5000, length: 4096 },
+    { address: 0x7000, length: 8192 },
+  ]);
+  const third = admitNativeRanges(required, desired, second, [], 2);
+  expect(admitNativeRanges(required, desired, third, [], 2)).toEqual(desired);
+  expect(admitNativeRanges(required, required, third, [], 2)).toEqual([{ address: 0x1000, length: 4096 }]);
+});
 it('publishes a complete 4097-page image without substituting or losing the last page', () => {
   const memory = new NativeMirrorMemory(),
     bytes = new Uint8Array(4096).fill(0x52);

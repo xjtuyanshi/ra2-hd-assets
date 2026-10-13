@@ -406,13 +406,40 @@ describe('native core session and presenter lifecycle', () => {
       agent.mirror(2, [], flags);
       expect(await pending).toBeNull();
       await flush();
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        renderHealth: { unreadableSinceEpochMs: flags === 4 ? expect.any(Number) : null },
+      });
       agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }], 2);
       await flush();
       expect((await core.getDiagnostics('sample')).native).toMatchObject({
         cadence: { renderPublicationWaits: 1, renderPublicationInterrupts: 1, renderPublicationTimeouts: 0 },
+        renderHealth: { unreadableSinceEpochMs: flags === 4 ? expect.any(Number) : null },
+      });
+      expect((await core.getRenderState())?.frame).toBe(7);
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        renderHealth: { unreadableSinceEpochMs: null },
       });
     },
   );
+
+  it('keeps bounded catch-up progress after budget truncation without starting unreadable-range recovery', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    agent.mirrorFault = { reason: 1, stage: 2, rule: 0, value: 1000, limit: 4000 };
+    agent.mirror(2, [], 1);
+    for (let index = 0; index < 3; index++) {
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await core.getRenderState()).toBeNull();
+    }
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(1);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      renderHealth: { unreadableSinceEpochMs: null },
+      mirrorRecovery: { count: 0 },
+    });
+    agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }]);
+    expect((await core.getRenderState())?.frame).toBe(7);
+  });
 
   it.each(['stop', 'disconnect'])(
     'settles publication waiting immediately during %s without another input request',

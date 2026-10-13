@@ -64,9 +64,11 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    visible and retries. Disabling passthrough also retries an unconfirmed zero write. The optional HD sidebar
    preloads its chrome from sidebar snapshots while hidden and joins only after the battlefield fade completes
    and that chrome is ready; incomplete chrome leaves the game's sidebar intact. A failed cache load leaves the original
-   picture with a small status notice. A native state gap or read failure keeps the last HD picture for 500 ms;
-   a pending reader has a separate one-second deadline. On a battle surface either deadline disables passthrough,
-   discards the old presentation state and shows a Chinese recovery notice over the live original picture. A complete
+   picture with a small status notice. Late or incomplete native states retain the last complete HD battlefield and
+   sidebar while coherent subscriptions catch up. After a 500 ms gap (or a one-second pending reader), the bridge
+   checks native health; only a confirmed unreadable range persisting for 500 ms disables passthrough and shows the
+   Chinese recovery notice over the live original picture. A rendering exception also retains its recovery path;
+   time-budget truncation alone never changes the picture style. A complete
    unkeyed native frame retires queued keyed frames immediately. A new complete state must draw settled art before
    HD cross-fades back; late replies from before the recovery cannot reveal an old picture. Real dialogs switch to
    the original immediately and preserve the ordinary return without another fade. A confirmed native menu video mode resets reveal state immediately,
@@ -765,7 +767,9 @@ the main checkout; `0` for none).
 
 Both owner launchers select `sr=1`: single-pass anti-ringing Catmull-Rom reconstruction for original menus,
 dialogs and the original-picture view. It preserves exact source pixels at 1:1 or when shrinking, and leaves the
-HD view's keyed overlay path unchanged. The toolbar can switch reconstruction off for comparison.
+HD view's keyed overlay path unchanged. The toolbar can switch reconstruction off for comparison and contains
+its activation/fallback status; this developer information never covers the game picture. Initial all-black
+DirectDraw frames keep the loading/cancel panel visible until picture content or a skippable movie arrives.
 
 ## Stall recorder
 

@@ -399,14 +399,27 @@ async function humanMove(x, y, options) {
       x: Math.max(0, Math.min(actual.width - 1, ((x - actual.box.x) * actual.width) / actual.box.width)),
       y: Math.max(0, Math.min(actual.height - 1, ((y - actual.box.y) * actual.height) / actual.box.height)),
     };
+    // Undo only floating-point roundoff in the CSS-to-game conversion. Exact
+    // edge requests must reach the game's extreme pixel, not the usual near-point tolerance.
+    const edgeX = wanted.x < 1e-6 ? 0 : wanted.x > actual.width - 1 - 1e-6 ? actual.width - 1 : null;
+    const edgeY = wanted.y < 1e-6 ? 0 : wanted.y > actual.height - 1 - 1e-6 ? actual.height - 1 : null;
+    if (edgeX !== null) wanted.x = edgeX;
+    if (edgeY !== null) wanted.y = edgeY;
     // CDP movement deltas under Chrome page zoom differ from its absolute CSS
     // coordinates. Observe the page's actual logical cursor between ordinary
     // trusted movements; never set or bypass the game's input coordinates.
     for (let attempt = 0; attempt < 8; attempt++) {
       const dx = ((wanted.x - actual.point.x) * actual.box.width) / actual.width;
       const dy = ((wanted.y - actual.point.y) * actual.box.height) / actual.height;
-      if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8) return;
-      const target = { x: humanPointer.x + dx, y: humanPointer.y + dy };
+      const edgeXMissing = edgeX !== null && actual.point.x !== edgeX;
+      const edgeYMissing = edgeY !== null && actual.point.y !== edgeY;
+      if (Math.abs(dx) < 0.8 && Math.abs(dy) < 0.8 && !edgeXMissing && !edgeYMissing) return;
+      // Continue the ordinary physical movement four CSS pixels beyond a requested
+      // edge. The production input clamp, rather than this observer, owns the final position.
+      const target = {
+        x: humanPointer.x + dx + (edgeXMissing ? (edgeX === 0 ? -4 : 4) : 0),
+        y: humanPointer.y + dy + (edgeYMissing ? (edgeY === 0 ? -4 : 4) : 0),
+      };
       if (['phase26', 'phase34'].includes(phase))
         await timedHumanMove(target.x, target.y, screenCourtesy && attempt > 0);
       else {
@@ -416,6 +429,10 @@ async function humanMove(x, y, options) {
       actual = await readPointer();
       if (!actual.locked || !actual.point) return;
     }
+    assert(
+      (edgeX === null || actual.point.x === edgeX) && (edgeY === null || actual.point.y === edgeY),
+      'Trusted pointer movement did not reach the requested exact game edge',
+    );
     return;
   }
   return directMouseMove(x, y, options);
@@ -546,6 +563,14 @@ async function shot(label, simple = false) {
     captureBeyondViewport: false,
   });
   await writeFile(path, Buffer.from(capture.data, 'base64'));
+  const focus = await page.evaluate(() => ({
+    documentFocused: document.hasFocus(),
+    activeElement: document.activeElement?.id ?? null,
+    canvasFocused: document.activeElement === document.querySelector('#screen'),
+    fullscreenElement: document.fullscreenElement?.id ?? null,
+    pointerLockElement: document.pointerLockElement?.id ?? null,
+  }));
+  await record('screenshot-focus', { label, path, ...focus });
   if (simple || screenCourtesy) {
     if (screenCourtesy) {
       const geometry = await page.evaluate(() => ({
@@ -933,6 +958,99 @@ async function execute(c) {
   if (c.action === 'feel-play') {
     const began = performance.now();
     const seconds = Math.max(1, Math.min(c.seconds ?? 300, 600));
+    if (c.hardScroll === true) {
+      const label = c.label ?? 'hard-scroll';
+      assert(/^[a-zA-Z0-9_-]+$/.test(label));
+      const proof = { startedAt: new Date().toISOString(), actions: [], finishedAt: null, error: null };
+      const keys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+      const jumps = [
+        [0.3, 0.3],
+        [0.7, 0.7],
+        [0.7, 0.3],
+        [0.3, 0.7],
+        [0.5, 0.3],
+        [0.5, 0.7],
+        [0.3, 0.5],
+        [0.7, 0.5],
+        [0.5, 0.5],
+      ];
+      const liveState = () =>
+        wait(
+          'actual hard-scroll battle state',
+          async () => {
+            const value = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
+            return value?.view && value.sidebar?.frame ? value : null;
+          },
+          10000,
+        );
+      try {
+        let action = 0;
+        while (performance.now() - began < seconds * 1000) {
+          await ownerIdle();
+          const before = await liveState();
+          assert(
+            before.sidebar.radarActive && !before.sidebar.power.low,
+            'Hard scrolling requires a built, powered and visibly active native radar',
+          );
+          const { width, height } = before.sidebar.frame;
+          const side = before.sidebar.layout.sidebar;
+          const center = { x: (side.x > 0 ? side.x : width) / 2, y: height / 2 };
+          const direction = Math.floor(action / 3) % 4;
+          const mode = ['edge', 'arrow', 'radar'][action % 3];
+          const entry = {
+            action,
+            mode,
+            at: new Date().toISOString(),
+            before: { frame: before.frame, view: before.view },
+          };
+          if (mode === 'edge') {
+            const edge = [
+              { x: 0, y: height / 2 },
+              { x: width - 1, y: height / 2 },
+              { x: center.x, y: 0 },
+              { x: center.x, y: height - 1 },
+            ][direction];
+            entry.direction = ['left', 'right', 'top', 'bottom'][direction];
+            entry.point = edge;
+            await page.mouse.move(...(await point(edge.x, edge.y)));
+            await delay(1500);
+          } else if (mode === 'arrow') {
+            await page.mouse.move(...(await point(center.x, center.y)));
+            entry.key = keys[direction];
+            await page.keyboard.down(entry.key);
+            try {
+              await delay(1500);
+            } finally {
+              await page.keyboard.up(entry.key);
+            }
+          } else {
+            const radar = before.sidebar.layout.radar;
+            assert(radar?.width > 8 && radar?.height > 8, 'Visible native minimap bounds are required');
+            const fraction = jumps[Math.floor(action / 3) % jumps.length];
+            entry.fraction = fraction;
+            entry.point = { x: radar.x + radar.width * fraction[0], y: radar.y + radar.height * fraction[1] };
+            await click(entry.point.x, entry.point.y);
+            await page.mouse.move(...(await point(center.x, center.y)));
+            await delay(700);
+          }
+          const after = await liveState();
+          entry.after = { frame: after.frame, view: after.view };
+          proof.actions.push(entry);
+          await record('hard-scroll-input', entry);
+          if (action < 12 || action % 24 === 0) await shot(`${label}-${String(action).padStart(3, '0')}`, true);
+          action++;
+        }
+        return { seconds: (performance.now() - began) / 1000, hardScroll: true, actions: proof.actions.length };
+      } catch (error) {
+        proof.error = String(error);
+        await shot(`${label}-failed`, true).catch(() => {});
+        throw error;
+      } finally {
+        proof.finishedAt = new Date().toISOString();
+        proof.seconds = (performance.now() - began) / 1000;
+        await writeFile(join(out, `${label}.json`), JSON.stringify(proof, null, 2));
+      }
+    }
     let nextAction = 0,
       actions = 0;
     while (performance.now() - began < seconds * 1000) {
@@ -1343,6 +1461,73 @@ async function execute(c) {
       'Close notice must reach the painted viewport',
     );
     return proof;
+  }
+  if (c.action === 'browser-exit-fullscreen') {
+    const label = c.label ?? 'browser-exit-fullscreen';
+    assert(/^[a-zA-Z0-9_-]+$/.test(label));
+    assert(phase === 'phase34' && ownedChrome, 'Owned macOS Chrome process required');
+    if (screenCourtesy) await beginOwnedScreen(label, { fullscreen: false });
+    await activateOwnedChrome(label);
+    const observe = async () => ({
+      window: await cdp.send('Browser.getWindowForTarget'),
+      page: await page.evaluate(() => ({
+        fullscreen: document.fullscreenElement?.id ?? null,
+        pointerLock: document.pointerLockElement?.id ?? null,
+        activeElement: document.activeElement?.id ?? null,
+        focused: document.hasFocus(),
+        width: innerWidth,
+        height: innerHeight,
+      })),
+    });
+    const proof = {
+      input: 'Real macOS Control+Command+F delivered by System Events to owned Chrome',
+      before: await observe(),
+    };
+    assert(
+      proof.before.window.bounds.windowState === 'fullscreen',
+      'Actual Chrome fullscreen required before exit gesture',
+    );
+    await ownerIdle();
+    assert.equal(foregroundApp().pid, ownedChrome.pid, 'Only the owned Chrome may receive the OS shortcut');
+    const gesture = spawnSync(
+      '/usr/bin/osascript',
+      [
+        '-e',
+        `tell application "System Events"
+set targetProcess to first application process whose unix id is ${ownedChrome.pid}
+if not frontmost of targetProcess then error "Owned Chrome lost foreground before shortcut"
+tell targetProcess to key code 3 using {control down, command down}
+end tell`,
+      ],
+      { encoding: 'utf8', timeout: 5000 },
+    );
+    proof.gesture = {
+      status: gesture.status,
+      stdout: gesture.stdout?.trim(),
+      stderr: gesture.stderr?.trim(),
+      error: gesture.error ? String(gesture.error) : null,
+    };
+    try {
+      assert(gesture.status === 0, proof.gesture.stderr || proof.gesture.error || 'OS fullscreen gesture failed');
+      proof.after = await wait(
+        'real browser fullscreen exit after macOS shortcut',
+        async () => {
+          const observed = await observe();
+          return !observed.page.fullscreen && observed.window.bounds.windowState !== 'fullscreen' ? observed : null;
+        },
+        10000,
+      );
+      proof.screenshot = await shot(label, true);
+      return proof;
+    } catch (error) {
+      proof.error = String(error);
+      proof.after = await observe().catch(() => null);
+      proof.screenshot = await shot(`${label}-failed`, true).catch(() => null);
+      throw error;
+    } finally {
+      await record('browser-exit-fullscreen', proof);
+      await writeFile(join(out, `${label}.json`), JSON.stringify(proof, null, 2));
+    }
   }
   if (c.action === 'window-fullscreen') {
     const owned = await cdp.send('Browser.getWindowForTarget');
@@ -1827,6 +2012,7 @@ async function execute(c) {
     const m = await import('./phase9-base-play.mjs');
     return m.runPhase9BasePlay({
       buildOnly: c.buildOnly ?? false,
+      buildRadar: c.buildRadar ?? false,
       stopAfter: c.stopAfter ?? null,
       page,
       click: (x, y, mode, button) => click(x, y, button ?? 'left'),
@@ -3214,6 +3400,17 @@ try {
     await wait(
       'web Worker and shim',
       async () => !!worker() && !!(await worker().evaluate(() => globalThis.__auditCore?.shim)),
+      120000,
+    );
+    // Creating the shim/primary surface precedes the game's first usable menu.
+    // Do not release the screen lease or call a black initialization frame ready.
+    await wait(
+      'web usable menu or movie skip control',
+      async () => {
+        const input = await state();
+        mainMenuControlsObserved = !!input.controls?.some((c) => usable(c) && c.id === 1667);
+        return mainMenuControlsObserved || (input.moviePlaying === true && !input.modal);
+      },
       120000,
     );
   } else {

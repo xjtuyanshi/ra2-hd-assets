@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   installGameInput,
   setSessionShortcutKey,
+  toggleImmersiveFullscreen,
   type GameInputOptions,
   type InstalledGameInput,
 } from '../../src/ui/pages/game/gameInput';
@@ -89,6 +90,48 @@ function setup(search = '', locked = true, options: GameInputOptions = {}) {
 }
 
 describe('桌面鼠标跟手性', () => {
+  it('forwards the first Escape after toolbar fullscreen entry and reentry without another battlefield click', async () => {
+    const h = setup('', false);
+    const toolbarButton = {};
+    h.canvas.focus.mockImplementation(() => {
+      h.doc.activeElement = h.canvas;
+    });
+    Object.assign(h.canvas, {
+      requestFullscreen: vi.fn(async () => {
+        Object.assign(h.doc, { fullscreenElement: { contains: (element: unknown) => element === h.canvas } });
+      }),
+    });
+    for (let entry = 0; entry < 2; entry++) {
+      Object.assign(h.doc, { activeElement: toolbarButton, fullscreenElement: null });
+      await toggleImmersiveFullscreen(h.canvas as unknown as HTMLCanvasElement);
+      expect(h.doc.activeElement).toBe(h.canvas);
+      for (const type of ['keydown', 'keyup']) {
+        window.dispatchEvent(
+          Object.assign(new Event(type, { cancelable: true }), {
+            code: 'Escape',
+            key: 'Escape',
+            location: 0,
+            altKey: false,
+            ctrlKey: false,
+            metaKey: false,
+            shiftKey: false,
+            isComposing: false,
+          }),
+        );
+      }
+    }
+    expect(
+      h.vm.postMessage.mock.calls
+        .filter(([message]) => message === 0x100 || message === 0x101)
+        .map(([message, key]) => [message, key]),
+    ).toEqual([
+      [0x100, 0x1b],
+      [0x101, 0x1b],
+      [0x100, 0x1b],
+      [0x101, 0x1b],
+    ]);
+  });
+
   it('explains escape once for the page, across relocking and reinstalling game input', () => {
     const h = setup('', false);
     expect(h.hints[0]!.classList.add).not.toHaveBeenCalled();
