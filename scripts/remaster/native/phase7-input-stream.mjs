@@ -540,8 +540,8 @@ export async function runPhase7InputStream({
   assert([250, 1000].includes(rate), 'Phase7 mouse rates are 250 and 1000');
   assert(seconds >= 30 && seconds <= 600, 'Phase7 stream lasts 30 to 600 seconds');
   assert(
-    Array.isArray(selectionKeys) && selectionKeys.every((key) => typeof key === 'string' && /^[0-9]$/.test(key)),
-    'Optional selection keys must be ordinary control-group digits',
+    Array.isArray(selectionKeys) && selectionKeys.every((key) => typeof key === 'string' && /^[0-9p]$/.test(key)),
+    'Optional selection keys must be ordinary control-group digits or p for combat units',
   );
   const evidence = await createPhase7EvidenceStream(join(out, `${label}-${rate}hz.ndjson`));
   const agent = typeof worker === 'function' ? worker() : worker;
@@ -998,9 +998,9 @@ export async function runPhase7InputStream({
           selectionSequence.push(input);
           const keyFields = {
             key,
-            code: `Digit${key}`,
-            windowsVirtualKeyCode: key.charCodeAt(0),
-            nativeVirtualKeyCode: key.charCodeAt(0),
+            code: key === 'p' ? 'KeyP' : `Digit${key}`,
+            windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0),
+            nativeVirtualKeyCode: key.toUpperCase().charCodeAt(0),
             modifiers: 0,
           };
           selectionKeyHeld = keyFields;

@@ -15,13 +15,14 @@ import { ownerConnected } from './owner-open-boundary.mjs';
 const wt = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const base = outputDirectory();
 const phase = process.env.NATIVE_BROWSER_PHASE || 'phase9';
+const ownedChromePhase = phase === 'phase34' || phase === 'phase41';
 const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS === '1';
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const feelSettings = ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)
+const feelSettings = ['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase)
   ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
       .then(JSON.parse)
       .catch(() => ({}))
@@ -279,7 +280,7 @@ async function releaseOwnedScreen(label) {
   return proof;
 }
 async function activateOwnedChrome(label) {
-  if (phase !== 'phase34' || !ownedChrome) return;
+  if (!ownedChromePhase || !ownedChrome) return;
   if (screenCourtesy && !screenLease) return;
   await ownerIdle();
   assert(
@@ -345,7 +346,7 @@ async function setInitialWindowBounds() {
     windowId: initialWindow.windowId,
     bounds: { left: 0, top: 30, width, height },
   });
-  if (phase === 'phase34' && feelSettings.smallWindow)
+  if (ownedChromePhase && feelSettings.smallWindow)
     await wait(
       'initial small browser window dimensions',
       async () => {
@@ -376,7 +377,7 @@ async function timedHumanMove(x, y, correction = false) {
   }
 }
 async function humanMove(x, y, options) {
-  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
+  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase)) {
     const readPointer = () =>
       page.evaluate(() => {
         const canvas = document.querySelector('#screen');
@@ -391,7 +392,7 @@ async function humanMove(x, y, options) {
       });
     let actual = await readPointer();
     if (!actual.locked || !actual.point || !actual.width || !actual.height) {
-      if (['phase26', 'phase34'].includes(phase)) return timedHumanMove(x, y);
+      if (['phase26', 'phase34', 'phase41'].includes(phase)) return timedHumanMove(x, y);
       humanPointer = { x, y };
       return directMouseMove(x, y, options);
     }
@@ -420,7 +421,7 @@ async function humanMove(x, y, options) {
         x: humanPointer.x + dx + (edgeXMissing ? (edgeX === 0 ? -4 : 4) : 0),
         y: humanPointer.y + dy + (edgeYMissing ? (edgeY === 0 ? -4 : 4) : 0),
       };
-      if (['phase26', 'phase34'].includes(phase))
+      if (['phase26', 'phase34', 'phase41'].includes(phase))
         await timedHumanMove(target.x, target.y, screenCourtesy && attempt > 0);
       else {
         humanPointer = target;
@@ -786,7 +787,7 @@ async function execute(c) {
     return beginOwnedScreen(c.label ?? 'explicit-screen', { fullscreen: c.fullscreen !== false });
   if (c.action === 'screen-release') return releaseOwnedScreen(c.label ?? 'explicit-release');
   if (screenCourtesy && c.measured === true) await beginOwnedScreen(c.label ?? c.action);
-  if (phase === 'phase34') await activateOwnedChrome(c.action);
+  if (ownedChromePhase) await activateOwnedChrome(c.action);
   else if (['phase26', 'phase33'].includes(phase)) await page.bringToFront();
   if (c.action === 'feel-start') {
     if (screenCourtesy) await beginOwnedScreen(c.label ?? 'feel-match');
@@ -937,7 +938,7 @@ async function execute(c) {
         const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
         const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
         let originalScreenshot = null;
-        if (['phase26', 'phase33', 'phase34'].includes(phase)) {
+        if (['phase26', 'phase33', 'phase34', 'phase41'].includes(phase)) {
           await page.keyboard.press('\\');
           await delay(300);
           originalScreenshot = await shot(`${c.label ?? 'drag'}-${edge}-original`);
@@ -947,7 +948,7 @@ async function execute(c) {
       } finally {
         await page.mouse.up();
       }
-      if (['phase26', 'phase33', 'phase34'].includes(phase)) {
+      if (['phase26', 'phase33', 'phase34', 'phase41'].includes(phase)) {
         await delay(600);
         await shot(`${c.label ?? 'drag'}-${edge}-released`);
       }
@@ -1085,7 +1086,7 @@ async function execute(c) {
   }
   if (c.action === 'rates-start') {
     assert(
-      ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase) && !acceptanceRates,
+      ['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase) && !acceptanceRates,
       'One owned match observer required',
     );
     if (screenCourtesy) await beginOwnedScreen(c.label ?? 'played-match');
@@ -1132,7 +1133,7 @@ async function execute(c) {
   }
   if (c.action === 'rates-stop') {
     assert(
-      ['phase26', 'phase32', 'phase33', 'phase34'].includes(phase) && acceptanceRates,
+      ['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase) && acceptanceRates,
       'Owned played-match observer required',
     );
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
@@ -1465,7 +1466,7 @@ async function execute(c) {
   if (c.action === 'browser-exit-fullscreen') {
     const label = c.label ?? 'browser-exit-fullscreen';
     assert(/^[a-zA-Z0-9_-]+$/.test(label));
-    assert(phase === 'phase34' && ownedChrome, 'Owned macOS Chrome process required');
+    assert(ownedChromePhase && ownedChrome, 'Owned macOS Chrome process required');
     if (screenCourtesy) await beginOwnedScreen(label, { fullscreen: false });
     await activateOwnedChrome(label);
     const observe = async () => ({
@@ -3064,14 +3065,14 @@ for (const signal of ['SIGINT', 'SIGTERM'])
 try {
   await ownerIdle();
   if (screenCourtesy) {
-    assert(phase === 'phase34' && !fullWindow, 'Courtesy-screen runs use the ordinary-window owned Chrome route');
+    assert(ownedChromePhase && !fullWindow, 'Courtesy-screen runs use the ordinary-window owned Chrome route');
     originalForegroundApp = foregroundApp();
     await record('screen-original-foreground', originalForegroundApp);
   }
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
-    if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase))
+    if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase))
       process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
     process.env.RA2_GAME_ROOT ||= feelSettings.webGameRoot || join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
@@ -3170,8 +3171,13 @@ try {
   // including browser-owned caches. It never attaches to the owner's profile.
   const profileName = process.argv[4];
   if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
-  if (profileName || phase === 'phase34') {
-    const profilePath = profileName ? join(base, phase, 'profiles', profileName) : join(out, 'chrome-profile');
+  if (profileName || ownedChromePhase) {
+    const profilePath =
+      phase === 'phase41'
+        ? join(base, phase, 'profile')
+        : profileName
+          ? join(base, phase, 'profiles', profileName)
+          : join(out, 'chrome-profile');
     if (feelSettings.zoom) {
       const preferencesPath = join(profilePath, 'Default', 'Preferences');
       await mkdir(dirname(preferencesPath), { recursive: true });
@@ -3182,7 +3188,7 @@ try {
       preferences.partition.default_zoom_level = { x: Math.log(feelSettings.zoom) / Math.log(1.2) };
       await writeFile(preferencesPath, JSON.stringify(preferences));
     }
-    if (phase === 'phase34') {
+    if (ownedChromePhase) {
       // Playwright focus emulation marks the tab as visibly captured. Chrome
       // consequently accepts DOM fullscreen without enlarging the OS window.
       // Attach without those overrides so the player's Start click exercises
@@ -3310,7 +3316,7 @@ try {
       ),
     });
   });
-  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase))
+  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase))
     await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
       const response = await route.fetch();
       const source = await response.text();
@@ -3331,7 +3337,10 @@ try {
   page = await context.newPage();
   if (screenCourtesy) await restoreForegroundApp(originalForegroundApp, 'ordinary-window-created');
   directMouseMove = page.mouse.move.bind(page.mouse);
-  if (['phase26', 'phase34'].includes(phase) || ['phase32', 'phase33', 'phase34'].includes(phase)) {
+  if (
+    ['phase26', 'phase34', 'phase41'].includes(phase) ||
+    ['phase32', 'phase33', 'phase34', 'phase41'].includes(phase)
+  ) {
     page.mouse.move = humanMove;
     for (const method of ['click', 'dblclick']) {
       const direct = page.mouse[method].bind(page.mouse);
@@ -3387,6 +3396,8 @@ try {
   if (viewChoice) pageUrl.searchParams.set('resolution', viewChoice);
   if (feelSettings.playStart) pageUrl.searchParams.set('play-start', '1');
   if (feelSettings.gameCursor) pageUrl.searchParams.set('native-cursor', 'game');
+  if (typeof feelSettings.drawJournal === 'boolean')
+    pageUrl.searchParams.set('native-draw-journal', feelSettings.drawJournal ? '1' : '0');
   if (useViewportHandshake && !tag.startsWith('window') && !feelSettings.smallWindow) {
     await cdp.send('Browser.setWindowBounds', {
       windowId: ownedWindowForSizing.windowId,
@@ -3395,7 +3406,7 @@ try {
     await delay(1200);
   }
   await page.goto(pageUrl.toString());
-  if (phase === 'phase34') await activateOwnedChrome('startup-page');
+  if (ownedChromePhase) await activateOwnedChrome('startup-page');
   else await page.bringToFront();
   if (webRoute) {
     if (useViewportHandshake && fullWindow) {
@@ -3460,7 +3471,7 @@ try {
     });
   }
   await delay(1000);
-  if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
+  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41'].includes(phase)) {
     const start = page.locator(feelSettings.fullscreenStart ? '#native-start' : '#native-start-window');
     if (!webRoute || feelSettings.playStart)
       await wait(
@@ -3469,7 +3480,7 @@ try {
         30000,
       );
     if (await start.isVisible()) {
-      if (phase === 'phase34') {
+      if (ownedChromePhase) {
         if (screenCourtesy) await beginOwnedScreen('startup-fullscreen-start', { fullscreen: false });
         await activateOwnedChrome('before-start');
         if (feelSettings.smallWindow) await setInitialWindowBounds();
@@ -3489,7 +3500,7 @@ try {
         })),
         browserWindow: await cdp.send('Browser.getWindowForTarget'),
       });
-      if (['phase26', 'phase33', 'phase34'].includes(phase)) {
+      if (['phase26', 'phase33', 'phase34', 'phase41'].includes(phase)) {
         await page
           .locator('#display-refresh-notice')
           .waitFor({ state: 'visible', timeout: 8000 })

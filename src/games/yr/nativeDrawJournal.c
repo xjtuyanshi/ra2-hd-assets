@@ -12,12 +12,12 @@
 #include <string.h>
 
 #define JOURNAL_CAPACITY 4096u
-#define SITE_COUNT 17u
+#define SITE_COUNT 18u
 #define CODE_BYTES 4096u
 
 enum { DRAW_BEGIN, DRAW_END, INFANTRY_BORDER, VEHICLE_BORDER, HEALTH_TICK,
     GROUP_FILL, GROUP_OUTLINE, GROUP_TEXT, SURFACE_LOCK, SURFACE_FILL, UNKNOWN_CALLBACK,
-    PLANNING_FIRST, PLANNING_LAST, ORE_GLINTS, COPY_TRANSFER, SOFTWARE_TRANSFER, FOREIGN_COPY_DONE, CAPTURE_END, COPY_END };
+    PLANNING_FIRST, PLANNING_LAST, ORE_GLINTS, COPY_TRANSFER, SOFTWARE_TRANSFER, FOREIGN_COPY_DONE, GROUP_COLOUR_BLT, CAPTURE_END, COPY_END, GROUP_BLT_END };
 struct site {
     uint32_t address, bytes, target;
     uint8_t original[10], patch[10];
@@ -40,6 +40,7 @@ static struct site sites[SITE_COUNT] = {
     {0x4f4b7b,5,0,{0xff,0x50,0x08,0x84,0xdb},{0}},
     {0x4bb293,5,0x7bbb90,{0xe8,0xf8,0x08,0x30,0x00},{0}},
     {0x437985,6,0,{0x8b,0x4c,0x24,0x64,0x8b,0x01},{0}},
+    {0x4bb7e8,5,0,{0xff,0x52,0x14,0xf7,0xd8},{0}},
 };
 struct leaf {
     uint32_t kind, object, uid, surface, shape, frame, colour, flags;
@@ -59,21 +60,34 @@ static struct leaf last_leaf;
 static CRITICAL_SECTION snapshot_lock;
 static LONG snapshot_initialized;
 #define MAX_REPLACEMENTS 512u
-#define MAX_LEAF_PIXELS 144u
+#define MAX_LEAF_PIXELS 512u
 #define MAX_COMMAND_JSON (1024u * 1024u)
+struct group_shape {
+    int32_t rect[4], point[2];
+    uint32_t font, width, height, pitch, colour;
+    uint16_t digit;
+    uint8_t bits[128];
+};
 struct replacement {
     uint32_t object, kind, width, height;
     int32_t x, y, clip[4];
     uint16_t before[MAX_LEAF_PIXELS], after[MAX_LEAF_PIXELS];
+    struct group_shape group;
 };
 static struct replacement replacements[MAX_REPLACEMENTS], pending_leaf;
 static uint32_t replacement_count, capture_return, capture_post;
 static uint32_t capture_surface, capture_native_surface, capture_object;
 static int capture_active, capture_valid;
+static int group_code_verified, group_stage, group_blt_active, group_blt_complete;
+static uint32_t group_fills, group_lines, group_text_locks, group_blt_writes, group_software_fills;
+static volatile LONG captured_groups, rejected_groups;
+static volatile LONG group_begin_rejects[9];
 static volatile LONG completed_ready, unsafe_write, unsupported_kind;
 static struct nh_draw_surface_view capture_view;
 static uint16_t *complete_native, *complete_clean;
 static uint32_t complete_capacity, complete_width, complete_height;
+static uint8_t *complete_source;
+static uint32_t complete_source_capacity;
 static char command_json[MAX_COMMAND_JSON];
 static uint32_t command_json_bytes, command_count;
 static volatile LONG captured_elements, rejected_elements, invalidated_elements, paired_pictures, pair_mismatches;
@@ -323,6 +337,228 @@ static int copy_rect(uint16_t *target, const struct replacement *element)
                 target + y * element->width, element->width * 2)) return 0;
     return 1;
 }
+/* A group marker is one transaction: its black fill, owner-colour outline and
+ * original bitmap-font digit either all replace together or all remain native. */
+static int verify_group_code(void)
+{
+    static const uint32_t signatures[][3] = {
+        {0x70a6fd,643,0xc73bf23c}, {0x4bb5f0,574,0x43e8a491},
+        {0x7bad90,206,0x082129a8}, {0x7ba610,685,0x152bb8b5}, {0x7bb050,748,0x4dc6c22f},
+        {0x4a66d0,267,0x4d790e2d}, {0x4a5eb0,341,0x0a90cdbb},
+        {0x434b90,88,0x9e452d11}, {0x4348f0,157,0x8ea3112e},
+        {0x434500,439,0xb058c0aa}, {0x434120,989,0x3c1c1899},
+        {0x433cf0,437,0x475a0271}, {0x433c70,16,0xcf0728ca},
+        {0x433c90,13,0x3c38f51d}, {0x433ca0,51,0xe60dd61a},
+        {0x434110,10,0x35f8c4da}, {0x434990,24,0x4b58d76e},
+        {0x411510,36,0x029323a7}, {0x411540,6,0xdf65da64},
+        {0x411550,7,0x7cf54ac8}, {0x4bad60,10,0x57d13890}, {0x4bad70,10,0xd65b746b},
+    };
+    uint8_t bytes[1024];
+    for (uint32_t i = 0; i < sizeof(signatures)/sizeof(signatures[0]); i++) {
+        if (!nh_safe_read(signatures[i][0],bytes,signatures[i][1])) return 0;
+        uint32_t hash = 2166136261u;
+        for (uint32_t j = 0; j < signatures[i][1]; j++) hash = (hash ^ bytes[j]) * 16777619u;
+        if (hash != signatures[i][2]) return 0;
+    }
+    return 1;
+}
+static int group_surface(uint32_t surface, uint32_t *native, struct nh_draw_surface_view *view)
+{
+    uint32_t slots[33];
+    return nh_safe_read(0x7e85d4,slots,sizeof(slots)) &&
+        copy_target(slots[5],0x4bb5f0,0x08) && copy_target(slots[11],0x7ba610,0x10) &&
+        copy_target(slots[22],0x7bad90,0x08) &&
+        slots[23] == 0x4bad80 && slots[24] == 0x4baf40 && slots[28] == 0x4bad60 &&
+        slots[29] == 0x4bad70 && slots[30] == 0x411510 && slots[31] == 0x411540 && slots[32] == 0x411550 &&
+        nh_safe_read(surface+0x1c,native,4) && nh_draw_surface_view(*native,view) && view->bpp == 16;
+}
+static int read_group_font(uint16_t digit, struct group_shape *g)
+{
+    uint32_t font[17], set[8];
+    uint16_t index;
+    if (!nh_safe_read(0x89c4d0,&g->font,4) || !nh_safe_read(g->font,font,sizeof(font)) ||
+        font[0] != 0x7e3a78 || !nh_safe_read(font[1],set,sizeof(set)) ||
+        !set[1] || set[1] > 4 || !set[2] || set[2] > 32 ||
+        font[6] != set[1] || font[7] != set[3] || font[11] > 8 ||
+        set[1]*set[2] > sizeof(g->bits) || set[5] < 1+set[1]*set[2] || set[5] > 256) return 0;
+    uint64_t entry = (uint64_t)set[6] + (uint64_t)digit*2;
+    if (entry+sizeof(index) > 0x100000000ull ||
+        !nh_safe_read((uint32_t)entry,&index,sizeof(index)) || !index) return 0;
+    uint64_t record = (uint64_t)set[7] + (uint64_t)(index-1)*set[5];
+    uint32_t glyph_bytes = set[1]*set[2];
+    uint8_t width;
+    if (record+1+glyph_bytes > 0x100000000ull || !nh_safe_read((uint32_t)record,&width,1) ||
+        !width || width > 24 || width > set[1]*8 ||
+        !nh_safe_read((uint32_t)(record+1),g->bits,glyph_bytes)) return 0;
+    g->width = width; g->height = set[2]; g->pitch = set[1];
+    g->digit = digit;
+    return 1;
+}
+static int group_pattern(const struct replacement *r, int include_digit)
+{
+    const struct group_shape *g = &r->group;
+    for (uint32_t y = 0; y < r->height; y++) for (uint32_t x = 0; x < r->width; x++) {
+        int32_t sx = r->x+(int32_t)x, sy = r->y+(int32_t)y;
+        uint16_t expected = r->before[y*r->width+x];
+        if (sx >= g->rect[0] && sx < g->rect[0]+g->rect[2] &&
+            sy >= g->rect[1] && sy < g->rect[1]+g->rect[3]) {
+            expected = 0;
+            if (group_stage >= 2 && (sx == g->rect[0] || sx == g->rect[0]+g->rect[2]-1 ||
+                sy == g->rect[1] || sy == g->rect[1]+g->rect[3]-1)) expected = g->colour;
+        }
+        int32_t gx = sx-g->point[0], gy = sy-g->point[1];
+        if (include_digit && gx >= 0 && gy >= 0 && (uint32_t)gx < g->width && (uint32_t)gy < g->height &&
+            (g->bits[(uint32_t)gy*g->pitch+(uint32_t)gx/8] & (0x80u >> (gx&7)))) expected = g->colour;
+        if (r->after[y*r->width+x] != expected) return 0;
+    }
+    return 1;
+}
+static int begin_group(const struct leaf *leaf, const uint32_t *r)
+{
+    if (!group_code_verified || capture_active || !unchanged_writers(draw_epoch) ||
+        replacement_count >= MAX_REPLACEMENTS || leaf->colour || r[1] > 0xffffu || r[1] == 0xf81fu) {
+        InterlockedIncrement(&group_begin_rejects[0]); return 0;
+    }
+    const uint32_t stack = (uint32_t)(uintptr_t)(r+9);
+    uint32_t clip_address, group_index;
+    uint16_t text[2];
+    struct replacement *p = &pending_leaf;
+    memset(p,0,sizeof(*p));
+    if (!nh_safe_read(stack+0x88,&clip_address,4) || !nh_safe_read(clip_address,p->clip,sizeof(p->clip)) ||
+        !nh_safe_read(stack+0x60,p->group.point,sizeof(p->group.point)) ||
+        !nh_safe_read(stack+0x68,text,sizeof(text))) {
+        InterlockedIncrement(&group_begin_rejects[1]); return 0;
+    }
+    if (text[1] || text[0] < '0' || text[0] > '9' ||
+        !nh_safe_read(leaf->object+0x214,&group_index,4) || group_index > 9 ||
+        text[0] != '0'+(group_index+1)%10) {
+        InterlockedIncrement(&group_begin_rejects[2]); return 0;
+    }
+    if (!read_group_font(text[0],&p->group)) {
+        InterlockedIncrement(&group_begin_rejects[3]); return 0;
+    }
+    struct nh_draw_surface_view view;
+    uint32_t native;
+    if (!group_surface(leaf->surface,&native,&view)) {
+        InterlockedIncrement(&group_begin_rejects[4]); return 0;
+    }
+    if (!contained_rect(p->clip,view.width,view.height) || !contained_rect(leaf->rect,view.width,view.height)) {
+        InterlockedIncrement(&group_begin_rejects[5]); return 0;
+    }
+    memcpy(p->group.rect,leaf->rect,sizeof(p->group.rect));
+    p->group.colour = r[1];
+    int64_t gx = (int64_t)p->group.point[0]+p->clip[0], gy = (int64_t)p->group.point[1]+p->clip[1];
+    if (gx < p->clip[0] || gy < p->clip[1] || gx+p->group.width > (int64_t)p->clip[0]+p->clip[2] ||
+        gy+p->group.height > (int64_t)p->clip[1]+p->clip[3]) {
+        InterlockedIncrement(&group_begin_rejects[6]); return 0;
+    }
+    p->group.point[0] = (int32_t)gx; p->group.point[1] = (int32_t)gy;
+    p->x = gx < leaf->rect[0] ? (int32_t)gx : leaf->rect[0];
+    p->y = gy < leaf->rect[1] ? (int32_t)gy : leaf->rect[1];
+    int64_t right = gx+p->group.width, bottom = gy+p->group.height;
+    if (right < (int64_t)leaf->rect[0]+leaf->rect[2]) right = (int64_t)leaf->rect[0]+leaf->rect[2];
+    if (bottom < (int64_t)leaf->rect[1]+leaf->rect[3]) bottom = (int64_t)leaf->rect[1]+leaf->rect[3];
+    if (p->x < p->clip[0] || p->y < p->clip[1] || right > (int64_t)p->clip[0]+p->clip[2] ||
+        bottom > (int64_t)p->clip[1]+p->clip[3] || (right-p->x)*(bottom-p->y) > MAX_LEAF_PIXELS) {
+        InterlockedIncrement(&group_begin_rejects[7]); return 0;
+    }
+    p->width = (uint32_t)(right-p->x); p->height = (uint32_t)(bottom-p->y);
+    p->object = leaf->object; p->kind = GROUP_TEXT;
+    if (capture_surface && capture_surface != leaf->surface) invalidate();
+    capture_surface = leaf->surface; capture_native_surface = native; capture_view = view;
+    if (!copy_rect(p->before,p)) { InterlockedIncrement(&group_begin_rejects[8]); return 0; }
+    capture_active = capture_valid = 1; capture_object = leaf->object;
+    group_stage = 1; group_fills = group_lines = group_text_locks = group_blt_writes = group_software_fills = 0;
+    group_blt_active = group_blt_complete = 0;
+    return 1;
+}
+static int continue_group(const struct leaf *leaf, uint32_t *r)
+{
+    if (!capture_active || !capture_valid || pending_leaf.kind != GROUP_TEXT ||
+        leaf->object != pending_leaf.object || leaf->surface != capture_surface ||
+        !unchanged_writers(draw_epoch)) return 0;
+    struct group_shape *g = &pending_leaf.group;
+    if (leaf->kind == GROUP_OUTLINE) {
+        if (group_stage != 1 || group_fills != 1 || group_blt_active ||
+            group_blt_complete + group_software_fills != 1 ||
+            leaf->colour != g->colour || memcmp(leaf->rect,g->rect,sizeof(g->rect)) ||
+            !copy_rect(pending_leaf.after,&pending_leaf) || !group_pattern(&pending_leaf,0)) return 0;
+        group_stage = 2; return 1;
+    }
+    const uint32_t *args = r+10;
+    uint16_t text[2];
+    struct group_shape font = {0};
+    if (group_stage != 2 || group_lines != 4 || leaf->colour != g->colour ||
+        memcmp(leaf->clip,pending_leaf.clip,sizeof(leaf->clip)) ||
+        (int64_t)leaf->point[0]+leaf->clip[0] != g->point[0] ||
+        (int64_t)leaf->point[1]+leaf->clip[1] != g->point[1] ||
+        args[4] || args[5] != 0x49 || args[6] != UINT32_MAX || args[7] != 1 ||
+        !nh_safe_read(r[5],text,sizeof(text)) || text[0] != g->digit || text[1] ||
+        !read_group_font(text[0],&font) || font.font != g->font || font.width != g->width ||
+        font.height != g->height || font.pitch != g->pitch || memcmp(font.bits,g->bits,sizeof(g->bits)) ||
+        !copy_rect(pending_leaf.after,&pending_leaf) || !group_pattern(&pending_leaf,0)) return 0;
+    group_stage = 3;
+    capture_return = r[9]; r[9] = capture_post;
+    return 1;
+}
+static int group_write(uint32_t kind, const uint32_t *r)
+{
+    if (!capture_active || !capture_valid || pending_leaf.kind != GROUP_TEXT || r[6] != capture_surface) return 0;
+    const struct group_shape *g = &pending_leaf.group;
+    if (kind == SURFACE_FILL && group_stage == 1 && !group_fills && r[9] == 0x4bb614) {
+        int32_t bounds[4], rect[4];
+        if (!nh_safe_read(r[10],bounds,sizeof(bounds)) || !nh_safe_read(r[11],rect,sizeof(rect)) || r[12] ||
+            bounds[0] || bounds[1] || bounds[2] != (int32_t)capture_view.width ||
+            bounds[3] != (int32_t)capture_view.height || memcmp(rect,g->rect,sizeof(rect))) return 0;
+        group_fills++; return 1;
+    }
+    if (kind != SURFACE_LOCK) return 0;
+    if (group_stage == 1 && group_fills == 1 && !group_software_fills &&
+        !group_blt_active && !group_blt_complete && !group_blt_writes && r[9] == 0x7bb154) {
+        /* The verified software fill locks exactly its clipped rectangle.
+         * Its frame retains that rectangle, black colour and actual pitch;
+         * the next outline also validates every resulting background pixel. */
+        int32_t rect[4]; uint32_t surface, pitch, colour;
+        if (r[2] < 0x2cu || r[2] > 0xffffffebu ||
+            (int32_t)r[10] != g->rect[0] || (int32_t)r[11] != g->rect[1] ||
+            !nh_safe_read(r[2]-0x2c,rect,sizeof(rect)) || memcmp(rect,g->rect,sizeof(rect)) ||
+            !nh_safe_read(r[2]-4,&surface,4) || surface != capture_surface ||
+            !nh_safe_read(r[2]+0x0c,&pitch,4) || pitch != capture_view.pitch ||
+            !nh_safe_read(r[2]+0x10,&colour,4) || colour) return 0;
+        group_software_fills++; return 1;
+    }
+    if (group_stage == 2 && r[9] == 0x7ba6d8 && group_lines < 4) {
+        int32_t x = g->rect[0]+(group_lines == 2 ? g->rect[2]-1 : 0);
+        int32_t y = g->rect[1]+(group_lines == 3 ? g->rect[3]-1 : 0);
+        if ((int32_t)r[10] != x || (int32_t)r[11] != y) return 0;
+        group_lines++; return 1;
+    }
+    if (group_stage == 3 && r[9] == 0x434908 && !group_text_locks && !r[10] && !r[11]) {
+        group_text_locks++; return 1;
+    }
+    return 0;
+}
+static void group_blt_begin(const uint32_t *r)
+{
+    if (!capture_active || pending_leaf.kind != GROUP_TEXT) return;
+    const uint32_t *args = r+9;
+    int32_t rect[4]; uint32_t fx[25], expected_fx[25] = {100};
+    const int32_t *g = pending_leaf.group.rect;
+    if (!capture_valid || group_stage != 1 || group_fills != 1 || group_blt_active || group_blt_complete || group_software_fills ||
+        args[0] != capture_native_surface || args[2] || args[3] || args[4] != 0x1000400 ||
+        !nh_safe_read(args[1],rect,sizeof(rect)) || rect[0] != g[0] || rect[1] != g[1] ||
+        rect[2] != g[0]+g[2] || rect[3] != g[1]+g[3] ||
+        !nh_safe_read(args[5],fx,sizeof(fx)) || memcmp(fx,expected_fx,sizeof(fx))) { invalidate(); return; }
+    group_blt_active = 1;
+}
+static void group_blt_end(const uint32_t *r)
+{
+    if (!group_blt_active) return;
+    group_blt_active = 0;
+    if (r[7] || group_blt_writes != 1 || !capture_valid) { invalidate(); return; }
+    group_blt_complete = 1;
+}
+
 static int begin_capture(const struct leaf *leaf, uint32_t *registers)
 {
     if (!unchanged_writers(draw_epoch)) return 0;
@@ -362,12 +598,11 @@ static int begin_capture(const struct leaf *leaf, uint32_t *registers)
         pending_leaf.x + (int32_t)pending_leaf.width > leaf->clip[0] + leaf->clip[2] ||
         pending_leaf.y + (int32_t)pending_leaf.height > leaf->clip[1] + leaf->clip[3] ||
         replacement_count >= MAX_REPLACEMENTS || !copy_rect(pending_leaf.before, &pending_leaf)) return 0;
-    /* The HD tactical plane is keyed before native extras. A retained native
-     * bar is not a clean background: only start a bar on an entirely keyed
-     * footprint, then let its tick leaves restore that captured border. */
-    if (leaf->kind != HEALTH_TICK)
-        for (uint32_t i = 0; i < pending_leaf.width * pending_leaf.height; i++)
-            if (pending_leaf.before[i] != 0xf81f) return 0;
+    /* Retain the exact background, including earlier native marks. Acceptance
+     * below requires a completely opaque, verified footprint; its page
+     * primitives cover every restored pixel in the original draw order.
+     * A keyed-background requirement would reject overlapping/retained bars
+     * even though the complete replacement hides that background identically. */
     capture_return = registers[9]; registers[9] = capture_post;
     capture_active = capture_valid = 1;
     capture_object = leaf->object;
@@ -375,6 +610,8 @@ static int begin_capture(const struct leaf *leaf, uint32_t *registers)
 }
 static int semantic_shape(const struct replacement *r)
 {
+    if (r->kind == GROUP_TEXT)
+        return group_stage == 3 && group_text_locks == 1 && group_pattern(r,1);
     if (r->kind == HEALTH_TICK)
         return r->after[1] == r->after[3] && r->after[0] != 0xf81f &&
             r->after[1] != 0xf81f && r->after[2] != 0xf81f;
@@ -392,8 +629,12 @@ static void end_capture(uint32_t *registers)
     int good = capture_active && capture_valid && copy_rect(pending_leaf.after, &pending_leaf) &&
         semantic_shape(&pending_leaf);
     capture_active = 0;
-    if (!good) { InterlockedIncrement(&rejected_elements); invalidate(); return; }
+    if (!good) {
+        if (pending_leaf.kind == GROUP_TEXT) InterlockedIncrement(&rejected_groups);
+        InterlockedIncrement(&rejected_elements); invalidate(); return;
+    }
     replacements[replacement_count++] = pending_leaf;
+    if (pending_leaf.kind == GROUP_TEXT) InterlockedIncrement(&captured_groups);
     InterlockedIncrement(&captured_elements);
 }
 static int rect_command(const struct replacement *r, int32_t x, int32_t y, uint32_t w, uint32_t h, uint16_t colour)
@@ -433,13 +674,22 @@ static void freeze_pair(void)
         if (!nh_safe_read((uint32_t)(uintptr_t)(view.pixels + y * view.pitch),
             complete_native + y * view.width, view.width * 2)) return;
     /* The final real CopyPart supplies the coordinate transform. Both its
-     * completed classified copy and its entire copied region must agree. */
-    uint16_t source_row[4096];
+     * completed classified copy and its entire copied region must agree.
+     * Own one validated source snapshot rather than making a kernel read for
+     * every row. The writer epoch still guards the complete publication. */
+    uint64_t source_bytes = (uint64_t)source.pitch * source.height;
+    if (source_bytes > NH_MAX_MESSAGE) return;
+    if (complete_source_capacity < source_bytes) {
+        uint8_t *snapshot = malloc((size_t)source_bytes);
+        if (!snapshot) return;
+        free(complete_source); complete_source = snapshot;
+        complete_source_capacity = (uint32_t)source_bytes;
+    }
+    if (!nh_safe_read((uint32_t)(uintptr_t)source.pixels,complete_source,(uint32_t)source_bytes)) return;
     for (int32_t y = 0; y < transfer_source[3]; y++) {
-        const void *actual = source.pixels + (transfer_source[1]+y) * source.pitch + transfer_source[0]*2;
+        const void *actual = complete_source + (transfer_source[1]+y) * source.pitch + transfer_source[0]*2;
         const void *copied = complete_native + (transfer_destination[1]+y) * view.width + transfer_destination[0];
-        if (!nh_safe_read((uint32_t)(uintptr_t)actual,source_row,(uint32_t)transfer_source[2]*2) ||
-            memcmp(source_row,copied,(uint32_t)transfer_source[2]*2)) return;
+        if (memcmp(actual,copied,(uint32_t)transfer_source[2]*2)) return;
     }
     memcpy(complete_clean, complete_native, count * 2);
     int32_t dx = transfer_destination[0] - transfer_source[0];
@@ -457,7 +707,20 @@ static void freeze_pair(void)
         struct replacement mapped = replacements[i];
         mapped.x += dx; mapped.y += dy; mapped.clip[0] += dx; mapped.clip[1] += dy;
         const struct replacement *r = &mapped;
-        if (r->kind == HEALTH_TICK) {
+        if (r->kind == GROUP_TEXT) {
+            const struct group_shape *g = &r->group;
+            int32_t x = g->rect[0]+dx, y = g->rect[1]+dy;
+            uint32_t w = (uint32_t)g->rect[2], h = (uint32_t)g->rect[3];
+            if (!rect_command(r,x,y,w,h,(uint16_t)g->colour) ||
+                (w > 2 && h > 2 && !rect_command(r,x+1,y+1,w-2,h-2,0))) return;
+            for (uint32_t gy = 0; gy < g->height; gy++) for (uint32_t gx = 0; gx < g->width;) {
+                if (!(g->bits[gy*g->pitch+gx/8] & (0x80u >> (gx&7)))) { gx++; continue; }
+                uint32_t begin = gx++;
+                while (gx < g->width && (g->bits[gy*g->pitch+gx/8] & (0x80u >> (gx&7)))) gx++;
+                if (!rect_command(r,g->point[0]+dx+(int32_t)begin,g->point[1]+dy+(int32_t)gy,
+                    gx-begin,1,(uint16_t)g->colour)) return;
+            }
+        } else if (r->kind == HEALTH_TICK) {
             if (!rect_command(r,r->x,r->y,2,2,r->after[1]) ||
                 !rect_command(r,r->x,r->y,1,1,r->after[0]) ||
                 !rect_command(r,r->x,r->y+1,1,1,r->after[2])) return;
@@ -523,6 +786,10 @@ static int read_leaf(uint32_t kind, const uint32_t *r, struct leaf *out)
 static void observe(uint32_t kind, uint32_t *registers)
 {
     if (kind == CAPTURE_END) { end_capture(registers); return; }
+    if (kind == GROUP_BLT_END) {
+        if (GetCurrentThreadId() == nh_game_thread_id()) group_blt_end(registers);
+        return;
+    }
     if (kind == COPY_END) {
         if (GetCurrentThreadId() == nh_game_thread_id()) end_transfer(registers);
         return;
@@ -551,16 +818,18 @@ static void observe(uint32_t kind, uint32_t *registers)
         }
         return;
     }
+    if (kind == GROUP_COLOUR_BLT) { if (inside_draw) group_blt_begin(registers); return; }
     if (kind == COPY_TRANSFER) { if (inside_draw) begin_transfer(registers); return; }
     if (kind == SOFTWARE_TRANSFER) { if (transfer_active) transfer_software_count++; return; }
     if (kind >= SURFACE_LOCK) {
         if (!inside_draw || !capture_surface) return;
+        if (group_write(kind,registers)) return;
         if (kind == UNKNOWN_CALLBACK && known_sidebar_chain(registers[6],registers[5])) return;
         if (kind == SURFACE_LOCK && (registers[6] == capture_surface || registers[6] == transfer_surface)) {
             /* The verified source-acquire site never writes that surface. */
             if (registers[9] == 0x7bc1bf) return;
             /* Only this exact leaf's SHP destination acquire is classified. */
-            if (capture_active && registers[9] == 0x7bc176) return;
+            if (capture_active && pending_leaf.kind <= HEALTH_TICK && registers[9] == 0x7bc176) return;
             if (transfer_active && registers[6] == transfer_surface && registers[9] == 0x7bc176) return;
             record_invalidation(kind,registers[9],registers[6],0);
             invalidate();
@@ -585,6 +854,7 @@ static void observe(uint32_t kind, uint32_t *registers)
         transfer_surface = transfer_native_surface = transfer_software_count = transfer_hardware_count = 0;
         transfer_active = transfer_complete = 0;
         capture_active = capture_valid = completed_ready = 0;
+        group_stage = group_blt_active = group_blt_complete = 0;
         InterlockedExchange(&inside_draw, 1);
         InterlockedExchange(&matched_generation, 0);
         return;
@@ -617,7 +887,10 @@ static void observe(uint32_t kind, uint32_t *registers)
     }
     journal[journal_count++] = capture;
     if (TryEnterCriticalSection(&snapshot_lock)) { last_leaf = capture; LeaveCriticalSection(&snapshot_lock); }
-    if (kind <= HEALTH_TICK && !begin_capture(&capture, registers)) {
+    int accepted = kind <= HEALTH_TICK ? begin_capture(&capture,registers) :
+        kind == GROUP_FILL ? begin_group(&capture,registers) : continue_group(&capture,registers);
+    if (!accepted) {
+        if (kind >= GROUP_FILL) InterlockedIncrement(&rejected_groups);
         InterlockedIncrement(&rejected_elements); invalidate();
     }
 }
@@ -665,14 +938,14 @@ static int make_stubs(void)
         relative(&at, 0xe8, (uint32_t)(uintptr_t)&observe);
         *at++ = 0x83; *at++ = 0xc4; *at++ = 0x10;
         emit(&at, restore, sizeof(restore));
-        if (index == COPY_TRANSFER) {
+        if (index == COPY_TRANSFER || index == GROUP_COLOUR_BLT) {
             /* One patch owns the original CALL and its TEST. Observe the real
              * return in this same stub; no overlapping post-call patch. */
             emit(&at,site->original,3);
             emit(&at,save,sizeof(save));
             *at++ = 0x83; *at++ = 0xec; *at++ = 0x08;
             *at++ = 0x50; *at++ = 0x68;
-            uint32_t end_kind = COPY_END; memcpy(at,&end_kind,4); at += 4;
+            uint32_t end_kind = index == COPY_TRANSFER ? COPY_END : GROUP_BLT_END; memcpy(at,&end_kind,4); at += 4;
             relative(&at,0xe8,(uint32_t)(uintptr_t)&observe);
             *at++ = 0x83; *at++ = 0xc4; *at++ = 0x10;
             emit(&at,restore,sizeof(restore));
@@ -712,6 +985,7 @@ void nh_draw_journal_tick(void)
     }
     if (!snapshot_initialized) { InitializeCriticalSection(&snapshot_lock); snapshot_initialized = 1; }
     sidebar_code_verified = verify_sidebar_code();
+    group_code_verified = verify_group_code();
     if (!code && !make_stubs()) { InterlockedExchange(&install_failed, 2); return; }
     struct nh_draw_patch_range ranges[SITE_COUNT];
     for (uint32_t i = 0; i < SITE_COUNT; i++) {
@@ -779,6 +1053,10 @@ void nh_draw_journal_diagnostics(char *out, uint32_t capacity)
         "\"invalidReads\":%ld,\"unsupportedKinds\":%ld,\"capacityRejects\":%ld,\"pictureObservations\":%ld,\"midDrawPictures\":%ld,"
         "\"unsafeWrite\":%ld,\"foreignWrite\":[%u,%u,%u,%u,%u],\"foreignWriters\":[%ld,%ld,%ld],\"hardwareCopies\":%ld,\"invalidationCounts\":[%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld],"
         "\"lastInvalidation\":{\"kind\":%ld,\"return\":%lu,\"surface\":%lu,\"draw\":%ld,\"vtable\":%lu,\"target\":%lu},"
+        "\"groupCodeVerified\":%s,\"capturedGroups\":%ld,\"rejectedGroups\":%ld,"
+        "\"groupTransaction\":[%d,%u,%u,%u,%u,%d,%d],"
+        "\"groupSoftwareFillLocks\":%u,"
+        "\"groupBeginRejects\":[%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld],"
         "\"sidebarCodeVerified\":%s,\"sidebarClassified\":%ld,\"sidebarRejected\":%ld,\"rejectedGadget\":[%u,%u,%u],"
         "\"completeSize\":[%u,%u],\"appendSize\":[%ld,%ld],\"appendReasons\":[%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld],"
         "\"transfers\":[%ld,%ld,%ld],\"sourceRect\":[%ld,%ld,%ld,%ld],\"destinationRect\":[%ld,%ld,%ld,%ld],"
@@ -795,6 +1073,11 @@ void nh_draw_journal_diagnostics(char *out, uint32_t capacity)
         invalidation_counts[4],invalidation_counts[5],invalidation_counts[6],invalidation_counts[7],
         inv[0],(unsigned long)inv[1],(unsigned long)inv[2],inv[3],
         (unsigned long)inv[4],(unsigned long)inv[5],
+        group_code_verified ? "true" : "false",captured_groups,rejected_groups,
+        group_stage,group_fills,group_lines,group_text_locks,group_blt_writes,group_blt_active,group_blt_complete,
+        group_software_fills,
+        group_begin_rejects[0],group_begin_rejects[1],group_begin_rejects[2],group_begin_rejects[3],
+        group_begin_rejects[4],group_begin_rejects[5],group_begin_rejects[6],group_begin_rejects[7],group_begin_rejects[8],
         sidebar_code_verified ? "true" : "false",sidebar_classified,sidebar_rejected,gadget[0],gadget[1],gadget[2],
         complete_width,complete_height,append_width,append_height,
         append_reasons[0],append_reasons[1],append_reasons[2],append_reasons[3],append_reasons[4],
@@ -884,6 +1167,13 @@ void nh_draw_journal_surface_write(const void *pixels, uint32_t bytes, uint32_t 
         return;
     }
     if (!requested || !capture_view.pixels) return;
+    /* Only the exact validated YR colour-fill call, bracketed by its own
+     * pre/post stub, may perform this single synchronous DirectDraw write. */
+    if (group_blt_active && capture_active && capture_valid && group_stage == 1 &&
+        kind == NH_DRAW_BLT && pixels == capture_view.pixels &&
+        bytes >= capture_view.pitch*capture_view.height && !group_blt_writes) {
+        group_blt_writes++; return;
+    }
     uint64_t start = (uintptr_t)pixels, end = start + bytes;
     uint64_t target = (uintptr_t)capture_view.pixels, primary = (uintptr_t)transfer_view.pixels;
     int source_overlap = end > target && start < target + (uint64_t)capture_view.pitch * capture_view.height;

@@ -72,7 +72,7 @@ fill/outline/text `0x70A940/0x70A951/0x70A97B`. Conservative write fences cover 
 `0x4BAD80/0x4BB620`, the later callback `0x4F4555`, planning calls `0x6D46EA/0x6D491A` and ore glints
 `0x6D7840`; generic DirectDraw writes also invalidate overlapping captures. The real surface transfer at
 `0x4F4B7B`, its software-copy call at `0x4BB293` and the foreign software-copy completion at `0x437985`
-complete the seventeen verified installation sites.
+and the group background's exact color-fill call at `0x4BB7E8` complete the eighteen verified installation sites.
 All sites are verified before a thread-suspended patch transaction because the shared DSurface entries can run on
 other threads.
 The existing `0x4F44A5` latch is unchanged and every original instruction/call still executes. Capture uses mobile
@@ -83,27 +83,30 @@ whole-method signatures, `Next`/`DrawAll`/`DrawMe` slots, required null peers an
 must agree. A proved empty draw therefore does not invalidate unrelated health marks. Actual shape writes still
 reach the destination-lock fence, and any unknown node or method keeps the complete native fallback.
 
-Only validated mobile health borders and ticks can supply replacements. Their source shapes define rectangular
+Validated mobile health borders and ticks can supply replacements. Their source shapes define rectangular
 edge, inset and tick geometry; actual after-draw RGB565 samples supply the colors. The native game selects health
 frames 16/17/18 and their thresholds; the page does not recompute health colors. Shape canvas/crop dimensions,
 draw flags and the complete opaque pattern must validate. Before/after snapshots cover
 the complete verified leaf, not a guessed erasure rectangle.
-Before a border, its entire native footprint must be the transparency key `0xF81F`; a retained previous bar or any
-overlapping native mark therefore keeps the whole bar native. Accepted ticks reverse back to that captured border,
-then the border restores the verified clear background.
+The verified border and tick footprints are entirely opaque. Their exact before-draw pixels may contain earlier
+native marks: accepted ticks reverse back to their captured border, then the border restores that actual background.
+Ordered page primitives cover every restored pixel opaquely, including overlaps, with the same original draw order.
+This relies on complete opaque-pattern validation, nearest native-plane sampling and a non-antialiased overlay pass;
+it does not authorize transparent shapes or relax subsequent write fences.
 
 The actual `CopyPart` supplies the tactical-to-primary transform. Both rectangles must fit their validated surfaces,
 have equal dimensions and contain every accepted leaf. The transfer must successfully complete exactly one observed
 copy: either the verified software call or a plain cnc-ddraw `Blt` with only `DDBLT_WAIT`, no effects or scaling,
 16-bit surfaces, identical captured source/destination objects, pixels, pitches and rectangles, and no memory alias.
 At outer draw completion, the producer freezes the whole primary, including the sidebar, and compares the complete
-copied region with the tactical source. It then reverses accepted leaves at the recorded translation into a separate
+copied region with an owned tactical-source snapshot taken by one bounded safe read. Row comparisons use that snapshot
+without repeating memory-region queries for every scanline. It then reverses accepted leaves at the recorded translation into a separate
 clean primary plane; the game framebuffer is never erased or recolored. Every restored region must still match
 its captured after-draw pixels. The final trailer also requires equality between the frozen native primary and the
 owned pixels used to encode that same Picture. Source and primary lifetime changes or unclassified writes invalidate
 the pair.
 
-The existing HD policy may wrap the two DSurface copy slots. The producer accepts only the original targets or the
+The existing HD policy may wrap the DSurface copy and group-rectangle/line slots. The producer accepts only the original targets or the
 exact 63-byte `GuestGateBuilder` blit template in bridge-owned code/data allocations: complete branch layout,
 current thread owner, `GATE` data marker, zero gate depth, expected return stack cleanup and original tail target must match.
 This identifies the existing passthrough mechanism without bypassing its branches or changing its behavior.
@@ -118,8 +121,16 @@ The exact verified source-only lock at `0x7BC1BF` remains read-only on either th
 The atomic Picture trailer carries only clean rows that differ from that same picture's native fallback.
 The page presents either the validated clean plane plus every command or the complete native plane.
 
-Control-group digits, buildings and passenger/ammo pips remain whole and native; observing their leaf arguments
-does not enable replacement. `DIAGNOSTICS.drawJournal` reports readiness, capture/rejection/invalidation counts,
+Control-group markers are a single fill/outline/text transaction. Additional whole-method fingerprints validate
+the original rectangle, line and bitmap-font paths. Capture checks the actual digit, owner RGB565 color, clipping,
+surface virtual slots and the complete original glyph record; all address arithmetic is bounded before reading.
+The precise hardware color-fill call has a pre/post observer. Alternatively, the fingerprinted software fill must
+lock its exact black rectangle once, with matching surface and pitch. The single classified fill, four outline
+locks and one text lock must all belong to the same transaction. Other writes keep the conservative fallback. After text
+returns, every pixel of the complete marker must match the original fill, outline and glyph bits before any
+replacement is published. Page rectangles reproduce the outline and glyph row runs; no browser font is substituted.
+Unsupported fills, fonts, clipping, failed reads or interrupted transactions retain the whole native marker.
+Buildings and passenger/ammo pips remain whole and native. `DIAGNOSTICS.drawJournal` reports readiness, capture/rejection/invalidation counts,
 paired pictures and source/present mismatches. Conservative invalidation can leave only a subset of otherwise
 supported bars eligible in a given draw. Disconnect closes capture, leaving inert observers and their executable
 storage owned until process exit. Live screenshots and measurements must establish actual coverage and fidelity.
