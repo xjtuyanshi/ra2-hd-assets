@@ -14,7 +14,7 @@ import type { FramePresenter } from '../../../graphics/framePresenter';
 import { measureRa2BattlefieldFrame, sampleVmFrameHash } from './debug/frameProbes';
 import { formatNetworkStatus } from './networkStatus';
 import { activeCheatGameForPhase } from './cheatGuides';
-import { gameRunning, networkStatus, movieSkip } from './state/uiState';
+import { gameRunning, networkStatus, movieSkip, runtimeNotice } from './state/uiState';
 import type { RuntimeToolbar } from './runtimeToolbar';
 import type { VmFrame } from '../../../vm86/win32';
 
@@ -80,6 +80,7 @@ export function createVmRuntimeCallbacks(deps: VmPageRuntimeCallbackDeps): GameV
       });
     },
     onStatus(next) {
+      runtimeNotice.set(next.notice ?? null);
       if (next.phase !== 'running') {
         movieSkip.set(null);
         effects.stop();

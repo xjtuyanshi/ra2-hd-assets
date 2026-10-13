@@ -126,6 +126,13 @@ export class NativeMirrorMemory implements GuestMemory {
     this.observedMiss = false;
     this.accessed.clear();
   }
+  /** Retain the transport's delta baseline, but retire failed reader discovery before resubscribing. */
+  invalidate(): void {
+    this.complete = false;
+    this.missing.clear();
+    this.observedMiss = false;
+    this.accessed.clear();
+  }
   beginOperation(): void {
     this.observedMiss = false;
     this.accessed.clear();

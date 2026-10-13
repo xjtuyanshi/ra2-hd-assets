@@ -487,7 +487,7 @@ export class VmWorkerController {
     this.callTracing = config.traceCalls;
     const callbacks: GameVmCallbacks = {
       onNetworkStatus: (status) => this.post({ type: 'network-status', status }),
-      onStatus: (status) => this.post({ type: 'status', phase: status.phase, detail: status.detail }),
+      onStatus: (status) => this.post({ type: 'status', ...status }),
       onCall: (call, ordinal) => this.recordCall(call, ordinal),
       onBlocked: (call) => this.post({ type: 'blocked', call }),
       onFrame: (frame) => this.sendFrame(frame),

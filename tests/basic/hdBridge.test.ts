@@ -2567,13 +2567,20 @@ describe('live original to HD transition', () => {
 
   it('holds HD over short state gaps and does not repeat the fade after a dialog or commanded toggle', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
     await goLive(harness);
     const fadeAt = harness.bridge()!.timeline.fadeStartedAt;
     harness.setState(null);
     await advance(200);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    harness.setState(battle(3));
+    await advance(17);
+    expect(harness.bridge()!.timeline.fadeStartedAt).toBe(fadeAt);
+    harness.nativeFrame(false, true);
+    harness.setState(null);
     await advance(501);
     expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    harness.nativeFrame(false, false);
     harness.setState(battle(4));
     await advance(17);
     harness.nativeFrame();
@@ -2587,6 +2594,103 @@ describe('live original to HD transition', () => {
     harness.nativeFrame();
     expect(harness.bridge()!.timeline.fadeStartedAt).toBe(fadeAt);
     harness.stop();
+  });
+
+  it('returns an unavailable native battle to live original and fades only a newly complete state back', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    const view = await goLive(harness);
+    const firstFade = harness.bridge()!.timeline.fadeStartedAt!;
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
+    expect(harness.stop.battleActive?.()).toBe(true);
+    expect(view.outOfSight).toBe(true);
+    // The first complete original frame removes the old keyed tail without another half-second delay.
+    harness.nativeFrame(false);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    expect(harness.renderer.setTransparentKey).toHaveBeenLastCalledWith(null);
+    expect(harness.renderer.setTransparentRect).toHaveBeenLastCalledWith(null);
+    await advance(17, 3);
+    expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
+    view.settledFrames = 0;
+    harness.setState(battle(100));
+    await advance(17, 2);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    view.settledFrames = 3;
+    await advance(17);
+    expect(harness.bridge()!.timeline.fadeStartedAt!).toBeGreaterThan(firstFade);
+    expect(harness.renderer.setOpacityRegion).toHaveBeenLastCalledWith({
+      rect: { x: 0, y: 0, width: 1112, height: 688 },
+      opacity: 1,
+    });
+    expect(
+      harness
+        .bridge()!
+        .timeline.transitions.slice(-2)
+        .map(({ reason }) => reason),
+    ).toEqual(['state-unavailable', 'state-restored']);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    await advance(301);
+    harness.nativeFrame();
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(liveView.create).toHaveBeenCalledTimes(1);
+    harness.stop();
+  });
+
+  it('never waits on a pending native reader with the dead HD picture and rejects its late reply', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    const view = await goLive(harness);
+    let reply!: (state: GameRenderState) => void;
+    harness.vm.getRenderState.mockImplementationOnce(() => new Promise((resolve) => (reply = resolve)));
+    await advance(17);
+    const polls = harness.polls();
+    await advance(1001);
+    expect(harness.polls()).toBe(polls);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.bridge()!.diagnostics.state).toBeNull();
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    expect(harness.bridge()!.timeline.transitions.at(-1)?.reason).toBe('state-reader-timeout');
+    harness.nativeFrame(false);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    const pushes = view.push.mock.calls.length;
+    reply(battle(9999));
+    await settle();
+    expect(view.push).toHaveBeenCalledTimes(pushes);
+    harness.setState(battle(80));
+    await advance(17, 2);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(80);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    harness.stop();
+  });
+
+  it('keeps recovery notices subordinate to an original-view choice, dialogs, menus and disposal', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    harness.nativeFrame(false);
+    expect(harness.stop.toggle()).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    expect(harness.stop.toggle()).toBe(true);
+    await advance(17);
+    expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
+    harness.nativeFrame(false, true);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.nativeFrame(false, false);
+    expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
+    harness.setFrameSize(800, 600);
+    harness.nativeFrame(false);
+    await advance(17);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+    expect(harness.status).toHaveBeenLastCalledWith(null);
   });
 });
 

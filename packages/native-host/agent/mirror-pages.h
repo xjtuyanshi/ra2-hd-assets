@@ -8,7 +8,7 @@
  * follow rules still belong to each fresh frame-boundary capture. */
 struct nh_page_seed {
     uint32_t count, flags;
-    uint32_t pages[NH_MAX_PAGES], hash[NH_MIRROR_HASH_SIZE];
+    uint32_t pages[NH_MAX_PAGES], ranges[NH_MAX_PAGES], hash[NH_MIRROR_HASH_SIZE];
 };
 
 static void nh_page_seed_init(struct nh_page_seed *seed) {

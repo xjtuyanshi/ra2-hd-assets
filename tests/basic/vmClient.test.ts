@@ -102,6 +102,21 @@ afterEach(() => {
 });
 
 describe('WorkerVmClient RPC lifecycle', () => {
+  it('preserves a running runtime notice across the worker boundary and clears it with a terminal status', async () => {
+    const onStatus = vi.fn();
+    const { worker, client } = setup({}, { onStatus });
+    const notice = '游戏连接已中断，正在确认游戏是否已关闭。';
+    worker.emit({ type: 'status', phase: 'running', detail: notice, notice });
+    expect(onStatus).toHaveBeenLastCalledWith({ phase: 'running', detail: notice, notice });
+    worker.emit({ type: 'status', phase: 'exited', detail: '游戏已关闭' });
+    expect(onStatus).toHaveBeenLastCalledWith({ phase: 'exited', detail: '游戏已关闭' });
+    const destroying = client.destroy();
+    worker.emit({ type: 'control-done', action: 'stop', requestId: requestId(worker, 'control') });
+    await Promise.resolve();
+    worker.emit({ type: 'flush-done', requestId: requestId(worker, 'flush') });
+    await destroying;
+  });
+
   it('显式开启回收时只归还已替换帧，当前帧继续可用于光标重绘', async () => {
     vi.stubGlobal('requestAnimationFrame', () => 1);
     vi.stubGlobal('cancelAnimationFrame', () => {});

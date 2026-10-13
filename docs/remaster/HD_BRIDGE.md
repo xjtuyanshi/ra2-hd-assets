@@ -51,7 +51,7 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Switching to the original picture closes passthrough even while native preflight has not yet opened a hole.
    Disabled idle polls still track the match, but cannot re-enable the guest's render flags.
    Both routes keep the original battlefield live, visible and interactive while HD prepares. A complete
-   scene cross-fades with the current original frames over 300 ms, once per match. No screenshot or cover is
+   scene cross-fades with the current original frames over 300 ms at match start and after reader recovery. No screenshot or cover is
    used. Native preparation shows a noninteractive status notice in the page's language at 16 CSS pixels;
    an early map hint does not show it in menus. The notice clears on HD reveal, a menu return, or bridge stop,
    and yields to cache/art failure explanations. `VmFrameRenderer.setOpacityRegion` scales the tactical region's
@@ -64,8 +64,12 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    visible and retries. Disabling passthrough also retries an unconfirmed zero write. The optional HD sidebar
    preloads its chrome from sidebar snapshots while hidden and joins only after the battlefield fade completes
    and that chrome is ready; incomplete chrome leaves the game's sidebar intact. A failed cache load leaves the original
-   picture with a small status notice. A state gap or read failure keeps the last HD picture for 500 ms before
-   returning to the original dialog/menu. A confirmed native menu video mode resets reveal state immediately,
+   picture with a small status notice. A native state gap or read failure keeps the last HD picture for 500 ms;
+   a pending reader has a separate one-second deadline. On a battle surface either deadline disables passthrough,
+   discards the old presentation state and shows a Chinese recovery notice over the live original picture. A complete
+   unkeyed native frame retires queued keyed frames immediately. A new complete state must draw settled art before
+   HD cross-fades back; late replies from before the recovery cannot reveal an old picture. Real dialogs switch to
+   the original immediately and preserve the ordinary return without another fade. A confirmed native menu video mode resets reveal state immediately,
    while retaining prepared GPU assets for another match. Transient passthrough failures retry; they do not become
    permanent unsupported flags. `__hdBridge.timeline` records the first battle picture, preparation and fade
    timestamps plus a detached, bounded page-session `transitions` history (`atMs`, ISO `time`, map, frame,

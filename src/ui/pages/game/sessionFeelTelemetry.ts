@@ -224,13 +224,24 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
   return {
     records: () => records.slice(),
     flush,
-    speed(record: SpeedRecord, native?: Readonly<Record<string, unknown>>) {
+    speed(record: SpeedRecord | null, native?: Readonly<Record<string, unknown>>) {
       lastSpeed = record;
       nativeWork = native
         ? Object.fromEntries(
-            ['stateReadMs', 'stateReads', 'stateReadCpuMs', 'stateReadCpuMaxMs', 'readerOperations', 'decode'].map(
-              (key) => [key, native[key] ?? null],
-            ),
+            [
+              'stateReadMs',
+              'stateReads',
+              'stateReadCpuMs',
+              'stateReadCpuMaxMs',
+              'readerOperations',
+              'decode',
+              'mirrorRecovery',
+              'mirrorFaultCount',
+              'mirrorFaultEvents',
+              'recentMirrorFaultsOmitted',
+              'lastMirrorFault',
+              'recentMirrorFaults',
+            ].map((key) => [key, native[key] ?? null]),
           )
         : null;
     },

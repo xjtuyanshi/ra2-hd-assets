@@ -119,15 +119,17 @@ export const YR_NATIVE_RANGES: readonly NativeHostRange[] = Object.freeze([
  * reader bounds, not fabricated game capacities. Remaining strict misses are explicit, never filled with zeros.
  */
 export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.freeze([
-  vector(G.technos, 0x800, L.objectsPerKind * 4),
-  vector(G.units, 0x800, L.objectsPerKind),
-  vector(G.infantry, 0x800, L.objectsPerKind),
-  vector(G.buildings, 0x800, L.objectsPerKind),
-  vector(G.aircraft, 0x800, L.objectsPerKind),
+  // The mixed vector shares only TechnoClass's prefix. Concrete vectors use constructor-verified allocation sizes;
+  // a blanket 0x800 span can cross a short object's final committed page. See NATIVE_HOST.md for instruction evidence.
+  vector(G.technos, 0x520, L.objectsPerKind * 4),
+  vector(G.units, 0x8e8, L.objectsPerKind),
+  vector(G.infantry, 0x6f0, L.objectsPerKind),
+  vector(G.buildings, 0x720, L.objectsPerKind),
+  vector(G.aircraft, 0x6d8, L.objectsPerKind),
   pointerList(YR_BATTLEFIELD_OVERLAY.selected, L.objectsPerKind * 4),
   vector(G.houses, YR_NATIVE_HOUSE_SPANS.prefixBytes, L.houses),
   memberPointer(G.houses, O.houseType, 0x130, L.houses), // Country ID and unit-speed multiplier at +0x12C.
-  nestedVector(G.houses, 0x68, 0x800, L.objectsPerKind), // The sidebar's current owned-building list can reallocate.
+  nestedVector(G.houses, 0x68, 0x720, L.objectsPerKind), // The sidebar's current owned-building list can reallocate.
   nestedVector(G.houses, 0x254, 0x80, 4096), // Live SuperClass instances used by superweapon cameos.
   // Rule kinds 4/6 share their bound between parent and member counts. The root can contain all four techno kinds;
   // the reader independently validates each RadioLinks VectorClass capacity at 64 before using its contacts.
@@ -178,7 +180,9 @@ export const YR_NATIVE_FOLLOW_RULES: readonly NativeHostFollowRule[] = Object.fr
   ),
   ...[0x53ac, 0x53b0, 0x53b4, 0x53b8, 0x53bc].flatMap((offset) => [
     indirect(7, G.houses, offset, 0x40, 0x64, 4096), // FactoryClass queue of type pointers.
-    indirect(8, G.houses, offset, 0x58, 0x800, L.houses), // In-production object may not yet belong to a global live array.
+    // An in-production child can have any concrete type and may not yet be in its live vector. Strict sidebar
+    // reads discover its actual type field beyond the common prefix before accepting a complete state.
+    indirect(8, G.houses, offset, 0x58, 0x520, L.houses),
   ]),
   memberPointer(0xa8e330, 0x60, 512, 4096),
   // Layer observers read membership/order only. Child classes have different allocation sizes and their own rules;

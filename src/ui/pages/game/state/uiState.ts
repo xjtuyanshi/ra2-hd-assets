@@ -14,6 +14,8 @@ export const controlsCollapsed = createStore(false);
 export const upscaleStatus = createStore<string | null>(null);
 /** HD bridge notice (development `?hd=1`): why a match shows the original picture; already localized, null = none. */
 export const hdStatus = createStore<string | null>(null);
+/** Session-owned notice that takes priority over an enhancement's recovery message. */
+export const runtimeNotice = createStore<string | null>(null);
 export const debugVisible = createStore(false);
 export const debugState = createStore<ComponentProps<typeof DebugPanel> | null>(null);
 export const helpVisible = createStore(false);

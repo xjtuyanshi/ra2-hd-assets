@@ -8,7 +8,10 @@
 #define NH_MIRROR_MAX_THREADS 256u
 struct nh_range { uint32_t address, length; };
 struct nh_rule { uint32_t kind, source, bytes, max_count, stride; };
-struct nh_page { uint32_t address; uint64_t dirty; };
+struct nh_page {
+    uint32_t address, rule, range, object, request_address, request_length;
+    uint64_t dirty;
+};
 struct nh_subscription {
     uint32_t range_count, rule_count, max_pages, budget_us, sample_count, page_removals;
     struct nh_range ranges[NH_MAX_RANGES];

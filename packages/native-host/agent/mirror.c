@@ -33,6 +33,7 @@ static struct nh_page *shadow_pages, *capture_pages;
 static uint8_t *shadow_bytes, *capture_bytes, *packet;
 static uint32_t shadow_count, capture_count, page_hash[NH_MIRROR_HASH_SIZE];
 static uint32_t old_indices[NH_MAX_PAGES], removed_pages[NH_MAX_PAGES];
+static uint32_t capture_indices[NH_MIRROR_HASH_SIZE];
 static struct nh_page_seed fixed_seed, next_seed;
 static uint32_t rule_items[65536];
 static uint32_t rule_parent_items[65536];
@@ -57,9 +58,20 @@ static volatile LONG game_thread_id;
 static uint64_t mirror_bytes, hook_us_total, hook_us_max, budget_overruns;
 /* Keep the first actual fault for each incomplete publication. Stage and rule
  * metadata distinguish policy bounds from time budgets and retired heap pages. */
-static uint32_t capture_stage, capture_rule = UINT32_MAX;
-struct mirror_fault { uint32_t stage, rule, source, address, value, limit, reason; };
-static struct mirror_fault current_fault, last_fault;
+static uint32_t capture_stage, capture_rule = UINT32_MAX, capture_object;
+static uint32_t capture_request_address, capture_request_length;
+struct mirror_fault {
+    uint32_t stage, rule, source, address, value, limit, reason;
+    uint32_t frame, revision, range, object, request_address, request_length;
+    uint32_t read_address, read_length, memory_base, memory_size;
+    uint32_t memory_state, memory_protect, memory_type, read_error, retry_readable;
+    uint32_t occurrences, last_frame;
+};
+#define NH_FAULT_HISTORY 8u
+static struct mirror_fault current_fault, last_fault, fault_history[NH_FAULT_HISTORY];
+static uint32_t fault_history_count, fault_history_cursor;
+static uint64_t fault_count, fault_event_count;
+static int previous_capture_failed;
 static struct nh_read_cache read_cache;
 static struct nh_read_region_cursor capture_region;
 static uint32_t hook_times[16384], hook_time_count, hook_time_cursor;
@@ -67,14 +79,22 @@ static uint64_t hook_calls;
 static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t limit) {
     if (current_fault.reason) return;
     current_fault.stage = capture_stage; current_fault.rule = capture_rule;
+    current_fault.range = UINT32_MAX; current_fault.object = capture_object;
+    current_fault.request_address = capture_request_address;
+    current_fault.request_length = capture_request_length;
+    current_fault.revision = applied_revision;
     current_fault.source = capture_rule < subscription.rule_count ? subscription.rules[capture_rule].source : 0;
     current_fault.address = address; current_fault.value = value; current_fault.limit = limit; current_fault.reason = reason;
 }
 static int capture_read(uint32_t address, void *out, uint32_t length) {
+    SetLastError(ERROR_SUCCESS);
     if (capture_stage == 1 ? nh_read_cache_copy(&read_cache, capture_bytes, address, out, length, nh_safe_read) :
         capture_stage == 2 ? nh_safe_read_scoped(&capture_region, address, out, length) :
         nh_safe_read(address, out, length)) return 1;
-    fault(3, address, length, 0); return 0;
+    fault(3, address, length, 0);
+    current_fault.read_address = address; current_fault.read_length = length;
+    current_fault.read_error = GetLastError();
+    return 0;
 }
 
 static uint32_t get_u32(const uint8_t *p) {
@@ -255,17 +275,32 @@ done:
 static int add_page(uint32_t address, uint32_t *flags) {
     uint32_t slot = (address >> 12) * 2654435761u & (NH_MIRROR_HASH_SIZE - 1);
     while (page_hash[slot] != UINT32_MAX) {
-        if (page_hash[slot] == address) return 1;
+        if (page_hash[slot] == address) {
+            struct nh_page *page = capture_pages + capture_indices[slot];
+            /* Preserve both explicit ownership and a live follow owner when
+             * they overlap. The first live rule is sufficient to locate its
+             * requesting object; Core retains the full reader owner set. */
+            if (page->rule == UINT32_MAX && capture_rule != UINT32_MAX) {
+                page->rule = capture_rule; page->object = capture_object;
+                page->request_address = capture_request_address;
+                page->request_length = capture_request_length;
+            }
+            return 1;
+        }
         slot = (slot + 1) & (NH_MIRROR_HASH_SIZE - 1);
     }
     if (capture_count == subscription.max_pages) { fault(2, address, capture_count, subscription.max_pages); *flags |= NH_MIRROR_TRUNCATED; return 0; }
-    page_hash[slot] = address;
-    capture_pages[capture_count++].address = address;
+    page_hash[slot] = address; capture_indices[slot] = capture_count;
+    struct nh_page *page = capture_pages + capture_count++;
+    page->address = address; page->rule = capture_rule; page->range = UINT32_MAX;
+    page->object = capture_object; page->request_address = capture_request_address;
+    page->request_length = capture_request_length;
     return 1;
 }
 static int add_range(uint32_t address, uint32_t length, uint32_t *flags, LARGE_INTEGER start) {
     uint64_t end = (uint64_t)address + length;
     uint32_t page = address & ~(NH_PAGE_SIZE - 1);
+    capture_request_address = address; capture_request_length = length;
     if (!length) return 1;
     if (end > UINT64_C(0x100000000)) { fault(5, address, length, 0); *flags |= NH_MIRROR_INVALID; return 0; }
     do {
@@ -303,22 +338,32 @@ static void follow_member_vector(uint32_t member, const struct nh_rule *rule, in
 }
 static uint32_t resolve_union(LARGE_INTEGER start) {
     uint32_t i, flags = fixed_seed.flags;
-    capture_stage = 1; capture_rule = UINT32_MAX;
+    capture_stage = 1; capture_rule = UINT32_MAX; capture_object = 0;
+    capture_request_address = capture_request_length = 0;
     nh_read_cache_clear(&read_cache);
     if (flags) fault(7, 0, fixed_seed.count, subscription.max_pages);
     capture_count = fixed_seed.count;
     memcpy(page_hash, fixed_seed.hash, sizeof(page_hash));
-    for (i = 0; i < capture_count; ++i) capture_pages[i].address = fixed_seed.pages[i];
+    for (i = 0; i < capture_count; ++i) {
+        struct nh_page *page = capture_pages + i;
+        uint32_t slot = (fixed_seed.pages[i] >> 12) * 2654435761u & (NH_MIRROR_HASH_SIZE - 1);
+        while (page_hash[slot] != fixed_seed.pages[i]) slot = (slot + 1) & (NH_MIRROR_HASH_SIZE - 1);
+        capture_indices[slot] = i;
+        page->address = fixed_seed.pages[i]; page->rule = UINT32_MAX;
+        page->range = fixed_seed.ranges[i]; page->object = 0;
+        page->request_address = subscription.ranges[page->range].address;
+        page->request_length = subscription.ranges[page->range].length;
+    }
     for (i = 0; i < subscription.rule_count && !flags; ++i) {
         const struct nh_rule *rule = &subscription.rules[i];
-        capture_rule = i;
+        capture_rule = i; capture_object = rule->source;
         uint32_t pointer, count, j;
         if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
         add_range(rule->source, rule->kind == 1 ? 4 : 20, &flags, start);
         if (flags) break;
         if (rule->kind == 1) {
             if (!capture_read(rule->source, &pointer, 4)) { flags |= NH_MIRROR_INVALID; break; }
-            if (pointer) add_range(pointer, rule->bytes, &flags, start);
+            if (pointer) { capture_object = pointer; add_range(pointer, rule->bytes, &flags, start); }
             continue;
         }
         { uint8_t descriptor[20];
@@ -342,6 +387,7 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
                 uint32_t item = parents[j];
                 if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
                 if (!item) continue;
+                capture_object = item;
                 if (rule->kind == 2) { add_range(item, rule->bytes, &flags, start); continue; }
                 /* The caller injects a member offset; no game layout belongs
                  * here. Resolve both levels at this same logic boundary. */
@@ -370,8 +416,58 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
     }
     return flags;
 }
+/* A merged kernel copy can span unrelated owners. Diagnose its exact failed
+ * page only after failure; this bounded retry never makes the failed snapshot
+ * complete, even if a racing allocation is readable again. */
+static void diagnose_capture_pages(uint32_t first, uint32_t count) {
+    uint32_t failed = first;
+    current_fault.retry_readable = 1;
+    for (uint32_t i = first; i < first + count; ++i) {
+        if (!nh_safe_read(capture_pages[i].address, capture_bytes + i * NH_PAGE_SIZE, NH_PAGE_SIZE)) {
+            failed = i; current_fault.retry_readable = 0; break;
+        }
+    }
+    const struct nh_page *page = capture_pages + failed;
+    current_fault.address = page->address;
+    current_fault.rule = page->rule; current_fault.range = page->range;
+    current_fault.object = page->object;
+    current_fault.source = page->rule < subscription.rule_count ? subscription.rules[page->rule].source : 0;
+    current_fault.request_address = page->request_address;
+    current_fault.request_length = page->request_length;
+}
+static void record_fault(uint32_t frame) {
+    struct mirror_fault *prior = fault_history_count ?
+        fault_history + (fault_history_cursor + NH_FAULT_HISTORY - 1) % NH_FAULT_HISTORY : NULL;
+    MEMORY_BASIC_INFORMATION info;
+    current_fault.frame = current_fault.last_frame = frame;
+    current_fault.occurrences = 1;
+    if (current_fault.reason == 3 && VirtualQuery((const void *)(uintptr_t)current_fault.address, &info, sizeof(info))) {
+        current_fault.memory_base = (uint32_t)(uintptr_t)info.BaseAddress;
+        current_fault.memory_size = (uint32_t)info.RegionSize;
+        current_fault.memory_state = info.State; current_fault.memory_protect = info.Protect;
+        current_fault.memory_type = info.Type;
+    }
+    ++fault_count;
+    /* Count every failed capture, but retain one event for a consecutive fault
+     * with the same owner, subscription and allocation state. No game-thread
+     * logging, allocation, socket work or per-frame JSON occurs here. */
+    if (previous_capture_failed && prior && prior->reason == current_fault.reason && prior->stage == current_fault.stage &&
+        prior->rule == current_fault.rule && prior->range == current_fault.range &&
+        prior->address == current_fault.address && prior->value == current_fault.value &&
+        prior->object == current_fault.object && prior->revision == current_fault.revision &&
+        prior->memory_state == current_fault.memory_state && prior->memory_protect == current_fault.memory_protect) {
+        ++prior->occurrences; prior->last_frame = frame; last_fault = *prior;
+    } else {
+        ++fault_event_count;
+        fault_history[fault_history_cursor] = current_fault;
+        fault_history_cursor = (fault_history_cursor + 1) % NH_FAULT_HISTORY;
+        if (fault_history_count < NH_FAULT_HISTORY) ++fault_history_count;
+        last_fault = current_fault;
+    }
+    previous_capture_failed = 1;
+}
 static void publish_incomplete(uint32_t frame, uint32_t flags, LARGE_INTEGER start) {
-    if (current_fault.reason) last_fault = current_fault;
+    if (!pending_flags && current_fault.reason) record_fault(frame);
     /* One capture failure may need a later fresh budget to flush. Count the
      * cause once; repeatedly flushing the same pending flags is not a failure. */
     if (!pending_flags) {
@@ -444,6 +540,7 @@ void nh_logic_tick(void) {
         while (run < 16 && i + run < capture_count &&
             (uint64_t)capture_pages[i + run].address == (uint64_t)capture_pages[i].address + run * NH_PAGE_SIZE) ++run;
         if (!capture_read(capture_pages[i].address, capture_bytes + i * NH_PAGE_SIZE, run * NH_PAGE_SIZE)) {
+            diagnose_capture_pages(i, run);
             flags |= NH_MIRROR_INVALID; break;
         }
         for (j = i; j < i + run; ++j) {
@@ -501,6 +598,7 @@ void nh_logic_tick(void) {
         fault(1, 0, capture_count, subscription.budget_us);
         publish_incomplete(frame, NH_MIRROR_TRUNCATED, start); goto done;
     }
+    previous_capture_failed = 0;
     put_u32(packet, frame);
     put_u32(packet + 4, (reset_pending ? NH_MIRROR_RESET :
         subscription.page_removals && removed_count ? NH_MIRROR_REMOVED : 0) |
@@ -701,8 +799,11 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
         /* This request path has one I/O owner. Preparing membership does not
          * read game bytes, and cannot consume the game-thread time budget. */
         nh_page_seed_init(&next_seed);
-        for (i = 0; i < next.range_count && !next_seed.flags; ++i)
+        for (i = 0; i < next.range_count && !next_seed.flags; ++i) {
+            uint32_t first = next_seed.count;
             nh_page_seed_range(&next_seed, next.ranges[i].address, next.ranges[i].length, next.max_pages);
+            for (uint32_t j = first; j < next_seed.count; ++j) next_seed.ranges[j] = i;
+        }
         EnterCriticalSection(&state_lock);
         subscription = next; fixed_seed = next_seed; revision = ++subscription_revision;
         LeaveCriticalSection(&state_lock);
@@ -765,9 +866,20 @@ static int compare_times(const void *a, const void *b) {
     uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
     return x > y ? 1 : x < y ? -1 : 0;
 }
+static void format_fault(char *out, uint32_t capacity, const struct mirror_fault *f) {
+    snprintf(out, capacity, "{\"reason\":%lu,\"stage\":%lu,\"rule\":%lu,\"source\":%lu,\"address\":%lu,\"value\":%lu,\"limit\":%lu,\"frame\":%lu,\"revision\":%lu,\"range\":%lu,\"object\":%lu,\"requestAddress\":%lu,\"requestLength\":%lu,\"readAddress\":%lu,\"readLength\":%lu,\"memoryBase\":%lu,\"memorySize\":%lu,\"memoryState\":%lu,\"memoryProtect\":%lu,\"memoryType\":%lu,\"readError\":%lu,\"retryReadable\":%s,\"occurrences\":%lu,\"lastFrame\":%lu}",
+        (unsigned long)f->reason, (unsigned long)f->stage, (unsigned long)f->rule,
+        (unsigned long)f->source, (unsigned long)f->address, (unsigned long)f->value,
+        (unsigned long)f->limit, (unsigned long)f->frame, (unsigned long)f->revision,
+        (unsigned long)f->range, (unsigned long)f->object, (unsigned long)f->request_address,
+        (unsigned long)f->request_length, (unsigned long)f->read_address, (unsigned long)f->read_length,
+        (unsigned long)f->memory_base, (unsigned long)f->memory_size, (unsigned long)f->memory_state,
+        (unsigned long)f->memory_protect, (unsigned long)f->memory_type, (unsigned long)f->read_error,
+        f->retry_readable ? "true" : "false", (unsigned long)f->occurrences, (unsigned long)f->last_frame);
+}
 void nh_mirror_diagnostics(char *out, uint32_t capacity) {
-    char hook[256], detail[384];
-    uint32_t times[16384], time_count, p99;
+    char hook[256], detail[768], recent[6400], entry[768];
+    uint32_t times[16384], time_count, p99, used = 0;
     if (!capacity) return;
     if (initialized != 2) {
         snprintf(out, capacity, "\"logicFrames\":0,\"mirrorBytes\":0,\"hookUs\":0,\"droppedUpdates\":0,\"hookInstalled\":false");
@@ -780,18 +892,26 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
     qsort(times, time_count, sizeof(*times), compare_times);
     p99 = time_count ? times[(time_count * 99 + 99) / 100 - 1] : 0;
     EnterCriticalSection(&state_lock);
-    snprintf(detail, sizeof(detail), ",\"hookCalls\":%llu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"lastMirrorFault\":{\"reason\":%lu,\"stage\":%lu,\"rule\":%lu,\"source\":%lu,\"address\":%lu,\"value\":%lu,\"limit\":%lu}",
-        (unsigned long long)hook_calls, (unsigned long)p99, (unsigned long)time_count,
-        (unsigned long)last_fault.reason, (unsigned long)last_fault.stage, (unsigned long)last_fault.rule,
-        (unsigned long)last_fault.source, (unsigned long)last_fault.address, (unsigned long)last_fault.value, (unsigned long)last_fault.limit);
+    format_fault(detail, sizeof(detail), &last_fault);
+    recent[used++] = '[';
+    for (uint32_t i = 0; i < fault_history_count; ++i) {
+        uint32_t index = (fault_history_cursor + NH_FAULT_HISTORY - fault_history_count + i) % NH_FAULT_HISTORY;
+        format_fault(entry, sizeof(entry), fault_history + index);
+        if (i) recent[used++] = ',';
+        uint32_t length = (uint32_t)strlen(entry);
+        memcpy(recent + used, entry, length); used += length;
+    }
+    recent[used++] = ']'; recent[used] = 0;
     if (installed) snprintf(hook, sizeof(hook), "{\"site\":%lu,\"original\":[137,21,132,237,168,0],\"patched\":[%u,%u,%u,%u,%u,%u]}",
         (unsigned long)NH_HOOK_ADDRESS, detour[0],detour[1],detour[2],detour[3],detour[4],detour[5]);
     else strcpy(hook, "null");
-    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu%s",
+    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s",
         (unsigned long)logic_frames, (unsigned long long)mirror_bytes, (unsigned long long)hook_us_total,
         (unsigned long long)hook_us_max, (unsigned long long)budget_overruns, (unsigned long)dropped_updates,
         (unsigned long)truncated_updates, (unsigned long)invalid_updates, installed ? "true" : "false",
         (unsigned long)shadow_count, in_flight ? "true" : "false", (unsigned long)game_thread_id, hook,
-        (unsigned long)teardown_failures, (unsigned long)owned_count, detail);
+        (unsigned long)teardown_failures, (unsigned long)owned_count, (unsigned long long)hook_calls,
+        (unsigned long)p99, (unsigned long)time_count, (unsigned long long)fault_count,
+        (unsigned long long)fault_event_count, (unsigned long long)(fault_event_count - fault_history_count), detail, recent);
     LeaveCriticalSection(&state_lock);
 }

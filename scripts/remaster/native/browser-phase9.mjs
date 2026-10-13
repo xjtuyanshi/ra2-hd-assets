@@ -144,7 +144,7 @@ async function activateOwnedChrome(label) {
       '-l',
       'JavaScript',
       '-e',
-      `ObjC.import('AppKit'); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${ownedChrome.pid}); if (!app.activateWithOptions(3)) throw new Error('Owned Chrome activation failed');`,
+      `ObjC.import('AppKit'); const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${ownedChrome.pid}); const hidden = !!app.hidden; app.unhide; if (!app.activateWithOptions(3)) throw new Error('Owned Chrome activation failed'); JSON.stringify({hiddenBefore: hidden, hiddenAfter: !!app.hidden, active: !!app.active});`,
     ],
     { encoding: 'utf8', timeout: 5000 },
   );
@@ -154,6 +154,15 @@ async function activateOwnedChrome(label) {
   );
   await ownerIdle();
   await page.bringToFront();
+  await record('owned-chrome-activation-state', {
+    label,
+    app: activation.stdout?.trim(),
+    page: await page.evaluate(() => ({
+      hidden: document.hidden,
+      focused: document.hasFocus(),
+      fullscreen: !!document.fullscreenElement,
+    })),
+  });
   await wait('owned Chrome page actually visible', () => page.evaluate(() => !document.hidden), 10000);
   await record('owned-chrome-activated', {
     label,
@@ -1166,6 +1175,114 @@ async function execute(c) {
     });
   }
   if (c.action === 'command-state') return worker().evaluate(() => globalThis.__auditCore.getCommandState());
+  if (c.action === 'mirror-fault') {
+    assert(!webRoute, 'A native session is required');
+    const label = c.label ?? 'mirror-fault';
+    assert(/^[a-zA-Z0-9_-]+$/.test(label));
+    const proof = { startedAt: new Date().toISOString(), checkpoints: [] };
+    const save = () => writeFile(join(out, `${label}.json`), JSON.stringify(proof, null, 2));
+    const capture = async (stage) => {
+      const screenshot = await shot(`${label}-${stage}`, true);
+      const observed = await page.evaluate(() => ({
+        at: new Date().toISOString(),
+        shown: window.__hdBridge?.diagnostics?.shown,
+        presentation: window.__hdBridge?.presentation,
+        timeline: window.__hdBridge?.timeline,
+        notice: document.querySelector('#vm-hd-status')?.textContent,
+        noticeHidden: document.querySelector('#vm-hd-status')?.hidden,
+      }));
+      const native = await worker().evaluate(async () => {
+        const core = globalThis.__auditCore;
+        const bytes = (await core.connection.read(0xa8ed84, 4)).bytes;
+        return {
+          logicFrame: new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true),
+          running: core.running,
+          preparation: await core.getRenderPreparation(),
+          diagnostics: JSON.parse(new TextDecoder().decode(await core.connection.request(11))),
+        };
+      });
+      proof.checkpoints.push({ stage, screenshot, ...observed, native });
+      await save();
+    };
+    await capture('before');
+    try {
+      proof.injection = await worker().evaluate(async () => {
+        const core = globalThis.__auditCore;
+        const source = await core.connection.allocate(4096);
+        const target = await core.connection.allocate(4096);
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, target, true);
+        await core.connection.write(source, bytes);
+        await core.connection.free(target);
+        // Only these separately allocated probe pages are touched. Holding the
+        // test rule across reader rebuilds models a persistent dangling follow
+        // pointer; the original game's allocations and logic are unchanged.
+        const original = core.createPolicy;
+        const rule = { kind: 1, source, bytes: 4096, maxCount: 1, stride: 0 };
+        const wrap = (policy) => ({ ...policy, rules: [...policy.rules, rule] });
+        core.__faultProbe = { source, target, original };
+        core.createPolicy = (...args) => wrap(original(...args));
+        core.policy = wrap(core.policy);
+        core.subscribed = [];
+        void core.subscribe([]).catch(() => {});
+        return { source, freedTarget: target, at: new Date().toISOString(), rule };
+      });
+      await save();
+      await delay(1600);
+      await capture('original');
+      await page.keyboard.press('Escape');
+      await delay(800);
+      proof.originalInput = await state();
+      await capture('options');
+      // Escape opens this game's options but does not close it. Use the real
+      // resume control so a deliberately paused game cannot stall cleanup.
+      const resume = proof.originalInput.controls.find((control) => usable(control) && control.id === 1670);
+      assert(resume, 'Original picture has no usable ResumeMission control');
+      await click((resume.rect[0] + resume.rect[2]) / 2, (resume.rect[1] + resume.rect[3]) / 2);
+      await wait('original game resumed during unreadable follow', async () => !(await state()).modal);
+      await delay(500);
+      await capture('resumed-original');
+    } finally {
+      proof.releasedAt = new Date().toISOString();
+      try {
+        await worker().evaluate(async () => {
+          const core = globalThis.__auditCore;
+          const probe = core.__faultProbe;
+          if (!probe) return;
+          // Null the isolated follow pointer before freeing its owner, then use
+          // the normal subscription path to return to the unchanged game policy.
+          await core.connection.write(probe.source, new Uint8Array(4));
+          core.createPolicy = probe.original;
+          core.policy = probe.original(core.memory, core.metadata, core.hello.exe.sha256);
+          core.subscribed = [];
+          await core.subscribe([]);
+          await core.connection.free(probe.source);
+          delete core.__faultProbe;
+        });
+      } catch (error) {
+        proof.releaseError = String(error);
+        throw error;
+      } finally {
+        await save();
+      }
+    }
+    await wait(
+      'HD restored after actual unreadable follow',
+      () => page.evaluate(() => !!window.__hdBridge?.diagnostics?.shown),
+      60000,
+    );
+    await delay(800);
+    await capture('recovered');
+    proof.finishedAt = new Date().toISOString();
+    await save();
+    await record('mirror-fault-recovery', {
+      label,
+      startedAt: proof.startedAt,
+      finishedAt: proof.finishedAt,
+      injection: proof.injection,
+    });
+    return proof;
+  }
   if (c.action === 'memory-snapshot') {
     const processList = spawnSync('/bin/ps', ['-axo', 'pid=,rss=,command='], { encoding: 'utf8', timeout: 3000 });
     const games = (processList.stdout || '')

@@ -35,6 +35,7 @@ import {
   NativeMirrorMemory,
   NativeMemoryMiss,
   NativeReaderWorkingSet,
+  coalesceNativePages,
   readNativeWithRetry,
   runNativeTransaction,
 } from './memory';
@@ -47,8 +48,8 @@ export class NativeUnsupportedError extends Error {
   }
 }
 class NativeMirrorUnavailable extends Error {
-  constructor(flags: number) {
-    super(`No complete native mirror within 8 seconds (last flags ${flags})`);
+  constructor(flags: number, timeoutMs = 1000) {
+    super(`No complete native mirror within ${timeoutMs} ms (last flags ${flags})`);
     this.name = 'NativeMirrorUnavailable';
   }
 }
@@ -122,6 +123,41 @@ interface NativeInputState {
   movieTotalMs?: number;
   movieTrackingFailures?: number;
 }
+interface NativeMirrorRecovery {
+  sequence: number;
+  atEpochMs: number;
+  reason: string;
+  frame: number | null;
+  flags: number;
+  learned: NativeRange[];
+  learnedOwners: { name: string; ranges: NativeRange[] }[];
+  fault?: unknown;
+  resumedAtEpochMs?: number;
+}
+/** Frequent telemetry keeps the fault and its matching owners, not every retired reader page. */
+function compactMirrorRecovery(event: NativeMirrorRecovery) {
+  const fault = event.fault as { address?: unknown; readAddress?: unknown } | null | undefined;
+  const address = typeof fault?.address === 'number' ? fault.address : fault?.readAddress;
+  return {
+    sequence: event.sequence,
+    atEpochMs: event.atEpochMs,
+    resumedAtEpochMs: event.resumedAtEpochMs,
+    reason: event.reason,
+    frame: event.frame,
+    flags: event.flags,
+    retiredRangeCount: event.learned.length,
+    retiredPageCount: event.learned.reduce((sum, range) => sum + range.length / NATIVE_PAGE_SIZE, 0),
+    faultOwners:
+      typeof address === 'number'
+        ? event.learnedOwners
+            .filter((owner) =>
+              owner.ranges.some((range) => address >= range.address && address < range.address + range.length),
+            )
+            .map((owner) => owner.name)
+        : [],
+    fault: event.fault ?? null,
+  };
+}
 
 function mergeRanges(ranges: readonly NativeHostRange[]): NativeRange[] {
   const sorted = ranges
@@ -194,6 +230,8 @@ export class NativeCore {
   private additionalRanges: NativeRange[] = [];
   private resetSerial = 0;
   private completeRevision: number | null = null;
+  private requiredRevision: number | null = null;
+  private requiredResetAfter: number | null = null;
   private hookStarted = false;
   private metadata: NativeHostMetadata = { gameThreadId: 0 };
   private policyPrepared = false;
@@ -201,8 +239,17 @@ export class NativeCore {
   private recovering = false;
   private checkingCaptureFault = false;
   private capacityRecoveryEpoch = -1;
-  private recoveryAttempts = 0;
-  private recoveryWindowAt = 0;
+  private recoveryCount = 0;
+  private recoveryAt = -Infinity;
+  private recoveries: NativeMirrorRecovery[] = [];
+  private mirrorWatchdog: ReturnType<typeof setInterval> | null = null;
+  private completeMirrorAt = -Infinity;
+  private renderRequestedAt: number | null = null;
+  private renderDemandAt = -Infinity;
+  private renderPending = 0;
+  private completeRenderAt = -Infinity;
+  private completeRenderFrame: number | null = null;
+  private battleResumedAt = -Infinity;
   private subscriptionTail: Promise<void> = Promise.resolve();
   private render: ReaderSlot<GameRenderState> = { reader: null, previous: null, error: null };
   private command: ReaderSlot<GameCommandState> = { reader: null, previous: null, error: null };
@@ -211,6 +258,7 @@ export class NativeCore {
   private undo: NativeWrite[] = [];
   private readonly allocations = new Map<number, number>();
   private operationTail: Promise<unknown> = Promise.resolve();
+  private passthroughTail: Promise<unknown> = Promise.resolve();
   private hostFrames = 0;
   private stateReadMs = 0;
   private stateReads = 0;
@@ -241,6 +289,7 @@ export class NativeCore {
   private movieState: NativeInputState = {};
   private inputStateReadAt = -Infinity;
   private inputStateReadPending: Promise<NativeInputState> | null = null;
+  private checkingMirrorHealth = false;
   private inputState: NativeInputState = {};
   private menuSnapshotPending: Promise<MenuSnapshot | null> | null = null;
   private renderPreparationPending: Promise<GameRenderPreparation | null> | null = null;
@@ -255,19 +304,21 @@ export class NativeCore {
     this.connection = new NativeConnection(options);
   }
 
-  private status(phase: VmPhase, detail: string): void {
+  private status(phase: VmPhase, detail: string, notice?: string): void {
     this.phase = phase;
-    this.callbacks.onStatus?.({ phase, detail });
+    this.callbacks.onStatus?.({ phase, detail, ...(notice ? { notice } : {}) });
   }
   private fail(error: Error): Promise<boolean | null> {
     if (this.failure) return this.failure;
     if (this.closed) return Promise.resolve(null);
     this.running = false;
     this.rejectWaiters(error);
+    if (error instanceof NativeConnectionLostError && this.sessionTerminal) {
+      const notice = '游戏连接已中断，正在确认游戏是否已关闭。';
+      this.status('running', notice, notice);
+    }
     this.failure = (async () => {
-      const normalExit =
-        (error instanceof NativeConnectionLostError || error instanceof NativeMirrorUnavailable) &&
-        (await this.sessionTerminal);
+      const normalExit = error instanceof NativeConnectionLostError && (await this.sessionTerminal);
       // Explicit cancellation owns teardown, including aborting the observer.
       // Its aborted body must not revive this older transport failure as error.
       if (this.closed || this.stopping) return null;
@@ -317,6 +368,7 @@ export class NativeCore {
   }
   private nextMirror(afterReset?: number, atRevision?: number): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Native host is closed'));
+    const timeoutMs = this.running ? 1000 : 8000;
     return new Promise((resolve, reject) => {
       const waiter: MirrorWaiter = {
         resolve,
@@ -325,8 +377,8 @@ export class NativeCore {
         atRevision,
         timer: setTimeout(() => {
           this.waiters.delete(waiter);
-          reject(new NativeMirrorUnavailable(this.lastMirrorFlags));
-        }, 8000),
+          reject(new NativeMirrorUnavailable(this.lastMirrorFlags, timeoutMs));
+        }, timeoutMs),
       };
       this.waiters.add(waiter);
     });
@@ -340,6 +392,8 @@ export class NativeCore {
       update.subscriptionRevision === undefined
     )
       throw new Error('Native mirror omitted negotiated subscription revision');
+    const wasCurrent = this.hasCurrentMirror();
+    const previousMirrorFrame = this.memory.frame;
     this.lastMirrorFlags = update.flags;
     const complete = this.memory.apply(update);
     this.connection.notify(NativeMessageType.Ack, encodeU32(update.frame));
@@ -350,6 +404,10 @@ export class NativeCore {
     }
     if (update.flags & 2) this.resetSerial++;
     this.completeRevision = update.subscriptionRevision ?? null;
+    if (this.hasCurrentMirror()) {
+      if (!wasCurrent || previousMirrorFrame !== update.frame) this.completeMirrorAt = performance.now();
+      if (!wasCurrent && this.renderRequestedAt !== null) this.renderRequestedAt = performance.now();
+    }
     if (this.previousLogicFrame !== null && update.frame < this.previousLogicFrame) this.invalidateBattleReaders();
     // A retained complete mirror is not evidence for a second match. The new video mode must first be observed,
     // followed by a complete logic-boundary publication; loading pictures alone cannot release old state.
@@ -412,6 +470,13 @@ export class NativeCore {
   private observeInputState(state: NativeInputState): NativeInputState {
     this.inputStateReadAt = performance.now();
     if (this.closed) return state;
+    if (
+      (this.inputState.modal || this.inputState.menuVisible || this.inputState.moviePlaying) &&
+      !state.modal &&
+      !state.menuVisible &&
+      !state.moviePlaying
+    )
+      this.battleResumedAt = performance.now();
     this.inputState = state;
     this.movieState = {
       moviePlaying: state.moviePlaying,
@@ -619,6 +684,7 @@ export class NativeCore {
       if (this.options.pageCursor !== undefined && this.hello.surface.width > 0 && this.hello.surface.height > 0)
         await this.readCurrentPointer(this.hello.surface.width, this.hello.surface.height);
       this.running = true;
+      this.mirrorWatchdog = setInterval(() => this.checkMirrorHealth(), 250);
       this.status('running', '已连接本机游戏');
       this.requestNextFrame();
     } catch (error) {
@@ -653,8 +719,9 @@ export class NativeCore {
 
   private subscribe(ranges: readonly NativeRange[], owner: unknown = 'transaction'): Promise<void> {
     this.workingSet.learn(owner, ranges);
+    const epoch = this.readerEpoch;
     const operation = async () => {
-      if (!this.policy || !this.hello || this.closed) return;
+      if (!this.policy || !this.hello || this.closed || epoch !== this.readerEpoch) return;
       const next = mergeRanges([...this.policy.ranges, ...this.workingSet.ranges, ...this.additionalRanges]);
       if (sameRanges(next, this.subscribed)) return;
       const beforeReset = this.resetSerial;
@@ -671,6 +738,7 @@ export class NativeCore {
           pageRemovals: revisionSupported,
         }),
       );
+      if (epoch !== this.readerEpoch) return;
       if (revisionSupported && response.byteLength !== 4)
         throw new Error('Native subscription omitted negotiated revision');
       const revision = revisionSupported
@@ -679,6 +747,8 @@ export class NativeCore {
       this.subscribed = next;
       this.subscribedRules = rules;
       if (this.hookStarted) {
+        this.requiredRevision = revision ?? null;
+        this.requiredResetAfter = revision === undefined ? beforeReset : null;
         if (revision !== undefined) {
           if (!this.memory.complete || !revisionReached(this.completeRevision, revision))
             await this.nextMirror(undefined, revision);
@@ -759,7 +829,7 @@ export class NativeCore {
         fault.value === fault.limit
       ) {
         this.capacityRecoveryEpoch = epoch;
-        await this.recoverInvalidMirror(true);
+        await this.recoverInvalidMirror('capture-capacity');
       }
     } catch {
       // An unavailable diagnostic is not a capacity diagnosis; a later publication can try again.
@@ -767,24 +837,110 @@ export class NativeCore {
       this.checkingCaptureFault = false;
     }
   }
-  private async recoverInvalidMirror(capacity = false): Promise<void> {
-    if (this.recovering || this.closed || !this.policy || !this.hello) return;
-    this.recovering = true;
-    const now = performance.now();
-    if (now - this.recoveryWindowAt > 60_000) {
-      this.recoveryWindowAt = now;
-      this.recoveryAttempts = 0;
+  private hasCurrentMirror(): boolean {
+    return (
+      this.memory.complete &&
+      (this.requiredRevision === null || revisionReached(this.completeRevision, this.requiredRevision)) &&
+      (this.requiredResetAfter === null || this.resetSerial > this.requiredResetAfter)
+    );
+  }
+  private mirrorStaleReason(now: number): 'mirror-stale' | 'reader-stale' | null {
+    if (
+      !this.running ||
+      this.closed ||
+      this.recovering ||
+      this.renderRequestedAt === null ||
+      (!this.renderPending && now - this.renderDemandAt >= 1000) ||
+      this.menuSurface === true ||
+      this.inputState.modal ||
+      this.inputState.menuVisible ||
+      this.inputState.moviePlaying
+    )
+      return null;
+    const since = Math.max(this.renderRequestedAt, this.battleResumedAt);
+    if (now - Math.max(this.completeMirrorAt, since) >= 1000) return 'mirror-stale';
+    if (now - Math.max(this.completeRenderAt, since) >= 1000) return 'reader-stale';
+    return null;
+  }
+  private checkMirrorHealth(freshInput = false): void {
+    const reason = this.mirrorStaleReason(performance.now());
+    if (!reason) return;
+    if (freshInput) {
+      void this.recoverInvalidMirror(reason);
+      return;
     }
+    if (this.checkingMirrorHealth) return;
+    this.checkingMirrorHealth = true;
+    // A score screen or modal can stop logic without publishing another picture.
+    // Confirm current ownership before treating a cached battle state as a stalled mirror.
+    void this.readInputState()
+      .then(() => {
+        const currentReason = this.mirrorStaleReason(performance.now());
+        if (currentReason) return this.recoverInvalidMirror(currentReason);
+      })
+      .finally(() => {
+        this.checkingMirrorHealth = false;
+      })
+      .catch(() => undefined);
+  }
+  private async recoverInvalidMirror(reason = 'invalid-range'): Promise<void> {
+    if (this.recovering || this.closed || !this.policy || !this.hello) return;
+    const now = performance.now();
+    // A failed learned seed prevents every later complete read, so retirement cannot wait for reader success.
+    // Rate-limit rebuilding, never terminate a live game because an optional HD range remains unreadable.
+    if (now - this.recoveryAt < 1000) return;
+    this.recovering = true;
+    this.recoveryAt = now;
+    const learned = this.workingSet.ranges;
+    const learnedPages = rangePages(learned);
+    const recovery: NativeMirrorRecovery = {
+      sequence: ++this.recoveryCount,
+      atEpochMs: performance.timeOrigin + now,
+      reason,
+      frame: this.memory.frame,
+      flags: this.lastMirrorFlags,
+      learned,
+      learnedOwners: this.workingSet.scopes
+        .map(({ owner, ranges }) => ({
+          name:
+            owner === this.render
+              ? 'render'
+              : owner === this.command
+                ? 'command'
+                : owner === this.frame
+                  ? 'performance'
+                  : typeof owner === 'string'
+                    ? owner
+                    : 'opaque',
+          ranges: coalesceNativePages([...rangePages(ranges)].filter((page) => learnedPages.has(page))),
+        }))
+        .filter((owner) => owner.ranges.length > 0),
+    };
+    this.recoveries.push(recovery);
+    if (this.recoveries.length > 64) this.recoveries.shift();
+    void this.connection
+      .request(NativeMessageType.Diagnostics)
+      .then((bytes) => {
+        recovery.fault = (decodeJson(bytes) as { lastMirrorFault?: unknown }).lastMirrorFault;
+        console.warn('[native] HD mirror recovery', JSON.stringify(compactMirrorRecovery(recovery)));
+      })
+      .catch(() => undefined);
     try {
-      if (!capacity && ++this.recoveryAttempts > 3)
-        throw new Error('Native mirror repeatedly contains invalid pages; attachment stopped');
+      this.readerEpoch++;
+      this.rejectWaiters(new NativeMirrorUnavailable(this.lastMirrorFlags));
       this.workingSet.clear();
       this.additionalRanges = [];
       this.subscribed = [];
       this.subscribedRules = [];
+      // The negotiated transport sends page deltas, so keep its immutable baseline until removals arrive.
+      // No reader may consume that baseline until the replacement subscription publishes completely.
+      this.memory.invalidate();
+      this.completeRenderFrame = null;
       for (const slot of [this.render, this.command, this.frame]) {
         slot.reader = null;
-        if (capacity) slot.previous = null;
+        slot.previous = null;
+        slot.coldAt = undefined;
+        slot.error = `Native HD reader rebuilding: ${reason}`;
       }
       this.policy = this.createPolicy(this.memory, this.metadata, this.hello.exe.sha256);
       await this.subscribe([]);
@@ -793,7 +949,12 @@ export class NativeCore {
         // The replacement subscription can still publish after this wait expires.
         // Keep pictures/input alive; only a transport failure owns the exit handshake.
         for (const slot of [this.render, this.command, this.frame]) slot.error = error.message;
-      } else this.fail(error instanceof Error ? error : new Error(String(error)));
+      } else if (error instanceof NativeConnectionLostError) void this.fail(error);
+      else {
+        // A reader/subscription failure is not evidence that the native process stopped.
+        for (const slot of [this.render, this.command, this.frame])
+          slot.error = error instanceof Error ? error.message : String(error);
+      }
     } finally {
       this.recovering = false;
     }
@@ -804,6 +965,10 @@ export class NativeCore {
   private invalidateBattleReaders(): void {
     this.readerEpoch++;
     this.previousLogicFrame = null;
+    this.renderRequestedAt = null;
+    this.completeRenderAt = -Infinity;
+    this.completeRenderFrame = null;
+    this.battleResumedAt = performance.now();
     // An incomplete reader never reaches working-set retirement. End its allocation scope at the actual video
     // mode/frame epoch instead, before the next map can inherit freed or over-capacity pages.
     this.workingSet.clear();
@@ -825,7 +990,7 @@ export class NativeCore {
   }
   private async readExclusive<T>(slot: ReaderSlot<T>, factory: () => (() => T | null) | null): Promise<T | null> {
     if (this.menuSurface === true || this.awaitingBattleMirror) return null;
-    if (!this.running || !this.policy || !this.memory.complete || this.recovering) return slot.previous;
+    if (!this.running || !this.policy || !this.hasCurrentMirror() || this.recovering) return null;
     const epoch = this.readerEpoch;
     const at = performance.now();
     try {
@@ -864,8 +1029,8 @@ export class NativeCore {
       );
       if (epoch !== this.readerEpoch) return null;
       if (this.memory.operationMissed) {
-        slot.error = 'Native reader retry budget exhausted; retaining previous complete result';
-        return slot.previous;
+        slot.error = 'Native reader retry budget exhausted; awaiting a complete result';
+        return null;
       }
       slot.previous = result;
       slot.error = null;
@@ -873,13 +1038,22 @@ export class NativeCore {
         this.workingSet.complete(slot, this.memory, cold);
         if (cold) slot.coldAt = performance.now();
         await this.subscribe([]);
+        if (epoch === this.readerEpoch && slot === this.render) {
+          if (this.completeRenderFrame !== (result as GameRenderState).frame) {
+            this.completeRenderAt = performance.now();
+            this.completeRenderFrame = (result as GameRenderState).frame;
+          }
+          const recovery = this.recoveries.at(-1);
+          if (recovery && recovery.resumedAtEpochMs === undefined)
+            recovery.resumedAtEpochMs = performance.timeOrigin + this.completeRenderAt;
+        }
       }
       return epoch === this.readerEpoch ? result : null;
     } catch (error) {
       if (epoch !== this.readerEpoch) return null;
       if (error instanceof NativeMemoryMiss || error instanceof NativeMirrorUnavailable) {
         slot.error = error.message;
-        return slot.previous;
+        return null;
       }
       slot.error = error instanceof Error ? error.message : String(error);
       throw error;
@@ -904,9 +1078,18 @@ export class NativeCore {
   }
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;
+    this.renderDemandAt = performance.now();
     const input = await this.readInputState();
     if (input.menuVisible || input.modal || input.moviePlaying) return null;
-    return this.read(this.render, () => this.policy!.createRenderReader());
+    this.checkMirrorHealth(true);
+    if (this.recovering) return null;
+    if (this.renderRequestedAt === null && this.memory.frame !== null) this.renderRequestedAt = performance.now();
+    this.renderPending++;
+    try {
+      return await this.read(this.render, () => this.policy!.createRenderReader());
+    } finally {
+      this.renderPending--;
+    }
   }
   async getCommandState(): Promise<GameCommandState | null> {
     if (!this.running) return null;
@@ -915,7 +1098,7 @@ export class NativeCore {
     return this.read(this.command, () => this.policy!.createCommandReader());
   }
   async getGamePerformance(): Promise<GamePerformanceSample | null> {
-    if (!this.memory.complete) return null;
+    if (!this.hasCurrentMirror()) return null;
     const counters = await this.read(this.frame, () => this.policy!.createFrameReader());
     return counters ? this.meter.sample(counters, performance.now(), this.running) : null;
   }
@@ -933,10 +1116,14 @@ export class NativeCore {
     });
   }
   setTacticalPassthrough(flags: number): Promise<boolean> {
-    return this.exclusive(async () => {
-      if (!this.running || !this.policy || !this.options.renderPassthrough || !this.memory.complete) return false;
-      await this.preparePolicy();
+    // Restoring original painting cannot queue behind an HD reader waiting for an unreadable mirror.
+    // Own the small drawing-control transactions separately; their direct reads never change the mirror.
+    const pending = this.passthroughTail.then(async () => {
+      if (!this.running || !this.policy || !this.options.renderPassthrough) return false;
+      if (!this.passthrough && flags === 0) return true;
+      if (flags !== 0 && (!this.hasCurrentMirror() || this.recovering)) return false;
       if (!this.passthrough) {
+        await this.preparePolicy();
         this.passthrough = await runNativeTransaction(
           this.memory,
           (transaction) => this.policy!.installPassthrough(transaction, transaction.reserve),
@@ -955,8 +1142,14 @@ export class NativeCore {
         );
       }
       if (!this.passthrough) return false;
-      return runNativeTransaction(this.memory, (transaction) => this.passthrough!.set(transaction, flags), this.host);
+      return runNativeTransaction(
+        this.memory,
+        (transaction) => this.passthrough!.set(transaction, this.recovering ? 0 : flags),
+        this.host,
+      );
     });
+    this.passthroughTail = pending.catch(() => undefined);
+    return pending;
   }
 
   /** Called only after the presenter ACK, so hidden pages naturally backpressure native picture capture. */
@@ -1063,7 +1256,7 @@ export class NativeCore {
   flushFiles(): Promise<void> {
     return Promise.reject(new NativeUnsupportedError('page file persistence'));
   }
-  async getDiagnostics(_action: VmDiagnosticAction): Promise<VmDiagnostics> {
+  async getDiagnostics(action: VmDiagnosticAction): Promise<VmDiagnostics> {
     const native = decodeJson(await this.connection.request(NativeMessageType.Diagnostics));
     if (!native || typeof native !== 'object') throw new Error('Invalid native diagnostics');
     return {
@@ -1087,6 +1280,29 @@ export class NativeCore {
         stateReadCpuMs: this.stateReadCpuMs,
         stateReadCpuMaxMs: this.stateReadCpuMaxMs,
         readerOperations: this.readerOperations.slice(),
+        mirrorRecovery: {
+          count: this.recoveryCount,
+          omitted: this.recoveryCount - this.recoveries.length,
+          rebuilding: this.recovering,
+          lastCompleteMirrorAtEpochMs: Number.isFinite(this.completeMirrorAt)
+            ? performance.timeOrigin + this.completeMirrorAt
+            : null,
+          lastCompleteRenderAtEpochMs: Number.isFinite(this.completeRenderAt)
+            ? performance.timeOrigin + this.completeRenderAt
+            : null,
+          events: this.recoveries.map((event) =>
+            action === 'usage'
+              ? compactMirrorRecovery(event)
+              : {
+                  ...event,
+                  learned: event.learned.map((range) => ({ ...range })),
+                  learnedOwners: event.learnedOwners.map((owner) => ({
+                    ...owner,
+                    ranges: owner.ranges.map((range) => ({ ...range })),
+                  })),
+                },
+          ),
+        },
         decode: this.connection.decodeDiagnostics(),
         frames: this.hostFrames,
         inputQueueLength: this.inputQueue.length,
@@ -1193,9 +1409,12 @@ export class NativeCore {
     this.sessionStatusAbort?.abort();
     this.sessionStatusAbort = null;
     this.running = false;
+    if (this.mirrorWatchdog !== null) clearInterval(this.mirrorWatchdog);
+    this.mirrorWatchdog = null;
     this.inputQueue.length = 0;
     this.pointerReadPicture = null;
     await this.operationTail;
+    await this.passthroughTail;
     let cleanupError: unknown;
     try {
       if (this.hiddenPresentationUndo.length) {

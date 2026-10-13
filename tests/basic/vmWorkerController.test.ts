@@ -504,6 +504,16 @@ describe('VmWorkerController request-scoped errors', () => {
     expect(startHarness.messages).toContainEqual({ type: 'status', phase: 'error', detail: 'start failed' });
   });
 
+  it('preserves a running notice without converting a pending terminal result into an error', async () => {
+    const { controller, messages, core } = harness();
+    await controller.handleMessage({ type: 'init', config: config(), requestId: 1 });
+    const notice = '游戏连接已中断，正在确认游戏是否已关闭。';
+    core.callbacks!.onStatus!({ phase: 'running', detail: notice, notice });
+    expect(messages.at(-1)).toEqual({ type: 'status', phase: 'running', detail: notice, notice });
+    core.callbacks!.onStatus!({ phase: 'exited', detail: '游戏已关闭' });
+    expect(messages.at(-1)).toEqual({ type: 'status', phase: 'exited', detail: '游戏已关闭' });
+  });
+
   it('rebuilds a session package provider from init message files (memory kind)', async () => {
     const captured: { source: GameSource | null } = { source: null };
     const { controller, messages } = harness({

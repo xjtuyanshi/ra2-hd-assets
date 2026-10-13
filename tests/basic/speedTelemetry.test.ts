@@ -14,6 +14,7 @@ import {
 import { installRuntimeToolbar, type RuntimeToolbarCallbacks } from '../../src/ui/pages/game/runtimeToolbar';
 import { toolbarState } from '../../src/ui/pages/game/state/uiState';
 import { createTranslator } from '../../src/ui/shared/i18n/translate';
+import { startSessionFeelTelemetry } from '../../src/ui/pages/game/sessionFeelTelemetry';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -205,6 +206,7 @@ function telemetry(
   const stopped = vi.fn();
   let at = 0;
   const publish = vi.fn();
+  const observe = vi.fn();
   const posted: Array<{ url: string; records: SpeedRecord[] }> = [];
   const diagnosticsCall = vi.fn(async () => {
     const next = answers.shift();
@@ -219,6 +221,7 @@ function telemetry(
     frameSize: () => ({ width: 1728, height: 1080 }),
     scene: () => scene({ hdFrames: Math.round(at * 0.06) }),
     publish,
+    observe,
     environment: {
       now: () => at,
       wallClock: () => 1_800_000_000_000 + at,
@@ -240,6 +243,7 @@ function telemetry(
   return {
     handle,
     publish,
+    observe,
     posted,
     diagnosticsCall,
     stopped,
@@ -253,6 +257,15 @@ function telemetry(
 }
 
 describe('the telemetry loop', () => {
+  it('shares native faults even when no complete logic sample can produce a speed record', async () => {
+    const unavailable = diagnostics(5000, 301, { game: null, native: { mirrorFaultCount: 31 } });
+    const t = telemetry([diagnostics(0, 1), unavailable]);
+    await t.settle();
+    await t.tick();
+    expect(t.posted).toHaveLength(0);
+    expect(t.observe).toHaveBeenLastCalledWith(null, unavailable);
+    t.handle.dispose();
+  });
   it('retains local records and toolbar rates without probing a server sink when endpoint is null', async () => {
     const t = telemetry([diagnostics(100, 1000), diagnostics(5100, 1210)], undefined, null);
     await t.settle();
@@ -416,5 +429,63 @@ describe('development-only wiring', () => {
     for (const file of ['page.ts', 'runtimeToolbar.ts', 'hdBridge.ts'])
       expect(source(`../../src/ui/pages/game/${file}`), file).not.toContain('__perf');
     expect(source('../../src/ui/pages/game/speedTelemetry.ts')).toContain("'/__perf/speed'");
+  });
+});
+
+describe('session feel fault persistence', () => {
+  it('posts compact recovery and agent fault counters through the existing feel sink', () => {
+    let at = 0;
+    vi.stubGlobal('performance', { now: () => at, timeOrigin: 1_800_000_000_000 });
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { setInterval: () => 1 }));
+    vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false, hasFocus: () => true }));
+    vi.stubGlobal('screen', { width: 1728, height: 1117 });
+    vi.stubGlobal('innerWidth', 1728);
+    vi.stubGlobal('innerHeight', 1117);
+    vi.stubGlobal('devicePixelRatio', 2);
+    vi.stubGlobal('PerformanceObserver', undefined);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    const post = vi.fn(async () => ({ status: 200 }));
+    vi.stubGlobal('fetch', post);
+    const screen = Object.assign(new EventTarget(), {
+      getBoundingClientRect: () => ({ x: 0, y: 0, width: 1728, height: 1117 }),
+    }) as unknown as HTMLCanvasElement;
+    const telemetry = startSessionFeelTelemetry({
+      screen,
+      backend: 'native',
+      scene: () => scene(),
+      activity: () => null,
+    });
+    const fault = { address: 0x9000, rule: 12, stage: 2, readError: 998 };
+    const mirrorRecovery = {
+      count: 4,
+      omitted: 2,
+      events: [{ sequence: 3, retiredPageCount: 1, retiredRangeCount: 1, faultOwners: ['render'], fault }],
+    };
+    const expected = {
+      mirrorRecovery,
+      mirrorFaultCount: 12,
+      mirrorFaultEvents: 9,
+      recentMirrorFaultsOmitted: 1,
+      lastMirrorFault: fault,
+      recentMirrorFaults: [{ ...fault, occurrences: 4 }],
+    };
+    const record = speedRecord(
+      speedSample(diagnostics(0, 1), 0, 0, null),
+      speedSample(diagnostics(5000, 301), 5000, 300, null),
+      context(),
+    )!;
+    telemetry.speed(record);
+    telemetry.speed(null, { ...expected, unrelated: 'not a telemetry field' });
+    at = 5000;
+    telemetry.flush();
+    expect(post).toHaveBeenCalledOnce();
+    const call = post.mock.calls[0] as unknown as [string, { body: string }];
+    expect(call[0]).toBe('/__perf/feel');
+    const sent = JSON.parse(call[1].body)[0];
+    expect(sent.native).toMatchObject(expected);
+    expect(sent.logicFps).toBeNull();
+    expect(sent.native).not.toHaveProperty('unrelated');
+    expect(sent.native.mirrorRecovery.events[0]).not.toHaveProperty('learned');
+    telemetry.dispose();
   });
 });

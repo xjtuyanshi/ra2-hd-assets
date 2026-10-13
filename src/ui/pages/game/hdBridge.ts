@@ -51,7 +51,7 @@ import { t } from '../../shared/i18n/translate';
  * host is told why the original picture is shown (`publishStatus`), once per match (see NOTICE_MS).
  *
  * Every route keeps the game's complete, live original picture while HD prepares. A complete HD scene
- * cross-fades in over 300 ms, once per match; there is no deadline that can expose missing units. Passthrough
+ * cross-fades in over 300 ms at match start and after reader recovery; no deadline can expose missing units. Passthrough
  * is enabled only after that live-picture fade, and its overlays take over on an actual keyed native frame.
  * Failed preparation leaves the original playable and publishes only a small status notice.
  *
@@ -140,6 +140,8 @@ const COMMAND_BAR_HEIGHT = 32;
 const PASSTHROUGH_TRAIL_MS = 500;
 /** Brief state gaps (including other input windows) keep the last HD picture instead of flashing the original. */
 const STATE_HIDE_HOLD_MS = 500;
+/** A pending reader must never leave its last HD picture on screen indefinitely. */
+const STATE_REQUEST_STALL_MS = 1000;
 /** Blend two live pictures without fading the independent pointer or the sidebar. */
 const CROSS_FADE_MS = 300;
 /** A busy or incomplete native mirror is transient, not evidence of missing passthrough support. */
@@ -517,6 +519,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let preparationAskedAt = -Infinity;
   let keyFrameAt: number | null = null;
   let hidePending: { at: number; reason: string } | null = null;
+  let recoveringState = false;
+  let recoveryOriginalFrameSeen = false;
   let presentation: HdBridgeTransition['to'] = 'original';
   /** Holds the shown view's frame rate (null with ?hd-pace=off: every display frame is drawn). */
   const pacer =
@@ -709,12 +713,19 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     host.publishStatus?.(text);
   };
   const preparationNotice = t('正在准备高清战场…');
+  // The native launcher's recovery and terminal notices are deliberately in the owner's language.
+  const recoveryNotice = '高清画面已暂停，正在恢复；您可以继续操作。';
   const clearFallback = () => {
     fallback = null;
     // A missing snapshot can clear a fallback while the actual battlefield still prepares.
-    if (published !== preparationNotice) publish(null);
+    if (published !== preparationNotice && published !== recoveryNotice) publish(null);
   };
   const syncPreparationNotice = () => {
+    if (recoveringState) {
+      if (enabled && nativeBattleSurface && !nativeDialogSurface && !fallback) publish(recoveryNotice);
+      else if (published === recoveryNotice) publish(null);
+      return;
+    }
     // An actual native battlefield, not an early map hint, owns this notice. It never covers play or replaces
     // a missing-cache/incomplete-art explanation, and a completed reveal does not reannounce on state gaps.
     const waiting =
@@ -873,6 +884,27 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     }
     if (hole || passthroughRequest) hidePending ??= { at: performance.now(), reason };
   };
+  const recoverOriginal = (reason: string) => {
+    hidePending = null;
+    setHole(null, reason);
+    requestPassthrough(0);
+    changePresentation('original', reason);
+    if (!nativeBattleSurface || nativeDialogSurface || recoveringState) return;
+    recoveringState = true;
+    recoveryOriginalFrameSeen = false;
+    // A read begun before the recovery can complete late with the old image. The next poll must own its state.
+    battleEpoch++;
+    latestState = null;
+    pushed = null;
+    stateMap = null;
+    stateFrame = 0;
+    revealed = false;
+    fadeStartedAt = null;
+    fadeFinished = false;
+    ui?.update(null);
+    if (live) live.outOfSight = true;
+    syncPreparationNotice();
+  };
   const onGameFrame = (picture: VmFrame) => {
     if (stopped) return;
     if (native) {
@@ -899,6 +931,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         nativeBattleSurface = false;
         nativeMenuSurface = true;
         hidePending = null;
+        recoveringState = false;
+        recoveryOriginalFrameSeen = false;
+        if (published === recoveryNotice) publish(null);
         setHole(null, 'menu-video-mode');
         requestPassthrough(0);
         // This actual unkeyed menu picture has already replaced every trailing keyed battlefield frame.
@@ -924,7 +959,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       }
       syncPreparationNotice();
     }
-    if (!passthroughRequest || passthroughAcceptedAt === null || !picture.rgb565) return;
+    if (!picture.rgb565) return;
     const rect = tacticalRect();
     if (!rect) return;
     // Both runtimes acknowledge the configuration write before a rendered frame applies it. Keep the full HD
@@ -935,10 +970,21 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         const px = Math.floor(rect.x + rect.width * x);
         const py = Math.floor(rect.y + rect.height * y);
         if (picture.rgb565[py * picture.width + px] === RENDER_PASSTHROUGH_KEY_RGB565) {
-          keyFrameAt = performance.now();
-          present();
+          if (passthroughRequest && passthroughAcceptedAt !== null) {
+            keyFrameAt = performance.now();
+            present();
+          }
           return;
         }
+      }
+    }
+    if (native && !passthroughRequest) {
+      // This complete original frame supersedes queued keyed frames. Retire the old HD tail immediately.
+      if (recoveringState && !nativeDialogSurface) recoveryOriginalFrameSeen = true;
+      if (keyRect) {
+        keyRect = null;
+        keyUntil = 0;
+        present();
       }
     }
   };
@@ -1119,6 +1165,9 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       fadeStartedAt = null;
       fadeFinished = false;
       revealed = false;
+      recoveringState = false;
+      recoveryOriginalFrameSeen = false;
+      if (published === recoveryNotice) publish(null);
       warmed = false;
       matchTypes.clear();
       collectedAt = -Infinity;
@@ -1232,14 +1281,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** Show the view once the match runs and the frame just drawn (and the ones before it) lacked nothing. */
   const reveal = (now: number) => {
     if (!live || !preparing() || prematch || stateFrame < 1 || !pushed) return;
+    if (recoveringState && !recoveryOriginalFrameSeen) return;
     if (live.settledFrames < REVEAL_SETTLED_FRAMES) return;
     if (!live.localArtComplete) {
       if (latestState?.localHouse !== undefined && latestState.localHouse >= 0 && live.loadingArt() === 0)
         publish(t('高清素材不完整，继续显示原版画面'));
       return;
     }
-    if (!showHd('view-settled', true)) return;
+    if (!showHd(recoveringState ? 'state-restored' : 'view-settled', true)) return;
     revealed = true;
+    recoveringState = false;
     publish(null);
     live.outOfSight = false;
     timeline.revealedAt = now;
@@ -1276,7 +1327,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           hideForUnavailableState('state-reader-error');
         },
       )
-      .catch((error) => console.warn('[HD] could not apply the render state', error))
+      .catch((error) => {
+        if (stopped || epoch !== battleEpoch) return;
+        pollFailed = true;
+        latestState = null;
+        ui?.update(null);
+        hideForUnavailableState('state-apply-error');
+        console.warn('[HD] could not apply the render state', error);
+      })
       .finally(() => {
         polling = false;
         if (native) scheduleNativePoll();
@@ -1431,13 +1489,19 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     stallMonitor?.frame(now);
     prepareEarly(now);
     syncPreparationNotice();
+    if (
+      native &&
+      enabled &&
+      nativeBattleSurface &&
+      !nativeDialogSurface &&
+      revealed &&
+      polling &&
+      now - lastPollAt >= STATE_REQUEST_STALL_MS
+    )
+      recoverOriginal('state-reader-timeout');
     if (hidePending && now - hidePending.at >= STATE_HIDE_HOLD_MS) {
       const reason = hidePending.reason;
-      hidePending = null;
-      setHole(null, reason);
-      // An in-flight passthrough request can precede a keyed frame, so explicitly disable it as well.
-      requestPassthrough(0);
-      changePresentation('original', reason);
+      recoverOriginal(reason);
     }
     if (hole && !fadeFinished && fadeStartedAt !== null) {
       if (now - fadeStartedAt >= CROSS_FADE_MS) {
@@ -1549,6 +1613,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     get presentation() {
       return {
         mode: presentation,
+        recovering: recoveringState,
+        recoveryOriginalFrameSeen,
         curtain: false,
         fading: !!hole && !fadeFinished && fadeStartedAt !== null,
         hidePending: !!hidePending,
@@ -1633,7 +1699,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     scene,
     frame: onGameFrame,
     menuSide: () => menuSide,
-    battleActive: () => inBattle && !nativeDialogSurface,
+    // A failed mirror does not turn a real battlefield into a menu or release its input confinement.
+    battleActive: () => (inBattle || (native && nativeBattleSurface)) && !nativeDialogSurface,
     activity: () => live?.activity() ?? null,
   });
 }

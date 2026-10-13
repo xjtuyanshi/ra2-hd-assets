@@ -342,7 +342,11 @@ export class WorkerVmClient implements VmShell {
         break;
       }
       case 'status':
-        this.callbacks.onStatus?.({ phase: message.phase, detail: message.detail });
+        this.callbacks.onStatus?.({
+          phase: message.phase,
+          detail: message.detail,
+          ...(message.notice === undefined ? {} : { notice: message.notice }),
+        });
         break;
       case 'movie-playback':
         this.callbacks.onMoviePlayback?.(message.playing);

@@ -559,7 +559,7 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT)
         nh_dispatch_input(type, id, buffer + 16, payload_length);
     else if (type == NH_DIAGNOSTICS) {
-        char fragment[2048], hidden_host[1024], picture[256], cursor[512], diagnostic[4608];
+        char fragment[8192], hidden_host[1024], picture[256], cursor[512], diagnostic[12288];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
             nh_mirror_diagnostics(fragment, sizeof(fragment));

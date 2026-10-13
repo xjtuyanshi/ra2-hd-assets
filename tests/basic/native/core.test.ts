@@ -46,7 +46,8 @@ class FakeAgent implements NativeWebSocket {
   hookEnabled = false;
   hidden = false;
   threadId = 77;
-  mirrorFault: { reason: number; stage: number; rule: number; value: number; limit: number } | null = null;
+  mirrorFault: { reason: number; stage: number; rule: number; value: number; limit: number; address?: number } | null =
+    null;
   refuseInput = false;
   holdInput = false;
   pendingInput: NativePacket[] = [];
@@ -675,15 +676,15 @@ describe('native core session and presenter lifecycle', () => {
     const start = core.start();
     agent.hello();
     await start;
-    const good = await core.getRenderState(),
-      footprint = core.getMirrorFootprint(),
+    expect((await core.getRenderState())?.frame).toBe(7);
+    const footprint = core.getMirrorFootprint(),
       subscriptions = agent.count(NativeMessageType.Subscribe);
     unknown = true;
     await expect(core.getRenderState()).rejects.toThrow('descriptor');
     expect(core.getMirrorFootprint().ranges).toEqual(footprint.ranges);
     expect(agent.count(NativeMessageType.Subscribe)).toBe(subscriptions);
     agent.mirror(2, [], 1);
-    expect(await core.getRenderState()).toBe(good);
+    expect(await core.getRenderState()).toBeNull();
     unknown = false;
     agent.mirror(3, [], 0);
     expect((await core.getRenderState())?.frame).toBe(7);
@@ -1005,7 +1006,7 @@ describe('native core session and presenter lifecycle', () => {
     scheduled.shift()!();
     expect(frames).not.toHaveBeenCalled();
   });
-  it('returns the previous good render result when an optional reader swallows repeated typed misses', async () => {
+  it('withholds the previous render result when an optional reader swallows repeated typed misses', async () => {
     const { core, agent, mode, renderFactory } = await started();
     const good = await core.getRenderState();
     expect(good?.frame).toBe(7);
@@ -1015,7 +1016,7 @@ describe('native core session and presenter lifecycle', () => {
       await flush();
       agent.mirror(frame, [{ address: 0x1000, bytes: agent.initial }], frame === 2 ? 2 : 0);
     }
-    expect(await retry).toBe(good);
+    expect(await retry).toBeNull();
     expect(renderFactory.mock.calls.length).toBeGreaterThan(1);
     expect(agent.count(NativeMessageType.Read)).toBe(0);
     expect(core.memory.misses).toBeGreaterThan(0);
@@ -1125,6 +1126,10 @@ describe('native core session and presenter lifecycle', () => {
     agent.hello();
     await start;
     agent.onclose?.({});
+    expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({
+      phase: 'running',
+      notice: '游戏连接已中断，正在确认游戏是否已关闭。',
+    });
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(60000);
     expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
@@ -1390,16 +1395,17 @@ describe('native core session and presenter lifecycle', () => {
     expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'error', detail: 'input unsupported' });
     expect(await core.getRenderState()).toBeNull();
   });
-  it('retains the previous good reader result and an explicit diagnostic when the fresh mirror times out', async () => {
+  it('withholds the previous reader result and reports why when the fresh mirror times out', async () => {
     const { core, agent, mode } = await started();
     const good = await core.getRenderState();
+    expect(good?.frame).toBe(7);
     vi.useFakeTimers();
     mode.missing = true;
     const pending = core.getRenderState();
     await flush();
     expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
     await vi.advanceTimersByTimeAsync(8000);
-    expect(await pending).toBe(good);
+    expect(await pending).toBeNull();
     const diagnostics = await core.getDiagnostics('sample');
     expect(diagnostics.native).toMatchObject({ lastReaderError: expect.stringContaining('No complete native mirror') });
     expect(agent.closes).toBe(0);
@@ -1469,5 +1475,163 @@ describe('native core session and presenter lifecycle', () => {
     await flush();
     expect(statuses.mock.calls.at(-1)?.[0]).toMatchObject({ phase: 'exited', detail: '游戏已关闭' });
     expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+  });
+  it('retires a poisoned learned range, preserves live input/pictures, and accepts the replacement delta', async () => {
+    vi.useFakeTimers();
+    const statuses = vi.fn(),
+      frames = vi.fn();
+    const { core, agent, mode, scheduled } = setup({ onStatus: statuses, onFrame: frames });
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    mode.missing = true;
+    const read = core.getRenderState();
+    await flush();
+    expect(core.getMirrorFootprint().ranges.learned).toEqual([{ address: 0x9000, length: 4096 }]);
+    agent.mirrorFault = { reason: 3, stage: 2, rule: 12, value: 4096, limit: 4096, address: 0x9000 };
+    agent.mirror(2, [], 4);
+    await flush();
+    expect(await read).toBeNull();
+    expect(core.getMirrorFootprint().ranges.learned).toEqual([]);
+    expect(await core.getRenderState()).toBeNull();
+    core.postMessage(0x100, 27);
+    agent.picture(2);
+    scheduled.shift()!();
+    await flush();
+    expect(agent.count(NativeMessageType.Input)).toBe(1);
+    expect(frames).toHaveBeenCalledOnce();
+    mode.missing = false;
+    // Revision-capable hosts retain the accepted base pages and send only changed/removed pages.
+    agent.mirror(3, [], 0);
+    await flush();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      mirrorRecovery: {
+        count: 1,
+        rebuilding: false,
+        events: [
+          expect.objectContaining({
+            reason: 'invalid-range',
+            fault: agent.mirrorFault,
+            learnedOwners: [{ name: 'render', ranges: [{ address: 0x9000, length: 4096 }] }],
+            resumedAtEpochMs: expect.any(Number),
+          }),
+        ],
+      },
+    });
+    const usage = (await core.getDiagnostics('usage')).native?.mirrorRecovery as {
+      count: number;
+      omitted: number;
+      events: Record<string, unknown>[];
+    };
+    expect(usage).toMatchObject({
+      count: 1,
+      omitted: 0,
+      events: [
+        {
+          reason: 'invalid-range',
+          retiredPageCount: 1,
+          retiredRangeCount: 1,
+          faultOwners: ['render'],
+          fault: agent.mirrorFault,
+        },
+      ],
+    });
+    expect(usage.events[0]).not.toHaveProperty('learned');
+    expect(usage.events[0]).not.toHaveProperty('learnedOwners');
+    expect(agent.closes).toBe(0);
+    expect(statuses.mock.calls.map(([status]) => status.phase)).not.toContain('error');
+  });
+  it('rebuilds again after more than three invalid ranges without terminating the native game', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started();
+    for (let index = 0; index < 5; index++) {
+      agent.mirror(index * 2 + 2, [], 4);
+      await flush();
+      agent.mirror(index * 2 + 3, [{ address: 0x1000, bytes: agent.initial }], 2);
+      await flush();
+      core.setKeyState(65, !!(index % 2));
+      await vi.advanceTimersByTimeAsync(1001);
+    }
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(6);
+    expect(agent.count(NativeMessageType.Input)).toBe(5);
+    expect(agent.closes).toBe(0);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({ mirrorRecovery: { count: 5 } });
+  });
+  it('expires an unchanged complete state within a second while a real modal pauses the watchdog', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(1);
+    agent.modal = false;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await core.getRenderState()).toBeNull();
+    await flush();
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
+    agent.mirror(2, [{ address: 0x1000, bytes: agent.initial }], 2);
+    await flush();
+    expect((await core.getRenderState())?.frame).toBe(7);
+  });
+  it('refreshes modal ownership before rebuilding a stalled battle and during an existing recovery', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    const inputReads = agent.count(NativeMessageType.InputState);
+    // The game reaches a score dialog while the hidden page receives no new picture or render poll.
+    agent.modal = true;
+    await vi.advanceTimersByTimeAsync(501);
+    expect(agent.count(NativeMessageType.InputState)).toBeGreaterThan(inputReads);
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(1);
+    expect((await core.getDiagnostics('usage')).native).toMatchObject({ mirrorRecovery: { count: 0 } });
+
+    // A genuine invalid range still starts recovery, but must not block newer modal observations.
+    agent.mirror(2, [], 4);
+    await flush();
+    const recoveryInputReads = agent.count(NativeMessageType.InputState);
+    expect(await core.getRenderState()).toBeNull();
+    expect(agent.count(NativeMessageType.InputState)).toBe(recoveryInputReads + 1);
+    agent.modal = false;
+    agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }], 2);
+    await flush();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
+  });
+  it('restores original drawing while an HD reader is waiting for an unavailable mirror', async () => {
+    const { core, agent, mode, policyFactory } = setup({}, { renderPassthrough: true });
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    const setFlags = vi.fn((_memory: GuestMemory, _flags: number) => true);
+    vi.mocked(policyFactory).mockImplementation((...args) => ({
+      ...factory(...args),
+      installPassthrough: () => ({
+        supported: 7,
+        keyRgb565: 0xf81f,
+        configAddress: 0x1000,
+        set: setFlags,
+        read: () => ({ flags: 0, applied: 0, counters: {} }),
+      }),
+    }));
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(await core.setTacticalPassthrough(7)).toBe(true);
+    mode.missing = true;
+    const read = core.getRenderState();
+    await flush();
+    agent.mirror(2, [], 1);
+    expect(core.memory.complete).toBe(false);
+    expect(await core.setTacticalPassthrough(0)).toBe(true);
+    expect(setFlags.mock.calls.at(-1)?.[1]).toBe(0);
+    agent.mirror(3, [], 4);
+    await flush();
+    expect(await read).toBeNull();
+    agent.mirror(4, [{ address: 0x1000, bytes: agent.initial }], 2);
+    await flush();
   });
 });

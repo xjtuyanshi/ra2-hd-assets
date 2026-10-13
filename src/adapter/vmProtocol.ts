@@ -7,7 +7,7 @@ import type { VmFrame, Win32Call, VmNetworkStatus } from '../vm86/win32';
 import type { SupportedGameId } from '../games/catalog';
 import type { GuestMemRecordResult } from './memRecord';
 import type { VmAttachResult, VmPointerState } from './vmShell';
-import type { VmCallBatch, VmPhase } from '../app/session/runtimeEvents';
+import type { VmCallBatch, VmStatus } from '../app/session/runtimeEvents';
 import type { GameResolution } from '../games/resolution';
 import type { Ra2NetworkConfig } from '../games/ra2/networkTransport';
 import type { MenuSnapshot } from '../vm86/menuSnapshot';
@@ -118,7 +118,7 @@ export type WorkerToMainMessage =
   | { type: 'network-status'; status: VmNetworkStatus }
   | { type: 'attach-maps-done'; result: VmAttachResult; requestId: number }
   | { type: 'probe'; ready: true }
-  | { type: 'status'; phase: VmPhase; detail: string }
+  | ({ type: 'status' } & VmStatus)
   | { type: 'shell-page'; title: string }
   | { type: 'movie-playback'; playing: boolean }
   | { type: 'call-batch'; batch: VmCallBatch }

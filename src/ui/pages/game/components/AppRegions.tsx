@@ -96,6 +96,8 @@ export function ScreenStatus() {
     resource = useStore(state.resourceStatus);
   const upscale = useStore(state.upscaleStatus);
   const hd = useStore(state.hdStatus);
+  const runtime = useStore(state.runtimeNotice);
+  const pictureNotice = runtime ?? hd;
   const skipMovie = useStore(state.movieSkip);
   return (
     <>
@@ -124,8 +126,8 @@ export function ScreenStatus() {
       <output id="vm-upscale-status" role="status" aria-live="polite" hidden={upscale === null}>
         {upscale && localizeText(upscale)}
       </output>
-      <output id="vm-hd-status" role="status" aria-live="polite" hidden={hd === null}>
-        {hd}
+      <output id="vm-hd-status" role="status" aria-live="polite" hidden={pictureNotice === null}>
+        {pictureNotice}
       </output>
       {network && <StatusView id="vm-network-status" bottom={38} value={network} />}
       {resource && <StatusView id="vm-resource-status" bottom={8} value={resource} />}

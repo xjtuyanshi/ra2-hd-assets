@@ -89,6 +89,49 @@ function covers(ranges: readonly { address: number; length: number }[], address:
 }
 
 describe('native YR policy and bulk cell discovery', () => {
+  it.each([
+    ['infantry', G.infantry, false],
+    ['building', G.buildings, false],
+    ['aircraft', G.aircraft, false],
+    ['unit', G.units, true],
+  ] as const)(
+    'bounds %s bodies at a committed heap tail without truncating larger classes',
+    (_kind, source, crosses) => {
+      const memory = createGuestMemory(),
+        object = 0xc0f880;
+      // The common and concrete vectors can both name the last live allocation before an uncommitted page.
+      for (const [vector, items] of [
+        [G.technos, 0xba0000],
+        [source, 0xba1000],
+      ] as const) {
+        writeU32(memory, vector + 4, items);
+        writeU32(memory, vector + 16, 1);
+        writeU32(memory, items, object);
+      }
+      const pages = policyPages(memory);
+      expect(pages.has(0xc0f000)).toBe(true);
+      expect(pages.has(0xc10000)).toBe(crosses);
+    },
+  );
+
+  it('bounds owned buildings and mixed factory children without following an unrelated tail page', () => {
+    const memory = createGuestMemory(),
+      house = 0xd00000,
+      object = 0xc0f880,
+      factory = 0xc20000;
+    writeU32(memory, G.houses + 4, 0xba0000);
+    writeU32(memory, G.houses + 16, 1);
+    writeU32(memory, 0xba0000, house);
+    writeU32(memory, house + 0x68 + 4, 0xba1000);
+    writeU32(memory, house + 0x68 + 16, 1);
+    writeU32(memory, 0xba1000, object);
+    writeU32(memory, house + 0x53bc, factory);
+    writeU32(memory, factory + 0x58, object);
+    const pages = policyPages(memory);
+    expect(pages.has(0xc0f000)).toBe(true);
+    expect(pages.has(0xc10000)).toBe(false);
+  });
+
   it('captures active effect type bodies and bullet metadata without reserving unused animation types', () => {
     const source = createGuestMemory(),
       types = 0xba0000,
@@ -345,7 +388,7 @@ describe('native YR policy and bulk cell discovery', () => {
         gameThreadId: 1,
       }),
     ).toThrow('pinned executable');
-    expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.technos)).toMatchObject({ kind: 2, bytes: 0x800 });
+    expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.technos)).toMatchObject({ kind: 2, bytes: 0x520 });
     expect(YR_NATIVE_FOLLOW_RULES.find((rule) => rule.source === G.map + 0x13c)).toMatchObject({
       kind: 1,
       bytes: 4,
@@ -539,7 +582,7 @@ describe('native YR policy and bulk cell discovery', () => {
         kind: 8,
         source: G.houses,
         stride: offset + 0x58 * 0x10000,
-        bytes: 0x800,
+        bytes: 0x520,
         maxCount: L.houses,
       });
     }

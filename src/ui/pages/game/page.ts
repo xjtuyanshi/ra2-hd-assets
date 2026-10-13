@@ -15,6 +15,7 @@ import {
   networkStatus,
   upscaleStatus,
   hdStatus,
+  runtimeNotice,
   selectGameFiles,
   cancelSourceRequest,
   mapRequest,
@@ -596,6 +597,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
 
   const releaseRuntime = async (preserveFullscreen = false) => {
     runtimeReleased = true;
+    runtimeNotice.set(null);
     menuAbort.abort();
     window.clearInterval(resizeTimer);
     window.clearTimeout(refreshNoticeTimer);

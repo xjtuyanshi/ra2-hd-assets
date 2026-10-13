@@ -5,6 +5,8 @@ export type VmPhase = 'loading' | 'ready' | 'running' | 'blocked' | 'exited' | '
 export interface VmStatus {
   phase: VmPhase;
   detail: string;
+  /** Optional visible notice while the game surface remains open; absent on the next status clears it. */
+  notice?: string;
 }
 
 export interface VmCallBatch {
