@@ -24,6 +24,8 @@ typedef struct {
     uint32_t id, length;
     uint8_t *bytes;
     int ready;
+    LARGE_INTEGER published_at, hook_started;
+    uint32_t revision;
 } nh_packet;
 typedef struct { uint32_t address, size; int pinned; } nh_allocation;
 
@@ -38,6 +40,73 @@ static uint8_t **nh_active_staging;
 static CRITICAL_SECTION nh_queue_lock;
 static nh_packet nh_replies[NH_REPLY_SLOTS], nh_streams[2];
 static uint32_t nh_reply_head, nh_reply_count, nh_reply_bytes;
+/* Owned by the I/O thread; no additional game-thread lock is needed. */
+static uint64_t nh_mirrors_sent, nh_mirror_queue_us, nh_mirror_send_us;
+static uint32_t nh_mirror_queue_max_us, nh_mirror_send_max_us;
+static LARGE_INTEGER nh_counter_frequency;
+#define NH_MIRROR_TRACE_CAPACITY 128u
+struct nh_mirror_trace {
+    uint64_t sequence;
+    uint32_t frame, revision, flags;
+    LARGE_INTEGER hook_started, published_at, send_started, send_finished, ack_at;
+};
+static struct nh_mirror_trace nh_mirror_trace[NH_MIRROR_TRACE_CAPACITY];
+static uint32_t nh_mirror_trace_count, nh_mirror_trace_cursor;
+static uint64_t nh_mirror_trace_sequence;
+static LARGE_INTEGER nh_clock_anchor;
+static uint64_t nh_clock_epoch_us, nh_clock_correlation_span_ns;
+static uint64_t nh_diagnostic_count, nh_diagnostic_us;
+static uint32_t nh_diagnostic_last_us, nh_diagnostic_max_us;
+
+static uint64_t nh_elapsed_us(LARGE_INTEGER before, LARGE_INTEGER after) {
+    uint64_t ticks = (uint64_t)(after.QuadPart - before.QuadPart);
+    uint64_t frequency = (uint64_t)nh_counter_frequency.QuadPart;
+    return (ticks / frequency) * 1000000u + (ticks % frequency) * 1000000u / frequency;
+}
+static uint64_t nh_epoch_us(LARGE_INTEGER at) {
+    return nh_clock_epoch_us + nh_elapsed_us(nh_clock_anchor, at);
+}
+void nh_mirror_trace_ack(uint32_t frame, LARGE_INTEGER at) {
+    /* ACK dispatch and stream sending have the same I/O owner. The matching
+     * state-lock-protected ACK has already been validated by the mirror. */
+    for (uint32_t i = 0; i < nh_mirror_trace_count; ++i) {
+        uint32_t index = (nh_mirror_trace_cursor + NH_MIRROR_TRACE_CAPACITY - 1 - i) % NH_MIRROR_TRACE_CAPACITY;
+        struct nh_mirror_trace *trace = nh_mirror_trace + index;
+        if (trace->frame == frame && !trace->ack_at.QuadPart) { trace->ack_at = at; return; }
+    }
+}
+static void nh_trace_diagnostics(char *out, uint32_t capacity) {
+    uint32_t used = 0;
+    int written = snprintf(out, capacity,
+        "\"mirrorTraceClock\":{\"epochMs\":%llu.%03u,\"qpcTicks\":%llu,\"frequencyHz\":%llu,\"correlationSpanUs\":%llu.%03u},\"mirrorTraceOmitted\":%llu,\"mirrorTrace\":[",
+        (unsigned long long)(nh_clock_epoch_us / 1000u), (unsigned)(nh_clock_epoch_us % 1000u),
+        (unsigned long long)nh_clock_anchor.QuadPart, (unsigned long long)nh_counter_frequency.QuadPart,
+        (unsigned long long)(nh_clock_correlation_span_ns / 1000u), (unsigned)(nh_clock_correlation_span_ns % 1000u),
+        (unsigned long long)(nh_mirror_trace_sequence - nh_mirror_trace_count));
+    if (written < 0 || (uint32_t)written >= capacity) return;
+    used = (uint32_t)written;
+    for (uint32_t i = 0; i < nh_mirror_trace_count; ++i) {
+        uint32_t index = (nh_mirror_trace_cursor + NH_MIRROR_TRACE_CAPACITY - nh_mirror_trace_count + i) % NH_MIRROR_TRACE_CAPACITY;
+        const struct nh_mirror_trace *trace = nh_mirror_trace + index;
+        char ack[32];
+        uint64_t hook_us = nh_epoch_us(trace->hook_started), publish_us = nh_epoch_us(trace->published_at);
+        uint64_t start_us = nh_epoch_us(trace->send_started), end_us = nh_epoch_us(trace->send_finished);
+        if (trace->ack_at.QuadPart) {
+            uint64_t ack_us = nh_epoch_us(trace->ack_at);
+            snprintf(ack, sizeof(ack), "%llu.%03u", (unsigned long long)(ack_us / 1000u), (unsigned)(ack_us % 1000u));
+        } else strcpy(ack, "null");
+        written = snprintf(out + used, capacity - used,
+            "%s{\"sequence\":%llu,\"frame\":%u,\"revision\":%u,\"flags\":%u,\"hookStartEpochMs\":%llu.%03u,\"publishEpochMs\":%llu.%03u,\"sendStartEpochMs\":%llu.%03u,\"sendEndEpochMs\":%llu.%03u,\"ackEpochMs\":%s}",
+            i ? "," : "", (unsigned long long)trace->sequence, trace->frame, trace->revision, trace->flags,
+            (unsigned long long)(hook_us / 1000u), (unsigned)(hook_us % 1000u),
+            (unsigned long long)(publish_us / 1000u), (unsigned)(publish_us % 1000u),
+            (unsigned long long)(start_us / 1000u), (unsigned)(start_us % 1000u),
+            (unsigned long long)(end_us / 1000u), (unsigned)(end_us % 1000u), ack);
+        if (written < 0 || (uint32_t)written >= capacity - used) return;
+        used += (uint32_t)written;
+    }
+    snprintf(out + used, capacity - used, "]");
+}
 static nh_allocation nh_allocations[NH_ALLOC_SLOTS];
 static uint32_t nh_allocated;
 static char nh_token[129], nh_origin[256], nh_hash[65];
@@ -209,6 +278,7 @@ int nh_publish(uint16_t type, const void *payload, uint32_t length) {
     if (!packet->ready && nh_connected()) {
         memcpy(packet->bytes, payload, length);
         packet->type = type; packet->id = 0; packet->length = length; packet->ready = 1;
+        QueryPerformanceCounter(&packet->published_at);
         result = 1;
     }
     LeaveCriticalSection(&nh_queue_lock);
@@ -216,7 +286,8 @@ int nh_publish(uint16_t type, const void *payload, uint32_t length) {
     return result;
 }
 
-int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length) {
+static int nh_publish_move_traced(uint16_t type, uint8_t **payload, uint32_t length,
+    LARGE_INTEGER hook_started, uint32_t revision) {
     nh_packet *packet;
     int result = 0;
     if (!nh_ready || !nh_connected() || length > NH_MAX_MESSAGE || !payload || !*payload || !length) return 0;
@@ -227,10 +298,28 @@ int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length) {
         uint8_t *idle = packet->bytes;
         packet->bytes = *payload; *payload = idle;
         packet->type = type; packet->id = 0; packet->length = length; packet->ready = 1;
+        packet->hook_started = hook_started; packet->revision = revision;
+        QueryPerformanceCounter(&packet->published_at);
         result = 1;
     }
     LeaveCriticalSection(&nh_queue_lock);
     return result;
+}
+
+int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length) {
+    LARGE_INTEGER no_hook = {0};
+    return nh_publish_move_traced(type, payload, length, no_hook, 0);
+}
+int nh_mirror_mailbox_available(void) {
+    int available;
+    if (!nh_ready || !nh_connected() || !TryEnterCriticalSection(&nh_queue_lock)) return 0;
+    available = !nh_streams[0].ready && nh_connected();
+    LeaveCriticalSection(&nh_queue_lock);
+    return available;
+}
+
+int nh_publish_mirror(uint8_t **payload, uint32_t length, LARGE_INTEGER hook_started, uint32_t revision) {
+    return nh_publish_move_traced(NH_MIRROR, payload, length, hook_started, revision);
 }
 
 static int nh_crypto(ALG_ID algorithm, const void *bytes, DWORD length, uint8_t *digest, DWORD digest_length) {
@@ -559,14 +648,27 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT)
         nh_dispatch_input(type, id, buffer + 16, payload_length);
     else if (type == NH_DIAGNOSTICS) {
-        char fragment[8192], hidden_host[1024], picture[256], cursor[512], diagnostic[12288];
+        /* One I/O owner, with no recursive receive. Keep large formatting buffers
+         * off the receive stack used by every high-frequency input and ACK. */
+        static char fragment[8192], hidden_host[1024], picture[256], cursor[512], trace[49152], diagnostic[65536];
         if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
         else {
+            LARGE_INTEGER format_started, format_finished;
+            QueryPerformanceCounter(&format_started);
             nh_mirror_diagnostics(fragment, sizeof(fragment));
             nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
             nh_picture_diagnostics(picture, sizeof(picture));
             nh_cursor_diagnostics(cursor, sizeof(cursor));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"cursor\":%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, cursor);
+            nh_trace_diagnostics(trace, sizeof(trace));
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"cursor\":%s,\"mirrorMessagesSent\":%llu,\"mirrorQueueUs\":%llu,\"mirrorSendUs\":%llu,\"mirrorQueueMaxUs\":%u,\"mirrorSendMaxUs\":%u,\"diagnosticFormatCount\":%llu,\"diagnosticFormatUs\":%llu,\"diagnosticFormatLastUs\":%u,\"diagnosticFormatMaxUs\":%u,%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, cursor,
+                (unsigned long long)nh_mirrors_sent, (unsigned long long)nh_mirror_queue_us,
+                (unsigned long long)nh_mirror_send_us, nh_mirror_queue_max_us, nh_mirror_send_max_us,
+                (unsigned long long)nh_diagnostic_count, (unsigned long long)nh_diagnostic_us,
+                nh_diagnostic_last_us, nh_diagnostic_max_us, trace);
+            QueryPerformanceCounter(&format_finished);
+            nh_diagnostic_last_us = (uint32_t)nh_elapsed_us(format_started, format_finished);
+            if (nh_diagnostic_last_us > nh_diagnostic_max_us) nh_diagnostic_max_us = nh_diagnostic_last_us;
+            ++nh_diagnostic_count; nh_diagnostic_us += nh_diagnostic_last_us;
             nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
         }
     } else nh_error(id, "Unsupported request type");
@@ -601,7 +703,28 @@ static int nh_flush(SOCKET socket, uint8_t **staging) {
     LeaveCriticalSection(&nh_queue_lock);
     if (reply && nh_reply_space) SetEvent(nh_reply_space);
     if (!found) return 1;
-    ok = nh_send_packet(socket, &packet);
+    if (packet.type == NH_MIRROR) {
+        LARGE_INTEGER before, after;
+        uint32_t queue_us, send_us;
+        QueryPerformanceCounter(&before);
+        ok = nh_send_packet(socket, &packet);
+        QueryPerformanceCounter(&after);
+        queue_us = (uint32_t)((uint64_t)(before.QuadPart - packet.published_at.QuadPart) * 1000000u / nh_counter_frequency.QuadPart);
+        send_us = (uint32_t)((uint64_t)(after.QuadPart - before.QuadPart) * 1000000u / nh_counter_frequency.QuadPart);
+        if (ok) {
+            struct nh_mirror_trace *trace = nh_mirror_trace + nh_mirror_trace_cursor;
+            memset(trace, 0, sizeof(*trace));
+            trace->sequence = ++nh_mirror_trace_sequence;
+            trace->frame = nh_u32(packet.bytes); trace->flags = nh_u32(packet.bytes + 4);
+            trace->revision = packet.revision; trace->hook_started = packet.hook_started;
+            trace->published_at = packet.published_at; trace->send_started = before; trace->send_finished = after;
+            nh_mirror_trace_cursor = (nh_mirror_trace_cursor + 1) % NH_MIRROR_TRACE_CAPACITY;
+            if (nh_mirror_trace_count < NH_MIRROR_TRACE_CAPACITY) ++nh_mirror_trace_count;
+            ++nh_mirrors_sent; nh_mirror_queue_us += queue_us; nh_mirror_send_us += send_us;
+            if (queue_us > nh_mirror_queue_max_us) nh_mirror_queue_max_us = queue_us;
+            if (send_us > nh_mirror_send_max_us) nh_mirror_send_max_us = send_us;
+        }
+    } else ok = nh_send_packet(socket, &packet);
     if (ok && packet.type == NH_PICTURE) nh_picture_sent();
     if (reply) free(packet.bytes);
     return ok ? 2 : 0;
@@ -613,7 +736,7 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
     nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
-    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
+    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"mirrorWindow\":2,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
         NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_hidden_active() ? "true" : "false", hidden_host, nh_exe_size, nh_pe_timestamp, nh_hash,
         nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES, NH_MIRROR_MAX_BUDGET_US);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;
@@ -644,6 +767,19 @@ static DWORD WINAPI nh_io_thread(void *unused) {
     int initialized = 0;
     (void)unused;
     nh_io_thread_id = GetCurrentThreadId();
+    QueryPerformanceFrequency(&nh_counter_frequency);
+    {
+        LARGE_INTEGER before, after;
+        FILETIME file_time;
+        ULARGE_INTEGER stamp;
+        QueryPerformanceCounter(&before);
+        GetSystemTimeAsFileTime(&file_time);
+        QueryPerformanceCounter(&after);
+        stamp.LowPart = file_time.dwLowDateTime; stamp.HighPart = file_time.dwHighDateTime;
+        nh_clock_anchor.QuadPart = before.QuadPart + (after.QuadPart - before.QuadPart) / 2;
+        nh_clock_epoch_us = (stamp.QuadPart - UINT64_C(116444736000000000)) / 10u;
+        nh_clock_correlation_span_ns = (uint64_t)(after.QuadPart - before.QuadPart) * 1000000000u / (uint64_t)nh_counter_frequency.QuadPart;
+    }
     if (!nh_agent_configured()) { InterlockedExchange(&nh_running, 0); return 0; }
     /* A configured agent owns process-lifetime executable reservations and its
      * worker may still be unwinding after nonblocking DllMain teardown. Pin the

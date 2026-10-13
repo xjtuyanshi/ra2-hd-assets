@@ -89,6 +89,8 @@ export interface HdBridgeHost {
   publishStalls?(count: number, longestMs: number): void;
   /** A shown HD canvas draw and the logic snapshot it used. */
   presented?(frame: number): void;
+  /** Complete snapshot delivered to the page, before its next draw opportunity. */
+  stateReceived?(frame: number): void;
 }
 
 /**
@@ -460,6 +462,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let liveMap: string | null = null;
   /** Last snapshot pushed to `live`; readers return the identical object while nothing changed. */
   let pushed: GameRenderState | null = null;
+  /** Real native publications waiting for their draw, never more than one state behind the newest receipt. */
+  const nativeDrawQueue: { state: GameRenderState; receivedAt: number }[] = [];
   let loading: string | null = null;
   /** Maps whose HD view failed to load, with the time from which a load is tried again. */
   const failed = new Map<string, number>();
@@ -641,7 +645,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
             if (capture && capture.endAtMs === null) {
               capture.drawnFrames++;
               if (shown) capture.shownFrames++;
-              append(capture.draws, { atMs, frame: stateFrame, shown });
+              append(capture.draws, { atMs, frame: pushed?.frame ?? stateFrame, shown });
             }
             frameCapture.draw({ atMs, shown });
           },
@@ -839,6 +843,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
 
   const setHole = (rect: FrameRect | null, reason = 'state-update') => {
     const next = enabled ? rect : null;
+    if (!next) nativeDrawQueue.length = 0;
     if (JSON.stringify(next) === JSON.stringify(hole)) return;
     hole = next;
     changePresentation(next ? 'hd' : 'original', reason);
@@ -922,7 +927,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       }
       const battleSurface = picture.width > 800 || picture.height > 600;
       if (battleSurface) {
-        if (!nativeBattleSurface) battleEpoch++;
+        if (!nativeBattleSurface) {
+          battleEpoch++;
+          nativeDrawQueue.length = 0;
+        }
         nativeMenuSurface = false;
         timeline.firstBattleFrameAt ??= performance.now();
         nativeBattleSurface = true;
@@ -1051,6 +1059,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         liveMap = mapId;
         failed.delete(mapId);
         pushed = null;
+        nativeDrawQueue.length = 0;
         upcomingKey = '';
         lastLayout = '';
         appliedBuffer = null;
@@ -1142,8 +1151,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (stopped) return;
     // A retained native mirror can outlive Abort/score's switch back to the menu video mode.
     if (nativeMenuSurface || nativeDialogSurface) state = null;
+    const receivedAt = performance.now();
     pollFailed = false;
     diagnostics?.state(state);
+    if (state?.map) host.stateReceived?.(state.frame);
     latestState = state;
     inBattle = !!state?.map;
     ui?.update(state?.sidebar ?? null);
@@ -1203,6 +1214,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (fallback && fallback.until === Infinity && stateFrame > fallback.frame)
       fallback.until = performance.now() + NOTICE_MS;
     if (!state || !mapId || !mapName || !state.view) {
+      nativeDrawQueue.length = 0;
       hideForUnavailableState(
         !state ? 'state-unavailable' : !mapId || !mapName ? 'map-unavailable' : 'view-unavailable',
       );
@@ -1232,8 +1244,19 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     }
     // A match snapshot ends the preparation; before the match has objects, a prepared view keeps its list.
     if (state !== pushed && !(prematch && timeline.warmAt !== null && !revealed)) {
-      live.push(toSnapshot(state));
-      pushed = state;
+      if (native && enabled && revealed && fadeFinished && hole && !recoveringState) {
+        const newest = nativeDrawQueue.at(-1);
+        if (newest?.state !== state) {
+          // A newer publication of one logic frame can still change its view, selection or discrete effects.
+          if (newest?.state.frame === state.frame) nativeDrawQueue[nativeDrawQueue.length - 1] = { state, receivedAt };
+          else nativeDrawQueue.push({ state, receivedAt });
+          if (nativeDrawQueue.length > 2) nativeDrawQueue.shift();
+        }
+      } else {
+        nativeDrawQueue.length = 0;
+        live.push(toSnapshot(state));
+        pushed = state;
+      }
     }
     if (!topEffects && live.hd.topEffectsEnabled) {
       topEffects = true;
@@ -1323,6 +1346,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           if (stopped || epoch !== battleEpoch) return;
           pollFailed = true;
           latestState = null;
+          nativeDrawQueue.length = 0;
           ui?.update(null);
           hideForUnavailableState('state-reader-error');
         },
@@ -1331,6 +1355,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         if (stopped || epoch !== battleEpoch) return;
         pollFailed = true;
         latestState = null;
+        nativeDrawQueue.length = 0;
         ui?.update(null);
         hideForUnavailableState('state-apply-error');
         console.warn('[HD] could not apply the render state', error);
@@ -1395,9 +1420,19 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       });
   };
 
+  // One request per draw interval drifts behind both the game and the display when timers round up or drawing
+  // delays their turn. A shown native view gets a request opportunity between draws as well, so its asynchronous
+  // reply can arrive before the next draw. The outstanding-request guard still bounds work to one RPC.
+  const nativePollInterval = () =>
+    !enabled
+      ? IDLE_POLL_MS
+      : hole
+        ? Math.min(NATIVE_POLL_MS, (pacer?.pacedIntervalMs ?? NATIVE_POLL_MS) / 2)
+        : NATIVE_POLL_MS;
+
   const scheduleNativePoll = () => {
     if (stopped || nativePollTimer !== null) return;
-    const interval = enabled ? NATIVE_POLL_MS : IDLE_POLL_MS;
+    const interval = nativePollInterval();
     // Count from the request's start, so decoding time does not add another
     // complete poll interval. The previous request has finished before scheduling.
     const delay = Math.max(0, lastPollAt + interval - performance.now());
@@ -1409,7 +1444,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       // Timer delays are rounded by the browser. A callback already queued when an animation frame took its
       // turn must also respect the latest request's actual start, without overlapping or catching up in bursts.
       if (polling) return;
-      if (now - lastPollAt < (enabled ? NATIVE_POLL_MS : IDLE_POLL_MS)) {
+      if (now - lastPollAt < nativePollInterval()) {
         scheduleNativePoll();
         return;
       }
@@ -1515,7 +1550,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     else if (passthroughEverRequested && passthroughRequest === 0 && passthroughConfirmed !== 0) requestPassthrough(0);
     // Take a due native request before drawing can delay its timer. The independent timer still delivers states
     // without display callbacks or ready art; both paths share the same minimum interval and outstanding request.
-    if (native && enabled && !polling && now - lastPollAt >= NATIVE_POLL_MS) {
+    if (native && enabled && !polling && now - lastPollAt >= nativePollInterval()) {
       if (nativePollTimer !== null) clearTimeout(nativePollTimer);
       nativePollTimer = null;
       poll(performance.now());
@@ -1531,6 +1566,23 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees.
         if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(judgedInterval(now - shownAt)));
         shownAt = now;
+        if (native && enabled && revealed && fadeFinished && hole) {
+          const next = nativeDrawQueue.shift();
+          if (next) {
+            // Preserve actual arrival time for LiveView interpolation instead of restarting it at this draw.
+            try {
+              live.push(toSnapshot(next.state), next.receivedAt);
+              pushed = next.state;
+            } catch (error) {
+              nativeDrawQueue.length = 0;
+              pollFailed = true;
+              latestState = null;
+              ui?.update(null);
+              hideForUnavailableState('state-apply-error');
+              console.warn('[HD] could not apply the render state', error);
+            }
+          }
+        }
         live.render();
         diagnostics?.draw(enabled && revealed && !!hole);
         shownFrames++;
@@ -1566,6 +1618,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     toggle() {
       if (stopped) return enabled;
       enabled = !enabled;
+      nativeDrawQueue.length = 0;
       if (native && !polling) {
         if (nativePollTimer !== null) clearTimeout(nativePollTimer);
         nativePollTimer = null;
@@ -1651,6 +1704,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     stallMonitor?.dispose();
     stallMonitor = null;
     latestState = null;
+    nativeDrawQueue.length = 0;
     hidePending = null;
     changePresentation('original', 'bridge-stopped');
     if (passthroughEverRequested) void host.vm.setTacticalPassthrough(0).catch(() => undefined);
@@ -1679,13 +1733,15 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (globals.__hdBridge === handle) delete globals.__hdBridge;
   };
   const scene = (): HdBridgeScene | null => {
-    const state = latestState;
+    const hdShown = !!live && !!hole;
+    // A brief unavailable-state hold still shows the last drawn HD picture. Observation must follow the visible
+    // surface, or original-picture callbacks compete with HD telemetry until the actual hole is removed.
+    const state = latestState?.map ? latestState : hdShown ? pushed : null;
     if (stopped || !state?.map) return null;
     let localObjects = 0;
     for (const object of state.objects) if (object.owner === state.localHouse) localObjects++;
-    const hdShown = !!live && !!hole;
     return {
-      map: stateMap,
+      map: state === latestState ? stateMap : liveMap,
       objects: state.objects.length,
       localObjects,
       hdShown,

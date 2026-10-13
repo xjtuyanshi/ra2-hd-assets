@@ -1143,6 +1143,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
           publishQuality: (tier, tiers) => toolbar.setHdQuality(tier, tiers),
           publishStalls: (count, longestMs) => toolbar.setStalls(count, longestMs),
           presented: (frame) => feelTelemetry?.frame('hd', frame),
+          stateReceived: (frame) => feelTelemetry?.stateReceived(frame),
         });
         // Only a running bridge has a view to switch: the button appears and the key stops reaching the game.
         toolbar.setHdView(true);

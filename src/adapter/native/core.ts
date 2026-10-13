@@ -107,6 +107,12 @@ interface MirrorWaiter {
   afterReset?: number;
   atRevision?: number;
 }
+interface RenderPublicationWaiter {
+  promise: Promise<void>;
+  resolve(): void;
+  timer: ReturnType<typeof setTimeout>;
+  startedAt: number;
+}
 interface NativeInputOperation {
   kind: number;
   a: number;
@@ -133,6 +139,13 @@ interface NativeMirrorRecovery {
   learnedOwners: { name: string; ranges: NativeRange[] }[];
   fault?: unknown;
   resumedAtEpochMs?: number;
+}
+interface NativeCadenceEvent {
+  sequence: number;
+  stage: 'mirror' | 'built' | 'handoff';
+  frame: number;
+  atEpochMs: number;
+  durationMs: number;
 }
 /** Frequent telemetry keeps the fault and its matching owners, not every retired reader page. */
 function compactMirrorRecovery(event: NativeMirrorRecovery) {
@@ -224,6 +237,8 @@ export class NativeCore {
   private creditOutstanding = false;
   private readonly unsubscribe: (() => void)[] = [];
   private readonly waiters = new Set<MirrorWaiter>();
+  private renderPublicationWaiter: RenderPublicationWaiter | null = null;
+  private renderTargetFps: number | null = null;
   private subscribed: NativeRange[] = [];
   private subscribedRules: NativeHostFollowRule[] = [];
   private readonly workingSet = new NativeReaderWorkingSet();
@@ -265,6 +280,41 @@ export class NativeCore {
   private stateReadCpuMs = 0;
   private stateReadCpuMaxMs = 0;
   private readerOperations: { startEpochMs: number; durationMs: number }[] = [];
+  private readonly cadence = {
+    mirrors: 0,
+    completeMirrors: 0,
+    distinctMirrors: 0,
+    truncatedMirrors: 0,
+    invalidMirrors: 0,
+    mirrorApplyMs: 0,
+    mirrorApplyMaxMs: 0,
+    renderRequests: 0,
+    renderAttempts: 0,
+    renderCached: 0,
+    renderPublicationWaits: 0,
+    renderPublicationWakes: 0,
+    renderPublicationTimeouts: 0,
+    renderPublicationInterrupts: 0,
+    renderPublicationWaitMs: 0,
+    renderPublicationWaitMaxMs: 0,
+    renderReaderCalls: 0,
+    renderCompletions: 0,
+    distinctRenderCompletions: 0,
+    renderHandoffs: 0,
+    distinctRenderHandoffs: 0,
+    renderInputWaitMs: 0,
+    renderInputWaitMaxMs: 0,
+    renderCpuMs: 0,
+    renderCpuMaxMs: 0,
+  };
+  private mirrorPublication = 0;
+  private renderPublication = -1;
+  private renderPublicationEpoch = -1;
+  private cadenceSequence = 0;
+  private cadenceMirrorFrame: number | null = null;
+  private cadenceBuiltFrame: number | null = null;
+  private cadenceHandoffFrame: number | null = null;
+  private readonly cadenceEvents: NativeCadenceEvent[] = [];
   private lastMirrorFlags = 0;
   private previousLogicFrame: number | null = null;
   private menuSurface: boolean | null = null;
@@ -360,11 +410,69 @@ export class NativeCore {
       .catch(() => false);
   }
   private rejectWaiters(error: Error): void {
+    this.finishRenderPublicationWait('interrupt');
     for (const waiter of this.waiters) {
       clearTimeout(waiter.timer);
       waiter.reject(error);
     }
     this.waiters.clear();
+  }
+  private finishRenderPublicationWait(reason: 'publication' | 'timeout' | 'interrupt'): void {
+    const waiter = this.renderPublicationWaiter;
+    if (!waiter) return;
+    this.renderPublicationWaiter = null;
+    clearTimeout(waiter.timer);
+    const duration = performance.now() - waiter.startedAt;
+    this.cadence.renderPublicationWaitMs += duration;
+    this.cadence.renderPublicationWaitMaxMs = Math.max(this.cadence.renderPublicationWaitMaxMs, duration);
+    if (reason === 'publication') this.cadence.renderPublicationWakes++;
+    else if (reason === 'timeout') this.cadence.renderPublicationTimeouts++;
+    else this.cadence.renderPublicationInterrupts++;
+    waiter.resolve();
+  }
+  private reusableRenderPublication(at: number): boolean {
+    return (
+      this.render.previous !== null &&
+      this.render.reader !== null &&
+      this.render.error === null &&
+      this.render.coldAt !== undefined &&
+      at - this.render.coldAt < 1000 &&
+      this.renderPublication === this.mirrorPublication &&
+      this.renderPublicationEpoch === this.readerEpoch
+    );
+  }
+  private waitForRenderPublication(): Promise<void> | null {
+    if (this.renderPublicationWaiter) return this.renderPublicationWaiter.promise;
+    const at = performance.now();
+    if (
+      !this.running ||
+      this.closed ||
+      this.recovering ||
+      !this.hasCurrentMirror() ||
+      this.menuSurface === true ||
+      this.awaitingBattleMirror ||
+      this.inputState.menuVisible ||
+      this.inputState.modal ||
+      this.inputState.moviePlaying ||
+      !this.render.previous?.map ||
+      !this.reusableRenderPublication(at)
+    )
+      return null;
+    // Keep a duplicate battlefield RPC on the Worker until a fresh immutable publication arrives.
+    // The game's known target supplies the interval; one 60 Hz presentation interval bounds menu latency.
+    const duration = Math.min(1000 / (this.renderTargetFps ?? 60), 1000 / 60);
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.renderPublicationWaiter = {
+      promise,
+      resolve,
+      startedAt: at,
+      timer: setTimeout(() => this.finishRenderPublicationWait('timeout'), duration),
+    };
+    this.cadence.renderPublicationWaits++;
+    return promise;
   }
   private nextMirror(afterReset?: number, atRevision?: number): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Native host is closed'));
@@ -395,12 +503,27 @@ export class NativeCore {
     const wasCurrent = this.hasCurrentMirror();
     const previousMirrorFrame = this.memory.frame;
     this.lastMirrorFlags = update.flags;
+    this.cadence.mirrors++;
+    if (update.flags & 1) this.cadence.truncatedMirrors++;
+    if (update.flags & 4) this.cadence.invalidMirrors++;
+    const appliedAt = performance.now();
     const complete = this.memory.apply(update);
+    const applyMs = performance.now() - appliedAt;
+    this.cadence.mirrorApplyMs += applyMs;
+    this.cadence.mirrorApplyMaxMs = Math.max(this.cadence.mirrorApplyMaxMs, applyMs);
     this.connection.notify(NativeMessageType.Ack, encodeU32(update.frame));
     if (!complete) {
+      this.finishRenderPublicationWait('interrupt');
       if (update.flags & 4 && this.running) void this.recoverInvalidMirror();
       else if (update.flags & 1 && this.running) void this.recoverCaptureCapacity();
       return;
+    }
+    this.mirrorPublication++;
+    this.cadence.completeMirrors++;
+    if (this.cadenceMirrorFrame !== update.frame) {
+      this.cadence.distinctMirrors++;
+      this.cadenceMirrorFrame = update.frame;
+      this.recordCadence('mirror', update.frame, applyMs);
     }
     if (update.flags & 2) this.resetSerial++;
     this.completeRevision = update.subscriptionRevision ?? null;
@@ -422,6 +545,7 @@ export class NativeCore {
       waiter.resolve();
       this.waiters.delete(waiter);
     }
+    this.finishRenderPublicationWait('publication');
   }
   private pictureArrived(picture: NativePicture): void {
     if (this.closed || !this.running) return;
@@ -478,6 +602,7 @@ export class NativeCore {
     )
       this.battleResumedAt = performance.now();
     this.inputState = state;
+    if (state.modal || state.menuVisible || state.moviePlaying) this.finishRenderPublicationWait('interrupt');
     this.movieState = {
       moviePlaying: state.moviePlaying,
       movieOpens: state.movieOpens,
@@ -736,6 +861,7 @@ export class NativeCore {
           budgetUs: Math.min(12000, this.hello.limits.maxBudgetUs ?? 4000),
           sampleCount: 0,
           pageRemovals: revisionSupported,
+          mirrorWindow: revisionSupported && this.hello.limits.mirrorWindow === 2 ? 2 : 1,
         }),
       );
       if (epoch !== this.readerEpoch) return;
@@ -890,6 +1016,7 @@ export class NativeCore {
     // Rate-limit rebuilding, never terminate a live game because an optional HD range remains unreadable.
     if (now - this.recoveryAt < 1000) return;
     this.recovering = true;
+    this.finishRenderPublicationWait('interrupt');
     this.recoveryAt = now;
     const learned = this.workingSet.ranges;
     const learnedPages = rangePages(learned);
@@ -963,6 +1090,8 @@ export class NativeCore {
     return this.exclusive(() => this.readExclusive(slot, factory));
   }
   private invalidateBattleReaders(): void {
+    this.finishRenderPublicationWait('interrupt');
+    this.renderTargetFps = null;
     this.readerEpoch++;
     this.previousLogicFrame = null;
     this.renderRequestedAt = null;
@@ -993,6 +1122,13 @@ export class NativeCore {
     if (!this.running || !this.policy || !this.hasCurrentMirror() || this.recovering) return null;
     const epoch = this.readerEpoch;
     const at = performance.now();
+    if (slot === this.render && this.reusableRenderPublication(at)) {
+      // Only an identical immutable publication is reusable. A same-frame publication can change selection/view.
+      this.cadence.renderCached++;
+      return slot.previous;
+    }
+    let readPublication = -1;
+    if (slot === this.render) this.cadence.renderAttempts++;
     try {
       await this.preparePolicy();
       await this.expandPolicyRanges(epoch);
@@ -1005,6 +1141,10 @@ export class NativeCore {
         () => {
           if (epoch !== this.readerEpoch) return null;
           const started = performance.now();
+          if (slot === this.render) {
+            this.cadence.renderReaderCalls++;
+            readPublication = this.mirrorPublication;
+          }
           try {
             slot.reader ??= factory();
             return slot.reader?.() ?? null;
@@ -1013,6 +1153,10 @@ export class NativeCore {
             const duration = performance.now() - started;
             this.stateReadCpuMs += duration;
             this.stateReadCpuMaxMs = Math.max(this.stateReadCpuMaxMs, duration);
+            if (slot === this.render) {
+              this.cadence.renderCpuMs += duration;
+              this.cadence.renderCpuMaxMs = Math.max(this.cadence.renderCpuMaxMs, duration);
+            }
             if (duration >= 5) {
               this.readerOperations.push({ startEpochMs: performance.timeOrigin + started, durationMs: duration });
               if (this.readerOperations.length > 32) this.readerOperations.shift();
@@ -1039,6 +1183,15 @@ export class NativeCore {
         if (cold) slot.coldAt = performance.now();
         await this.subscribe([]);
         if (epoch === this.readerEpoch && slot === this.render) {
+          // Subscription waits may receive newer images: cache the publication actually consumed by the reader.
+          this.renderPublication = readPublication;
+          this.renderPublicationEpoch = epoch;
+          this.cadence.renderCompletions++;
+          if (this.cadenceBuiltFrame !== (result as GameRenderState).frame) {
+            this.cadence.distinctRenderCompletions++;
+            this.cadenceBuiltFrame = (result as GameRenderState).frame;
+            this.recordCadence('built', this.cadenceBuiltFrame, performance.now() - at);
+          }
           if (this.completeRenderFrame !== (result as GameRenderState).frame) {
             this.completeRenderAt = performance.now();
             this.completeRenderFrame = (result as GameRenderState).frame;
@@ -1078,18 +1231,48 @@ export class NativeCore {
   }
   async getRenderState(): Promise<GameRenderState | null> {
     if (!this.running) return null;
-    this.renderDemandAt = performance.now();
+    this.cadence.renderRequests++;
+    const requestAt = performance.now();
+    this.renderDemandAt = requestAt;
+    const publication = this.waitForRenderPublication();
+    if (publication) await publication;
+    if (!this.running || this.closed) return null;
+    const inputAt = performance.now();
     const input = await this.readInputState();
+    const inputWaitMs = performance.now() - inputAt;
+    this.cadence.renderInputWaitMs += inputWaitMs;
+    this.cadence.renderInputWaitMaxMs = Math.max(this.cadence.renderInputWaitMaxMs, inputWaitMs);
     if (input.menuVisible || input.modal || input.moviePlaying) return null;
     this.checkMirrorHealth(true);
     if (this.recovering) return null;
     if (this.renderRequestedAt === null && this.memory.frame !== null) this.renderRequestedAt = performance.now();
     this.renderPending++;
     try {
-      return await this.read(this.render, () => this.policy!.createRenderReader());
+      const result = await this.read(this.render, () => this.policy!.createRenderReader());
+      if (result) {
+        this.cadence.renderHandoffs++;
+        if (this.cadenceHandoffFrame !== result.frame) {
+          this.cadence.distinctRenderHandoffs++;
+          this.cadenceHandoffFrame = result.frame;
+          this.recordCadence('handoff', result.frame, performance.now() - requestAt);
+        }
+      }
+      return result;
     } finally {
       this.renderPending--;
     }
+  }
+  private recordCadence(stage: NativeCadenceEvent['stage'], frame: number, durationMs: number): void {
+    const event = {
+      sequence: ++this.cadenceSequence,
+      stage,
+      frame,
+      atEpochMs: performance.timeOrigin + performance.now(),
+      durationMs,
+    };
+    // A bounded cross-clock timeline joins Worker receipt/builds to page draw opportunities.
+    this.cadenceEvents.push(event);
+    if (this.cadenceEvents.length > 512) this.cadenceEvents.shift();
   }
   async getCommandState(): Promise<GameCommandState | null> {
     if (!this.running) return null;
@@ -1100,6 +1283,8 @@ export class NativeCore {
   async getGamePerformance(): Promise<GamePerformanceSample | null> {
     if (!this.hasCurrentMirror()) return null;
     const counters = await this.read(this.frame, () => this.policy!.createFrameReader());
+    this.renderTargetFps =
+      Number.isFinite(counters?.targetFps) && counters!.targetFps! > 0 ? counters!.targetFps! : null;
     return counters ? this.meter.sample(counters, performance.now(), this.running) : null;
   }
 
@@ -1164,6 +1349,7 @@ export class NativeCore {
   private input(kind: number, a: number, b: number, c: number): void {
     if (!this.running || this.closed) return;
     const position = kind === 3 || (kind === 1 && a === 0x0200);
+    if (!position) this.finishRenderPublicationWait('interrupt');
     if (!position) this.menuInputRevision++;
     const operation = { kind, a, b, c, position };
     const trailing = this.inputQueue.at(-1);
@@ -1280,6 +1466,7 @@ export class NativeCore {
         stateReadCpuMs: this.stateReadCpuMs,
         stateReadCpuMaxMs: this.stateReadCpuMaxMs,
         readerOperations: this.readerOperations.slice(),
+        cadence: { ...this.cadence, recent: this.cadenceEvents.slice() },
         mirrorRecovery: {
           count: this.recoveryCount,
           omitted: this.recoveryCount - this.recoveries.length,
@@ -1409,6 +1596,7 @@ export class NativeCore {
     this.sessionStatusAbort?.abort();
     this.sessionStatusAbort = null;
     this.running = false;
+    this.finishRenderPublicationWait('interrupt');
     if (this.mirrorWatchdog !== null) clearInterval(this.mirrorWatchdog);
     this.mirrorWatchdog = null;
     this.inputQueue.length = 0;

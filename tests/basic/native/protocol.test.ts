@@ -239,6 +239,28 @@ describe('native binary protocol', () => {
       decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, pageRemovals: 1 } })),
     ).toThrow('capability');
   });
+  it('negotiates a bounded second mirror credit without changing legacy subscription words', () => {
+    const options = { ranges: [], rules: [], maxPages: 4096, budgetUs: 4000, sampleCount: 64, pageRemovals: true };
+    expect([...new Uint32Array(encodeSubscription({ ...options, mirrorWindow: 1 }).buffer)]).toEqual([
+      0, 0, 4096, 4000, 0x80000040,
+    ]);
+    expect([...new Uint32Array(encodeSubscription({ ...options, mirrorWindow: 2 }).buffer)]).toEqual([
+      0, 0, 4096, 4000, 0xc0000040,
+    ]);
+    expect(() => encodeSubscription({ ...options, pageRemovals: false, mirrorWindow: 2 })).toThrow('bounds');
+    for (const mirrorWindow of [1, 2] as const)
+      expect(
+        decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, mirrorWindow } })).limits
+          .mirrorWindow,
+      ).toBe(mirrorWindow);
+    for (const mirrorWindow of [0, 3, 1.5, true, '2']) {
+      expect(() =>
+        decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, mirrorWindow } })),
+      ).toThrow('mirror-window');
+      expect(() => encodeSubscription({ ...options, mirrorWindow: mirrorWindow as 2 })).toThrow('bounds');
+    }
+    expect(decodeHello(json(syntheticHello)).limits.mirrorWindow).toBeUndefined();
+  });
   it('decodes sorted removals after samples and rejects malformed removal tails', () => {
     const page = new Uint8Array(NATIVE_PAGE_SIZE).fill(0x42);
     const payload = concat(

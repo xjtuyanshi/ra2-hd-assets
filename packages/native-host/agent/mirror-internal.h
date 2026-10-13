@@ -13,7 +13,7 @@ struct nh_page {
     uint64_t dirty;
 };
 struct nh_subscription {
-    uint32_t range_count, rule_count, max_pages, budget_us, sample_count, page_removals;
+    uint32_t range_count, rule_count, max_pages, budget_us, sample_count, page_removals, mirror_window;
     struct nh_range ranges[NH_MAX_RANGES];
     struct nh_rule rules[NH_MAX_RULES];
 };

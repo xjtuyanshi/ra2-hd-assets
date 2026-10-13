@@ -66,6 +66,7 @@ export interface NativeHello {
     pageRemovals?: boolean;
     maxBudgetUs?: number;
     subscribeRevision?: boolean;
+    mirrorWindow?: 1 | 2;
     cursorSnapshot?: boolean;
     menuSnapshot?: boolean;
   };
@@ -88,6 +89,7 @@ export interface NativeSubscription {
   budgetUs: number;
   sampleCount: number;
   pageRemovals?: boolean;
+  mirrorWindow?: 1 | 2;
 }
 export interface NativePage {
   address: number;
@@ -311,6 +313,8 @@ export function decodeHello(payload: Uint8Array): NativeHello {
     throw new NativeProtocolError('Invalid native page-removal capability');
   if (hello.limits.subscribeRevision !== undefined && typeof hello.limits.subscribeRevision !== 'boolean')
     throw new NativeProtocolError('Invalid native subscription-revision capability');
+  if (hello.limits.mirrorWindow !== undefined && ![1, 2].includes(hello.limits.mirrorWindow))
+    throw new NativeProtocolError('Invalid native mirror-window capability');
   if (hello.limits.cursorSnapshot !== undefined && typeof hello.limits.cursorSnapshot !== 'boolean')
     throw new NativeProtocolError('Invalid native cursor-snapshot capability');
   if (hello.limits.menuSnapshot !== undefined && typeof hello.limits.menuSnapshot !== 'boolean')
@@ -324,7 +328,7 @@ export function decodeHello(payload: Uint8Array): NativeHello {
 }
 
 export function encodeSubscription(subscription: NativeSubscription): Uint8Array {
-  const { ranges, rules, maxPages, budgetUs, sampleCount, pageRemovals } = subscription;
+  const { ranges, rules, maxPages, budgetUs, sampleCount, pageRemovals, mirrorWindow } = subscription;
   if (
     ranges.length > 4096 ||
     rules.length > 256 ||
@@ -337,11 +341,19 @@ export function encodeSubscription(subscription: NativeSubscription): Uint8Array
     !Number.isInteger(sampleCount) ||
     sampleCount < 0 ||
     sampleCount > 64 ||
-    (pageRemovals !== undefined && typeof pageRemovals !== 'boolean')
+    (pageRemovals !== undefined && typeof pageRemovals !== 'boolean') ||
+    (mirrorWindow !== undefined && ![1, 2].includes(mirrorWindow)) ||
+    (mirrorWindow === 2 && pageRemovals !== true)
   ) {
     throw new NativeProtocolError('Subscription exceeds bounds');
   }
-  const values = [ranges.length, rules.length, maxPages, budgetUs, sampleCount + (pageRemovals ? 0x80000000 : 0)];
+  const values = [
+    ranges.length,
+    rules.length,
+    maxPages,
+    budgetUs,
+    sampleCount + (pageRemovals ? 0x80000000 : 0) + (mirrorWindow === 2 ? 0x40000000 : 0),
+  ];
   for (const item of ranges) {
     range(item.address, item.length);
     values.push(item.address, item.length);

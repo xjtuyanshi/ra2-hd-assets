@@ -15,6 +15,7 @@ export async function startPhase10MatchRates({
   record,
   label = 'match-rates',
   readNativeLogicEndpoint,
+  readNativeCadenceEndpoint,
   externallyDismissedDialogs = false,
 }) {
   assert(/^[a-zA-Z0-9_-]+$/.test(label), 'Simple evidence label required');
@@ -280,7 +281,10 @@ export async function startPhase10MatchRates({
     const nativeLogic = readNativeLogicEndpoint
       ? await bounded(readNativeLogicEndpoint(), 'Direct native logic endpoint')
       : null;
-    return { ...observed, nativeLogic };
+    const nativeCadence = readNativeCadenceEndpoint
+      ? await bounded(readNativeCadenceEndpoint(), 'Native cadence endpoint')
+      : null;
+    return { ...observed, nativeLogic, ...(nativeCadence ? { nativeCadence } : {}) };
   };
   let first;
   let last;

@@ -2570,9 +2570,11 @@ describe('live original to HD transition', () => {
     harness.setFrameSize(1280, 720);
     await goLive(harness);
     const fadeAt = harness.bridge()!.timeline.fadeStartedAt;
+    const shownScene = harness.stop.scene()!;
     harness.setState(null);
     await advance(200);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.stop.scene()).toMatchObject({ map: shownScene.map, hdShown: true, objects: shownScene.objects });
     harness.setState(battle(3));
     await advance(17);
     expect(harness.bridge()!.timeline.fadeStartedAt).toBe(fadeAt);
@@ -2580,6 +2582,7 @@ describe('live original to HD transition', () => {
     harness.setState(null);
     await advance(501);
     expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.stop.scene()).toBeNull();
     harness.nativeFrame(false, false);
     harness.setState(battle(4));
     await advance(17);
@@ -2605,6 +2608,7 @@ describe('live original to HD transition', () => {
     await advance(17);
     await advance(501);
     expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.stop.scene()).toBeNull();
     expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
     expect(harness.status).toHaveBeenLastCalledWith('高清画面已暂停，正在恢复；您可以继续操作。');
     expect(harness.stop.battleActive?.()).toBe(true);
@@ -2946,6 +2950,128 @@ describe('HD bridge frame pacing', () => {
     expect(harness.polls()).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('receives native states between paced draws without increasing the draw rate', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native', () => 1000 / 120);
+    const view = await goLive(harness);
+    const beforePolls = harness.polls();
+    const beforeDraws = view.render.mock.calls.length;
+    for (let i = 0; i < 120; i++) {
+      harness.setState(battle(10 + i));
+      await advance(1000 / 120 + 0.001);
+    }
+    expect(harness.polls() - beforePolls).toBe(120);
+    expect(view.render.mock.calls.length - beforeDraws).toBe(60);
+    harness.stop.toggle();
+    const disabledPolls = harness.polls();
+    await advance(9, 5);
+    expect(harness.polls()).toBe(disabledPolls);
+    harness.stop();
+  });
+
+  it('draws the two newest complete native states once each after a delivery burst, retaining receipt times', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1&hd-pace=60', 'WebGL2', 'native', () => 1000 / 120);
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    const view = await goLive(harness);
+    harness.bridge()!.diagnostics.startCapture();
+    view.push.mockClear();
+    for (const frame of [10, 11, 12]) {
+      harness.setState(battle(frame));
+      await vi.advanceTimersByTimeAsync(9);
+      clock = Date.now();
+    }
+    expect(view.push).not.toHaveBeenCalled();
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(12);
+    const deliveries = harness.bridge()!.diagnostics.capture!.deliveries;
+    await advance(17);
+    expect(view.push.mock.calls.map(([state]) => state.frame)).toEqual([11]);
+    expect(view.push.mock.calls[0]![1]).toBe(deliveries.find((entry) => entry.frame === 11)!.atMs);
+    await advance(17);
+    expect(view.push.mock.calls.map(([state]) => state.frame)).toEqual([11, 12]);
+    expect(view.push.mock.calls[1]![1]).toBe(deliveries.find((entry) => entry.frame === 12)!.atMs);
+    await advance(17);
+    expect(view.push).toHaveBeenCalledTimes(2);
+    harness.stop();
+  });
+
+  it('replaces a queued same-frame publication so camera and selection changes are not discarded', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1&hd-pace=60', 'WebGL2', 'native', () => 1000 / 120);
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    const view = await goLive(harness);
+    view.push.mockClear();
+    harness.setState(battle(10));
+    await vi.advanceTimersByTimeAsync(9);
+    const updated = battle(10);
+    updated.view = { x: 321, y: 654 };
+    updated.objects[0]!.isSelected = true;
+    harness.setState(updated);
+    await vi.advanceTimersByTimeAsync(9);
+    clock = Date.now();
+    expect(view.push).not.toHaveBeenCalled();
+    await advance(17);
+    expect(view.push).toHaveBeenCalledTimes(1);
+    expect(view.push.mock.calls[0]![0]).toMatchObject({ frame: 10, view: { x: 321, y: 654 } });
+    expect(harness.bridge()!.diagnostics.state?.objects[0]?.isSelected).toBe(true);
+    harness.stop();
+  });
+
+  it('keeps a queued native push exception in the existing state-apply fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(1000);
+    const harness = setup('?hd=1&hd-pace=60', 'WebGL2', 'native', () => 1000 / 120);
+    vi.mocked(performance.now).mockImplementation(() => Date.now());
+    const view = await goLive(harness);
+    harness.setState(battle(10));
+    await vi.advanceTimersByTimeAsync(9);
+    clock = Date.now();
+    view.push.mockImplementationOnce(() => {
+      throw new Error('unavailable queued art');
+    });
+    await expect(advance(17)).resolves.toBeUndefined();
+    // Stop later receipts from replacing the failure observation, allowing the existing grace period to expire.
+    harness.setState(null);
+    await advance(17, 70);
+    expect(harness.bridge()!.timeline.transitions).toContainEqual(
+      expect.objectContaining({ to: 'original', reason: 'state-apply-error' }),
+    );
+    harness.stop();
+  });
+
+  it.each(['null', 'dialog', 'toggle', 'new-match', 'menu'] as const)(
+    'drops queued native publications at the %s boundary',
+    async (boundary) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      vi.setSystemTime(1000);
+      const harness = setup('?hd=1&hd-pace=60', 'WebGL2', 'native', () => 1000 / 120);
+      vi.mocked(performance.now).mockImplementation(() => Date.now());
+      const view = await goLive(harness);
+      view.push.mockClear();
+      for (const frame of [10, 11]) {
+        harness.setState(battle(frame));
+        await vi.advanceTimersByTimeAsync(9);
+      }
+      expect(view.push).not.toHaveBeenCalled();
+      if (boundary === 'dialog') harness.nativeFrame(false, true);
+      else if (boundary === 'toggle') harness.stop.toggle();
+      else if (boundary === 'menu') {
+        harness.setFrameSize(1200, 800);
+        harness.nativeFrame(false);
+        harness.setFrameSize(800, 600);
+        harness.nativeFrame(false);
+      }
+      harness.setState(boundary === 'new-match' ? battle(1) : null);
+      await vi.advanceTimersByTimeAsync(9);
+      clock = Date.now();
+      await advance(17, 2);
+      expect(view.push.mock.calls.map(([state]) => state.frame)).not.toContain(10);
+      expect(view.push.mock.calls.map(([state]) => state.frame)).not.toContain(11);
+      harness.stop();
+    },
+  );
 
   it('takes a due native request before a rounded or late timer, without duplicate or early requests', async () => {
     const timers = new Map<number, { at: number; run: () => void }>();

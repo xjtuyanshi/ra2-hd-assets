@@ -590,6 +590,7 @@ async function execute(c) {
     const { installPhase7InputProbe } = await import('./phase7-input-stream.mjs');
     await installPhase7InputProbe(page);
     await page.evaluate(() => {
+      window.__hdBridge?.diagnostics?.startCapture();
       const probe = {
         startedAt: performance.now(),
         frames: [],
@@ -638,16 +639,17 @@ async function execute(c) {
       };
       window.__phase32Feel = probe;
     });
-    return execute({ action: 'rates-start', label: c.label ?? 'feel-rates' });
+    return execute({ action: 'rates-start', label: c.label ?? 'feel-rates', cadence: true });
   }
   if (c.action === 'feel-stop') {
     const rates = await execute({ action: 'rates-stop', label: c.label ?? 'feel-rates' });
-    const evidence = await page.evaluate(() => {
+    const { capture, ...evidence } = await page.evaluate(() => {
       const p = window.__phase32Feel;
       p.stop();
       const values = [...p.frames].sort((a, b) => a - b);
       const percentile = (f) => (values.length ? values[Math.ceil(values.length * f) - 1] : null);
       const result = {
+        capture: window.__hdBridge?.diagnostics?.finishCapture() ?? null,
         source: 'Actual completed visible HD draws or classic presenter draws; browser scanout is not instrumented',
         seconds: (performance.now() - p.startedAt) / 1000,
         intervals: {
@@ -679,6 +681,7 @@ async function execute(c) {
       delete window.__phase32Feel;
       return result;
     });
+    await writeFile(join(out, `${c.label ?? 'feel'}-capture.json`), JSON.stringify(capture));
     await writeFile(
       join(out, `${c.label ?? 'feel'}-measurements.json`),
       JSON.stringify({ ...evidence, rates }, null, 2),
@@ -790,6 +793,16 @@ async function execute(c) {
             source: web ? 'Read-only actual v86 guest frame counter' : 'Direct validated native frame counter reply',
           };
         }, webRoute),
+      readNativeCadenceEndpoint:
+        c.cadence && !webRoute
+          ? () =>
+              worker().evaluate(async () => ({
+                atMs: performance.now(),
+                timeOrigin: performance.timeOrigin,
+                clockContext: 'worker',
+                diagnostics: await globalThis.__auditCore.getDiagnostics('usage'),
+              }))
+          : undefined,
     });
     await acceptanceRates.inputCheckpoint('start', {
       label: c.label ?? 'played-match',

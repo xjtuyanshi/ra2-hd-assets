@@ -57,6 +57,7 @@ class FakeAgent implements NativeWebSocket {
   moviePlaying: boolean | null | undefined;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
   revisionSupport = false;
+  mirrorWindow: 1 | 2 | undefined;
   subscriptionRevision = 0;
   surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
   cursorSnapshot = false;
@@ -148,6 +149,7 @@ class FakeAgent implements NativeWebSocket {
           pageRemovals,
           maxBudgetUs,
           subscribeRevision,
+          mirrorWindow: this.mirrorWindow,
           ...(this.cursorSnapshot ? { cursorSnapshot: true } : {}),
           menuSnapshot: true,
         },
@@ -202,7 +204,12 @@ function setup(callbacks: GameVmCallbacks = {}, options: Partial<NativeCoreOptio
   const agent = new FakeAgent();
   const scheduled: (() => void)[] = [];
   const renderFactory = vi.fn();
-  const mode: { missing: boolean; additionalAddress: number | null } = { missing: false, additionalAddress: null };
+  const mode: {
+    missing: boolean;
+    additionalAddress: number | null;
+    map: GameRenderState['map'];
+    targetFps?: number;
+  } = { missing: false, additionalAddress: null, map: null };
   const policyFactory: NativeGamePolicyFactory = vi.fn((memory) => ({
     ranges: [{ address: 0x1000, length: 4 }],
     rules: [],
@@ -220,11 +227,17 @@ function setup(callbacks: GameVmCallbacks = {}, options: Partial<NativeCoreOptio
             return state(999);
           }
         }
-        return state(frame);
+        return { ...state(frame), map: mode.map };
       };
     },
     createCommandReader: () => null,
-    createFrameReader: () => () => ({ frame: memory.frame ?? 0, gameSpeed: 1, sessionSpeed: 1, requestedFps: 60 }),
+    createFrameReader: () => () => ({
+      frame: memory.frame ?? 0,
+      gameSpeed: 1,
+      sessionSpeed: 1,
+      requestedFps: 60,
+      targetFps: mode.targetFps,
+    }),
     installPassthrough: () => null,
     setSpeed: () => null,
   }));
@@ -254,6 +267,170 @@ afterEach(async () => {
 });
 
 describe('native core session and presenter lifecycle', () => {
+  it('separates mirror publications, complete states and repeated handoffs in cadence diagnostics', async () => {
+    const { core, agent } = await started();
+    await core.getRenderState();
+    await core.getRenderState();
+    agent.mirror(2, [], 1);
+    expect(await core.getRenderState()).toBeNull();
+    const next = agent.initial.slice();
+    next[0] = 8;
+    agent.mirror(3, [{ address: 0x1000, bytes: next }]);
+    expect((await core.getRenderState())?.frame).toBe(8);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      cadence: {
+        mirrors: 3,
+        completeMirrors: 2,
+        distinctMirrors: 2,
+        truncatedMirrors: 1,
+        invalidMirrors: 0,
+        renderRequests: 4,
+        renderAttempts: 2,
+        renderCached: 1,
+        renderCompletions: 2,
+        distinctRenderCompletions: 2,
+        renderHandoffs: 3,
+        distinctRenderHandoffs: 2,
+        recent: [
+          expect.objectContaining({ stage: 'mirror', frame: 1 }),
+          expect.objectContaining({ stage: 'built', frame: 7 }),
+          expect.objectContaining({ stage: 'handoff', frame: 7 }),
+          expect.objectContaining({ stage: 'mirror', frame: 3 }),
+          expect.objectContaining({ stage: 'built', frame: 8 }),
+          expect.objectContaining({ stage: 'handoff', frame: 8 }),
+        ],
+      },
+      decode: { mirrors: 3, messages: { mirrorReceived: 3, acknowledgementsSent: 3 } },
+    });
+  });
+
+  it('reuses only the exact complete publication while checking fresh modal state and same-frame changes', async () => {
+    const { core, agent } = await started();
+    const first = await core.getRenderState();
+    const inputReads = agent.count(NativeMessageType.InputState);
+    expect(await core.getRenderState()).toBe(first);
+    expect(agent.count(NativeMessageType.InputState)).toBe(inputReads + 1);
+    agent.modal = true;
+    expect(await core.getRenderState()).toBeNull();
+    agent.modal = false;
+    expect(await core.getRenderState()).toBe(first);
+    const changed = agent.initial.slice();
+    changed[0] = 9;
+    agent.mirror(1, [{ address: 0x1000, bytes: changed }]);
+    expect((await core.getRenderState())?.frame).toBe(9);
+    agent.mirror(1, [], 1);
+    expect(await core.getRenderState()).toBeNull();
+    agent.mirror(1, [{ address: 0x1000, bytes: agent.initial }]);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      cadence: { renderCached: 2, renderAttempts: 3, renderCompletions: 3, renderHandoffs: 5 },
+    });
+  });
+
+  it('shares a pending battlefield publication wait and confirms input after a same-frame change wakes it', async () => {
+    vi.useFakeTimers();
+    const { core, agent, mode } = await started();
+    mode.map = { fileName: 'test.map' };
+    await core.getRenderState();
+    const inputReads = agent.count(NativeMessageType.InputState);
+    const first = core.getRenderState();
+    const second = core.getRenderState();
+    await flush();
+    expect(agent.count(NativeMessageType.InputState)).toBe(inputReads);
+    const changed = agent.initial.slice();
+    changed[0] = 9;
+    agent.mirror(1, [{ address: 0x1000, bytes: changed }]);
+    expect((await first)?.frame).toBe(9);
+    expect((await second)?.frame).toBe(9);
+    expect(agent.count(NativeMessageType.InputState)).toBeGreaterThan(inputReads);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      cadence: { renderPublicationWaits: 1, renderPublicationWakes: 1, renderPublicationTimeouts: 0 },
+    });
+  });
+
+  it.each([undefined, 100, 10])(
+    'bounds duplicate-state waiting using target %s and then checks fresh modal ownership',
+    async (targetFps) => {
+      vi.useFakeTimers();
+      const { core, agent, mode } = await started();
+      mode.map = { fileName: 'test.map' };
+      mode.targetFps = targetFps;
+      await core.getRenderState();
+      await core.getGamePerformance();
+      let finished = false;
+      const pending = core.getRenderState().then((value) => {
+        finished = true;
+        return value;
+      });
+      const duration = Math.min(1000 / (targetFps ?? 60), 1000 / 60);
+      await vi.advanceTimersByTimeAsync(duration / 2);
+      expect(finished).toBe(false);
+      agent.modal = true;
+      await vi.advanceTimersByTimeAsync(Math.ceil(duration));
+      expect(await pending).toBeNull();
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        cadence: { renderPublicationWaits: 1, renderPublicationWakes: 0, renderPublicationTimeouts: 1 },
+      });
+    },
+  );
+
+  it('interrupts publication waiting for real menu input without waiting for a mirror or deadline', async () => {
+    vi.useFakeTimers();
+    const { core, agent, mode } = await started();
+    mode.map = { fileName: 'test.map' };
+    await core.getRenderState();
+    const inputReads = agent.count(NativeMessageType.InputState);
+    const pending = core.getRenderState();
+    await flush();
+    core.setCursorPosition(10, 20);
+    await flush();
+    expect(agent.count(NativeMessageType.InputState)).toBe(inputReads);
+    agent.modal = true;
+    core.postMessage(0x100, 27);
+    expect(await pending).toBeNull();
+    expect(agent.count(NativeMessageType.InputState)).toBe(inputReads + 1);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      cadence: { renderPublicationWaits: 1, renderPublicationInterrupts: 1, renderPublicationTimeouts: 0 },
+    });
+  });
+
+  it.each([1, 4])(
+    'ends a duplicate-state wait on incomplete mirror flags %s without releasing stale state',
+    async (flags) => {
+      vi.useFakeTimers();
+      const { core, agent, mode } = await started();
+      mode.map = { fileName: 'test.map' };
+      await core.getRenderState();
+      const pending = core.getRenderState();
+      await flush();
+      agent.mirror(2, [], flags);
+      expect(await pending).toBeNull();
+      await flush();
+      agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }], 2);
+      await flush();
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        cadence: { renderPublicationWaits: 1, renderPublicationInterrupts: 1, renderPublicationTimeouts: 0 },
+      });
+    },
+  );
+
+  it.each(['stop', 'disconnect'])(
+    'settles publication waiting immediately during %s without another input request',
+    async (ending) => {
+      vi.useFakeTimers();
+      const { core, agent, mode } = await started();
+      mode.map = { fileName: 'test.map' };
+      await core.getRenderState();
+      const inputReads = agent.count(NativeMessageType.InputState);
+      const pending = core.getRenderState();
+      await flush();
+      if (ending === 'stop') await core.stop();
+      else agent.onclose?.({});
+      expect(await pending).toBeNull();
+      expect(agent.count(NativeMessageType.InputState)).toBe(inputReads);
+    },
+  );
+
   it.each([false, true])(
     'bounds hidden presentation patches to hidden=%s and restores them on stop',
     async (hidden) => {
@@ -568,6 +745,7 @@ describe('native core session and presenter lifecycle', () => {
     await start;
     expect((await core.getRenderState())?.frame).toBe(7);
     tailsEnabled = true;
+    agent.mirror(20, [], 0, 1);
     let settled = false;
     const pending = core.getRenderState().then((result) => {
       settled = true;
@@ -622,6 +800,7 @@ describe('native core session and presenter lifecycle', () => {
     );
     expect((await first)?.frame).toBe(7);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const incomplete = core.getRenderState();
     await flush();
     expect(core.getMirrorFootprint().ranges.learned).toEqual([{ address: 0x9000, length: 4096 }]);
@@ -640,6 +819,7 @@ describe('native core session and presenter lifecycle', () => {
     const { core, agent, mode } = await started();
     await core.getRenderState();
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const read = core.getRenderState();
     await flush();
     const pages = [0x1000, 0x9000].map((address) => ({ address, bytes: agent.initial }));
@@ -680,6 +860,7 @@ describe('native core session and presenter lifecycle', () => {
     const footprint = core.getMirrorFootprint(),
       subscriptions = agent.count(NativeMessageType.Subscribe);
     unknown = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     await expect(core.getRenderState()).rejects.toThrow('descriptor');
     expect(core.getMirrorFootprint().ranges).toEqual(footprint.ranges);
     expect(agent.count(NativeMessageType.Subscribe)).toBe(subscriptions);
@@ -709,6 +890,7 @@ describe('native core session and presenter lifecycle', () => {
     const { core, agent, mode } = await started();
     await core.getRenderState();
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const pending = core.getRenderState();
     await flush();
     agent.mirror(
@@ -786,6 +968,24 @@ describe('native core session and presenter lifecycle', () => {
       expect(u32(subscription.payload, 12)).toBe(4000);
     }
   });
+  it('requests a second mirror credit only with its explicit revision-capable host capability', async () => {
+    for (const [mirrorWindow, revisioned, expected] of [
+      [undefined, true, 0x80000000],
+      [1, true, 0x80000000],
+      [2, false, 0],
+      [2, true, 0xc0000000],
+    ] as const) {
+      const { core, agent } = setup();
+      agent.mirrorWindow = mirrorWindow;
+      const start = core.start();
+      agent.hello(true, revisioned);
+      await start;
+      const subscription = agent.requests.find((request) => request.type === NativeMessageType.Subscribe)!;
+      expect(u32(subscription.payload, 16)).toBe(expected);
+      expect(u32(subscription.payload, 8)).toBe(4096);
+      expect(u32(subscription.payload, 12)).toBe(4000);
+    }
+  });
   it('uses the larger bootstrap budget only when advertised by the agent', async () => {
     for (const [advertised, expected] of [
       [8000, 8000],
@@ -809,6 +1009,7 @@ describe('native core session and presenter lifecycle', () => {
     old[0] = 9;
     agent.mirror(2, [{ address: 0x9000, bytes: old }]);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     mode.additionalAddress = 0x9000;
     let settled = false;
     const pending = core.getRenderState().then((value) => {
@@ -1011,6 +1212,7 @@ describe('native core session and presenter lifecycle', () => {
     const good = await core.getRenderState();
     expect(good?.frame).toBe(7);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const retry = core.getRenderState();
     for (let frame = 2; frame < 14; frame++) {
       await flush();
@@ -1026,6 +1228,7 @@ describe('native core session and presenter lifecycle', () => {
     const { core, agent, mode, renderFactory } = await started();
     await core.getRenderState();
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const retry = core.getRenderState();
     await flush();
     const added = new Uint8Array(NATIVE_PAGE_SIZE);
@@ -1049,6 +1252,7 @@ describe('native core session and presenter lifecycle', () => {
     const { core, agent, mode } = await started({ onStatus: statuses });
     expect((await core.getRenderState())?.frame).toBe(7);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const retry = core.getRenderState();
     const rejected = expect(retry).rejects.toThrow('closed');
     await flush();
@@ -1311,6 +1515,7 @@ describe('native core session and presenter lifecycle', () => {
     expect((await core.getRenderState())?.frame).toBe(9);
     expect((await core.getCommandState())?.frame).toBe(100);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const oldRead = core.getRenderState();
     await flush();
     picture(2);
@@ -1362,6 +1567,7 @@ describe('native core session and presenter lifecycle', () => {
     old[0] = 9;
     agent.mirror(2, [{ address: 0x9000, bytes: old }]);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     mode.additionalAddress = 0x9000;
     let settled = false;
     const pending = core.getRenderState().then((value) => {
@@ -1401,6 +1607,7 @@ describe('native core session and presenter lifecycle', () => {
     expect(good?.frame).toBe(7);
     vi.useFakeTimers();
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const pending = core.getRenderState();
     await flush();
     expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
@@ -1486,6 +1693,7 @@ describe('native core session and presenter lifecycle', () => {
     await start;
     expect((await core.getRenderState())?.frame).toBe(7);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const read = core.getRenderState();
     await flush();
     expect(core.getMirrorFootprint().ranges.learned).toEqual([{ address: 0x9000, length: 4096 }]);
@@ -1622,6 +1830,7 @@ describe('native core session and presenter lifecycle', () => {
     await start;
     expect(await core.setTacticalPassthrough(7)).toBe(true);
     mode.missing = true;
+    agent.mirror(core.memory.frame ?? 1, []);
     const read = core.getRenderState();
     await flush();
     agent.mirror(2, [], 1);

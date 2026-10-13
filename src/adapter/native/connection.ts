@@ -77,11 +77,12 @@ export class NativeConnection {
   private errors = new Set<(error: Error) => void>();
   private pictureDecoder = new NativePictureDecoder();
   private readonly timeoutMs: number;
+  private messageCounters = { received: 0, sent: 0, mirrorReceived: 0, mirrorBytes: 0, acknowledgementsSent: 0 };
   private decodeCounters = { pictureMs: 0, pictures: 0, pictureMaxMs: 0, mirrorMs: 0, mirrors: 0, mirrorMaxMs: 0 };
   private slowDecodes: { kind: string; startEpochMs: number; durationMs: number }[] = [];
 
   decodeDiagnostics() {
-    return { ...this.decodeCounters, recent: this.slowDecodes.slice() };
+    return { ...this.decodeCounters, messages: { ...this.messageCounters }, recent: this.slowDecodes.slice() };
   }
 
   private timeDecode(kind: 'picture' | 'mirror', started: number): void {
@@ -175,6 +176,7 @@ export class NativeConnection {
     if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array))
       throw new NativeProtocolError('Native message must be binary');
     const packet = decodePacket(data);
+    this.messageCounters.received++;
     if (packet.type === NativeMessageType.Hello) {
       if (packet.id || this.hello) throw new NativeProtocolError('Duplicate or correlated native hello');
       this.hello = decodeHello(packet.payload);
@@ -209,6 +211,8 @@ export class NativeConnection {
       return;
     }
     if (packet.type === NativeMessageType.Mirror) {
+      this.messageCounters.mirrorReceived++;
+      this.messageCounters.mirrorBytes += packet.payload.byteLength;
       const started = performance.now();
       const update = decodeMirror(packet.payload);
       this.timeDecode('mirror', started);
@@ -228,6 +232,8 @@ export class NativeConnection {
     if (this.closed || !this.hello || !this.socket || this.socket.readyState !== 1)
       throw new NativeConnectionLostError('Native agent is not connected');
     this.socket.send(encodePacket(type, id, payload));
+    this.messageCounters.sent++;
+    if (type === NativeMessageType.Ack) this.messageCounters.acknowledgementsSent++;
   }
 
   private waitsForGame(type: NativeMessageType): boolean {

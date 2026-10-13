@@ -42,8 +42,8 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
 /* READ request addr,len,expectedFrame; reply frame,addr,len,bytes. Error UTF-8.
  WRITE addr,len,bytes; ALLOC size,preferred,executable => addr,size; FREE addr.
  SUBSCRIBE rangeCount,ruleCount,maxPages,budgetUs,sampleCount; ranges addr,len;
- sampleCount bit31 opts into advertised pageRemovals/subscribeRevision; remaining bits
- hold its count. Opted-in SUBSCRIBE success replies contain the installed revision u32.
+ sampleCount bit31 opts into advertised pageRemovals/subscribeRevision; bit30 opts into
+ advertised mirrorWindow=2 (requires bit31); low30 bits hold its count. Opted-in SUBSCRIBE success replies contain the installed revision u32.
  rules kind,source,bytes,maxCount,stride. Kinds: 1 pointer; 2 vector (+4 items,+16 count);
  3 span vector (same descriptor; contiguous count*stride); 4 outer pointer vector
  to embedded pointer vector at member offset=stride (maxCount bounds both);
@@ -60,7 +60,9 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
  CREDIT count; PICTURE frame,width,height,rowCount; rows y,encodedBytes,segments;
  segments u16: high bit key run, lower15 count; literal segments followed by RGB565 pixels.
  INPUT kind,a,b,c (1 postMessage,2 key,3 cursor); HOOK enabled; INPUT_STATE reply JSON.
- ACK frame acknowledges the sole in-flight mirror; notification, no reply.
+ ACK frame marks that exact publication acknowledged; only an acknowledged
+ ordered prefix releases credit. Notification, no reply.
+ Legacy subscriptions retain one in-flight mirror; opted-in subscriptions allow two.
  HELLO / DIAGNOSTICS UTF-8 JSON. Ordinary successful replies are empty unless stated.
  */
 int nh_safe_read(uint32_t address, void *out, uint32_t length);
@@ -81,6 +83,10 @@ void nh_send_for_connection(uint32_t generation, uint16_t type, uint32_t id, con
 int nh_publish(uint16_t type, const void *payload, uint32_t length);
 /* Swap a caller-owned NH_MAX_MESSAGE allocation into an empty mailbox without copying. */
 int nh_publish_move(uint16_t type, uint8_t **payload, uint32_t length);
+/* Trace metadata stays inside the mailbox; it does not alter the wire image. */
+int nh_publish_mirror(uint8_t **payload, uint32_t length, LARGE_INTEGER hook_started, uint32_t revision);
+int nh_mirror_mailbox_available(void);
+void nh_mirror_trace_ack(uint32_t frame, LARGE_INTEGER at);
 int nh_identity_verified(void);
 int nh_allocation_contains(uint32_t address, uint32_t length);
 void nh_allocation_pin(uint32_t address, uint32_t length);

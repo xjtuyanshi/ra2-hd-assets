@@ -15,6 +15,13 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
   const endpoint = '/__perf/feel';
   const records: Record<string, unknown>[] = [];
   const intervals: number[] = [];
+  const distinctIntervals: number[] = [];
+  const arrivalToDraw: number[] = [];
+  const arrivalAfterDraw: number[] = [];
+  const deliveries = new Map<number, number>();
+  let receivedStates = 0;
+  let lastReceivedState: number | null = null;
+  let lastDistinctAt = 0;
   const pointerDraw: number[] = [];
   const pointerPaintOpportunity: number[] = [];
   const tasks: { start: number; duration: number }[] = [];
@@ -140,6 +147,20 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
       map: scene?.map ?? null,
       ...view(),
       frameIntervalsMs: summary(intervals),
+      distinctIntervalsMs: {
+        ...summary(distinctIntervals),
+        // Nearest 60 Hz step, including early/late callbacks in their actual bucket.
+        step16_7: distinctIntervals.filter((ms) => ms < 25).length,
+        step33_3: distinctIntervals.filter((ms) => ms >= 25 && ms < 125 / 3).length,
+        step50: distinctIntervals.filter((ms) => ms >= 125 / 3 && ms < 175 / 3).length,
+        longer: distinctIntervals.filter((ms) => ms >= 175 / 3).length,
+      },
+      stateDelivery: {
+        receivedStates,
+        receivedPerS: round((receivedStates * 1000) / elapsed),
+        arrivalToDrawMs: summary(arrivalToDraw),
+        arrivalAfterPreviousDrawMs: summary(arrivalAfterDraw),
+      },
       display: display
         ? {
             reference: 'startup-visible-focused-rAF-cadence; not-physical-scanout',
@@ -196,6 +217,8 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
     records.push(record);
     if (records.length > 120) records.shift();
     intervals.length = pointerDraw.length = pointerPaintOpportunity.length = stalls.length = 0;
+    distinctIntervals.length = arrivalToDraw.length = arrivalAfterDraw.length = 0;
+    receivedStates = 0;
     distinctStates = omittedStalls = 0;
     submittedFrames = 0;
     displayStart = display;
@@ -235,15 +258,39 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
               'stateReadCpuMaxMs',
               'readerOperations',
               'decode',
+              'cadence',
+              'hookCalls',
+              'hookP50Us',
+              'hookP99Us',
+              'mirrorProduced',
+              'mirrorMessagesSent',
+              'mirrorInFlightSkips',
+              'truncatedUpdates',
+              'invalidUpdates',
+              'budgetOverruns',
               'mirrorRecovery',
               'mirrorFaultCount',
               'mirrorFaultEvents',
               'recentMirrorFaultsOmitted',
               'lastMirrorFault',
               'recentMirrorFaults',
-            ].map((key) => [key, native[key] ?? null]),
+            ].map((key) => [
+              key,
+              key === 'cadence' && native[key] && typeof native[key] === 'object'
+                ? Object.fromEntries(Object.entries(native[key]).filter(([field]) => field !== 'recent'))
+                : (native[key] ?? null),
+            ]),
           )
         : null;
+    },
+    stateReceived(state: number) {
+      if (state === lastReceivedState) return;
+      lastReceivedState = state;
+      receivedStates++;
+      const now = performance.now();
+      deliveries.set(state, now);
+      if (deliveries.size > 256) deliveries.delete(deliveries.keys().next().value!);
+      if (lastMode === 'hd' && lastFrame) arrivalAfterDraw.push(now - lastFrame);
     },
     frame(mode: 'hd' | 'original', state: number) {
       if (disposed || (mode === 'original' && host.scene()?.hdShown)) return;
@@ -264,7 +311,13 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
           else omittedStalls++;
         }
       }
-      if (lastState !== state || lastMode !== mode) distinctStates++;
+      if (lastState !== state || lastMode !== mode) {
+        distinctStates++;
+        if (lastMode === mode && lastDistinctAt) distinctIntervals.push(now - lastDistinctAt);
+        lastDistinctAt = now;
+        const arrived = mode === 'hd' ? deliveries.get(state) : undefined;
+        if (arrived !== undefined) arrivalToDraw.push(now - arrived);
+      }
       lastFrame = now;
       lastMode = mode;
       lastState = state;

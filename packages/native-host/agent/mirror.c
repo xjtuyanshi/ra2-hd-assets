@@ -5,6 +5,7 @@
 #include "mirror-read-cache.h"
 #include "mirror-region-read.h"
 #include "mirror-membership.h"
+#include "mirror-flight.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
@@ -38,9 +39,9 @@ static struct nh_page_seed fixed_seed, next_seed;
 static uint32_t rule_items[65536];
 static uint32_t rule_parent_items[65536];
 static uint32_t subscription_revision, applied_revision, random_state;
-static uint64_t generation, published_generation;
-static uint32_t published_frame;
-static int in_flight, reset_pending;
+static uint64_t generation;
+static struct nh_mirror_flights flights;
+static int reset_pending;
 static uint32_t pending_flags;
 static struct nh_range fixed_samples[16];
 static uint32_t fixed_sample_count;
@@ -56,6 +57,12 @@ static uint8_t detour[NH_HOOK_BYTES];
 static volatile LONG logic_frames, dropped_updates, truncated_updates, invalid_updates;
 static volatile LONG game_thread_id;
 static uint64_t mirror_bytes, hook_us_total, hook_us_max, budget_overruns;
+static volatile LONG hook_lock_skips;
+static uint64_t capture_attempts, captures_produced, mirrors_published, incomplete_published;
+static uint64_t in_flight_skips, publish_rejections, empty_subscription_skips, mirror_acks;
+static uint64_t mailbox_skips, ack_notifications;
+#define NH_TIMING_SAMPLES 32768u
+static uint32_t ack_times[NH_TIMING_SAMPLES], ack_time_count, ack_time_cursor;
 /* Keep the first actual fault for each incomplete publication. Stage and rule
  * metadata distinguish policy bounds from time budgets and retired heap pages. */
 static uint32_t capture_stage, capture_rule = UINT32_MAX, capture_object;
@@ -74,7 +81,7 @@ static uint64_t fault_count, fault_event_count;
 static int previous_capture_failed;
 static struct nh_read_cache read_cache;
 static struct nh_read_region_cursor capture_region;
-static uint32_t hook_times[16384], hook_time_count, hook_time_cursor;
+static uint32_t hook_times[NH_TIMING_SAMPLES], hook_time_count, hook_time_cursor;
 static uint64_t hook_calls;
 static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t limit) {
     if (current_fault.reason) return;
@@ -475,12 +482,15 @@ static void publish_incomplete(uint32_t frame, uint32_t flags, LARGE_INTEGER sta
         if (flags & NH_MIRROR_INVALID) InterlockedIncrement(&invalid_updates);
     }
     pending_flags |= flags;
-    if (in_flight || !packet || expired(start, subscription.budget_us)) return;
+    if (flights.count || !packet || expired(start, subscription.budget_us)) return;
     put_u32(packet, frame); put_u32(packet + 4, pending_flags);
     put_u32(packet + 8, 0); put_u32(packet + 12, 0);
-    if (nh_publish_move(NH_MIRROR, &packet, 16)) {
-        in_flight = 1; published_frame = frame; published_generation = 0;
+    if (nh_publish_mirror(&packet, 16, start, applied_revision)) {
+        LARGE_INTEGER published_at;
+        QueryPerformanceCounter(&published_at);
+        nh_mirror_flight_publish(&flights, frame, applied_revision, 0, published_at.QuadPart, 1);
         pending_flags = 0;
+        ++incomplete_published;
         mirror_bytes += 16;
     }
 }
@@ -499,30 +509,29 @@ void nh_logic_tick(void) {
             InterlockedCompareExchange(&game_thread_id, (LONG)teb_thread, 0);
     }
     InterlockedIncrement(&logic_frames);
-    if (!enabled || !nh_connected() || initialized != 2 || !TryEnterCriticalSection(&state_lock)) return;
-    /* The client has one outstanding mirror. Keep its exact published shadow
-     * until ACK instead of copying intermediate frames that cannot be sent.
-     * The next available logic boundary resolves the complete current union
-     * and compares against that acknowledged image: changed bytes and changed
-     * membership still produce a fresh delta/reset, with same-frame samples.
-     * Subscription revisions likewise wait for the outstanding ACK below. */
-    if (in_flight) { InterlockedIncrement(&dropped_updates); goto done; }
+    if (!enabled || !nh_connected() || initialized != 2) return;
+    if (!TryEnterCriticalSection(&state_lock)) { InterlockedIncrement(&hook_lock_skips); return; }
     frame = nh_current_frame();
-    if (frame == NH_NO_FRAME || (!subscription.range_count && !subscription.rule_count)) goto done;
-    if (pending_flags && !in_flight) {
-        /* A budget overrun is reported in the next fresh budget, rather than
-         * doing more serialization after the time limit has already expired. */
+    if (frame == NH_NO_FRAME || (!subscription.range_count && !subscription.rule_count)) { ++empty_subscription_skips; goto done; }
+    /* A negotiated second credit overlaps transport/Worker latency, not image
+     * ownership. Revision/reset/fault/frame-reuse barriers first drain the
+     * exact ordered baseline; every complete publication remains immutable. */
+    if (!nh_mirror_flight_available(&flights, subscription.mirror_window, frame,
+            subscription_revision, pending_flags || reset_pending)) {
+        ++in_flight_skips; InterlockedIncrement(&dropped_updates); goto done;
+    }
+    if (!nh_mirror_mailbox_available()) { ++mailbox_skips; InterlockedIncrement(&dropped_updates); goto done; }
+    if (pending_flags) {
+        /* A budget overrun is reported in the next fresh budget after previous
+         * complete publications have drained; it never advances the shadow. */
         publish_incomplete(frame, pending_flags, start); goto done;
     }
-    if (applied_revision != subscription_revision && !in_flight) {
-        /* Opted-in clients identify the exact applied recipe by revision.
-         * Legacy clients retain their original RESET subscription handshake. */
+    if (applied_revision != subscription_revision) {
         if (!subscription.page_removals) { shadow_count = 0; reset_pending = 1; }
         applied_revision = subscription_revision;
     }
-    /* Finish acknowledging the previous subscription before applying a replacement. */
-    if (applied_revision != subscription_revision) goto done;
     memset(&current_fault, 0, sizeof(current_fault));
+    ++capture_attempts;
     flags = resolve_union(start);
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
     capture_stage = 2; capture_rule = UINT32_MAX;
@@ -553,7 +562,9 @@ void nh_logic_tick(void) {
         i += run;
     }
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
-    if (in_flight) { InterlockedIncrement(&dropped_updates); goto done; }
+    /* Legacy membership changes require an exclusive reset. Opted-in window
+     * clients use explicit removals, so their ordinary deltas do not reset. */
+    if (reset_pending && flights.count) { ++in_flight_skips; InterlockedIncrement(&dropped_updates); goto done; }
     capture_stage = 3;
     for (i = 0; i < capture_count; ++i) {
         if (!capture_pages[i].dirty) continue;
@@ -604,22 +615,26 @@ void nh_logic_tick(void) {
         subscription.page_removals && removed_count ? NH_MIRROR_REMOVED : 0) |
         (subscription.page_removals ? NH_MIRROR_REVISION : 0));
     put_u32(packet + 8, dirty_count); put_u32(packet + 12, sample_count);
-    if (nh_publish_move(NH_MIRROR, &packet, length)) {
+    ++captures_produced;
+    if (nh_publish_mirror(&packet, length, start, applied_revision)) {
+        LARGE_INTEGER published_at;
+        ++mirrors_published;
+        QueryPerformanceCounter(&published_at);
+        nh_mirror_flight_publish(&flights, frame, applied_revision, next_generation, published_at.QuadPart, reset_pending);
         /* Only a completely serialized, accepted publication replaces the
          * authoritative image. Failed sends retain removals and dirty changes. */
         { uint8_t *bytes = shadow_bytes; struct nh_page *pages = shadow_pages;
           shadow_bytes = capture_bytes; capture_bytes = bytes;
           shadow_pages = capture_pages; capture_pages = pages; }
         shadow_count = capture_count; generation = next_generation;
-        in_flight = 1; published_frame = frame; published_generation = generation;
         reset_pending = 0; mirror_bytes += length;
-    } else InterlockedIncrement(&dropped_updates);
+    } else { ++publish_rejections; InterlockedIncrement(&dropped_updates); }
 done:
     QueryPerformanceCounter(&finish);
     { uint64_t us = (uint64_t)(finish.QuadPart - start.QuadPart) * 1000000u / (uint64_t)frequency.QuadPart;
       hook_us_total += us; ++hook_calls;
-      hook_times[hook_time_cursor++ % 16384] = (uint32_t)us;
-      if (hook_time_count < 16384) ++hook_time_count;
+      hook_times[hook_time_cursor++ % NH_TIMING_SAMPLES] = (uint32_t)us;
+      if (hook_time_count < NH_TIMING_SAMPLES) ++hook_time_count;
       if (us > hook_us_max) hook_us_max = us;
       if (subscription.budget_us && us > subscription.budget_us) ++budget_overruns; }
     LeaveCriticalSection(&state_lock);
@@ -741,10 +756,23 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
     if (type == NH_ACK) {
         if (length != 4) { fail(id, "ACK requires the mirror frame u32"); return; }
         EnterCriticalSection(&state_lock);
-        if (in_flight && get_u32(payload) == published_frame) {
+        struct nh_mirror_flight acknowledged[2];
+        uint64_t acknowledged_generation;
+        int matched;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        uint32_t count = nh_mirror_flight_ack(&flights, get_u32(payload), now.QuadPart,
+            acknowledged, &acknowledged_generation, &matched);
+        if (matched) { ++ack_notifications; nh_mirror_trace_ack(get_u32(payload), now); }
+        if (count) {
+            for (uint32_t entry = 0; entry < count; ++entry) {
+                ack_times[ack_time_cursor++ % NH_TIMING_SAMPLES] =
+                    (uint32_t)((uint64_t)(acknowledged[entry].acknowledged_ticks - acknowledged[entry].published_ticks) * 1000000u / (uint64_t)frequency.QuadPart);
+                if (ack_time_count < NH_TIMING_SAMPLES) ++ack_time_count;
+                ++mirror_acks;
+            }
             for (i = 0; i < shadow_count; ++i)
-                if (shadow_pages[i].dirty <= published_generation) shadow_pages[i].dirty = 0;
-            in_flight = 0;
+                if (shadow_pages[i].dirty <= acknowledged_generation) shadow_pages[i].dirty = 0;
         }
         LeaveCriticalSection(&state_lock);
         return; /* ACK is a notification and has no reply. */
@@ -774,7 +802,11 @@ void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint
         next.range_count = get_u32(payload); next.rule_count = get_u32(payload + 4);
         next.max_pages = get_u32(payload + 8); next.budget_us = get_u32(payload + 12);
         next.page_removals = get_u32(payload + 16) >> 31;
-        next.sample_count = get_u32(payload + 16) & 0x7fffffffu;
+        next.mirror_window = (get_u32(payload + 16) & 0x40000000u) ? 2 : 1;
+        next.sample_count = get_u32(payload + 16) & 0x3fffffffu;
+        if (next.mirror_window == 2 && !next.page_removals) {
+            fail(id, "SUBSCRIBE mirror window requires revisioned page removals"); return;
+        }
         if (next.range_count > NH_MAX_RANGES || next.rule_count > NH_MAX_RULES ||
             !next.max_pages || next.max_pages > NH_MAX_PAGES || next.sample_count > NH_MAX_SAMPLES ||
             next.budget_us < NH_MIRROR_MIN_BUDGET_US || next.budget_us > NH_MIRROR_MAX_BUDGET_US ||
@@ -859,7 +891,7 @@ void nh_mirror_disconnect(void) {
     switch_hook(0);
     EnterCriticalSection(&state_lock);
     memset(&subscription, 0, sizeof(subscription)); nh_page_seed_init(&fixed_seed);
-    ++subscription_revision; shadow_count = 0; in_flight = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
+    ++subscription_revision; shadow_count = 0; flights.count = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
     LeaveCriticalSection(&state_lock);
 }
 static int compare_times(const void *a, const void *b) {
@@ -879,7 +911,8 @@ static void format_fault(char *out, uint32_t capacity, const struct mirror_fault
 }
 void nh_mirror_diagnostics(char *out, uint32_t capacity) {
     char hook[256], detail[768], recent[6400], entry[768];
-    uint32_t times[16384], time_count, p99, used = 0;
+    uint32_t times[NH_TIMING_SAMPLES], ack_samples[NH_TIMING_SAMPLES];
+    uint32_t time_count, ack_count, p50, p99, ack_p50, ack_p99, used = 0;
     if (!capacity) return;
     if (initialized != 2) {
         snprintf(out, capacity, "\"logicFrames\":0,\"mirrorBytes\":0,\"hookUs\":0,\"droppedUpdates\":0,\"hookInstalled\":false");
@@ -888,9 +921,15 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
     EnterCriticalSection(&state_lock);
     time_count = hook_time_count;
     memcpy(times, hook_times, time_count * sizeof(*times));
+    ack_count = ack_time_count;
+    memcpy(ack_samples, ack_times, ack_count * sizeof(*ack_samples));
     LeaveCriticalSection(&state_lock);
     qsort(times, time_count, sizeof(*times), compare_times);
+    p50 = time_count ? times[(time_count + 1) / 2 - 1] : 0;
     p99 = time_count ? times[(time_count * 99 + 99) / 100 - 1] : 0;
+    qsort(ack_samples, ack_count, sizeof(*ack_samples), compare_times);
+    ack_p50 = ack_count ? ack_samples[(ack_count + 1) / 2 - 1] : 0;
+    ack_p99 = ack_count ? ack_samples[(ack_count * 99 + 99) / 100 - 1] : 0;
     EnterCriticalSection(&state_lock);
     format_fault(detail, sizeof(detail), &last_fault);
     recent[used++] = '[';
@@ -905,13 +944,20 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
     if (installed) snprintf(hook, sizeof(hook), "{\"site\":%lu,\"original\":[137,21,132,237,168,0],\"patched\":[%u,%u,%u,%u,%u,%u]}",
         (unsigned long)NH_HOOK_ADDRESS, detour[0],detour[1],detour[2],detour[3],detour[4],detour[5]);
     else strcpy(hook, "null");
-    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s",
+    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP50Us\":%lu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s,\"mirrorCaptureAttempts\":%llu,\"mirrorProduced\":%llu,\"mirrorsPublished\":%llu,\"mirrorIncompletePublished\":%llu,\"mirrorInFlightSkips\":%llu,\"mirrorPublishRejections\":%llu,\"mirrorEmptySubscriptionSkips\":%llu,\"hookLockSkips\":%lu,\"mirrorAcks\":%llu,\"mirrorAckP50Us\":%lu,\"mirrorAckP99Us\":%lu,\"mirrorAckSamples\":%lu,\"mirrorInFlightCount\":%lu,\"mirrorWindow\":%lu,\"mirrorMailboxSkips\":%llu,\"mirrorAckNotifications\":%llu",
         (unsigned long)logic_frames, (unsigned long long)mirror_bytes, (unsigned long long)hook_us_total,
         (unsigned long long)hook_us_max, (unsigned long long)budget_overruns, (unsigned long)dropped_updates,
         (unsigned long)truncated_updates, (unsigned long)invalid_updates, installed ? "true" : "false",
-        (unsigned long)shadow_count, in_flight ? "true" : "false", (unsigned long)game_thread_id, hook,
+        (unsigned long)shadow_count, flights.count ? "true" : "false", (unsigned long)game_thread_id, hook,
         (unsigned long)teardown_failures, (unsigned long)owned_count, (unsigned long long)hook_calls,
-        (unsigned long)p99, (unsigned long)time_count, (unsigned long long)fault_count,
-        (unsigned long long)fault_event_count, (unsigned long long)(fault_event_count - fault_history_count), detail, recent);
+        (unsigned long)p50, (unsigned long)p99, (unsigned long)time_count, (unsigned long long)fault_count,
+        (unsigned long long)fault_event_count, (unsigned long long)(fault_event_count - fault_history_count), detail, recent,
+        (unsigned long long)capture_attempts, (unsigned long long)captures_produced,
+        (unsigned long long)mirrors_published, (unsigned long long)incomplete_published,
+        (unsigned long long)in_flight_skips, (unsigned long long)publish_rejections,
+        (unsigned long long)empty_subscription_skips, (unsigned long)hook_lock_skips,
+        (unsigned long long)mirror_acks, (unsigned long)ack_p50, (unsigned long)ack_p99, (unsigned long)ack_count,
+        (unsigned long)flights.count, (unsigned long)(subscription.mirror_window ? subscription.mirror_window : 1),
+        (unsigned long long)mailbox_skips, (unsigned long long)ack_notifications);
     LeaveCriticalSection(&state_lock);
 }
