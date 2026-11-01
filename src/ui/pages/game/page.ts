@@ -974,6 +974,13 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       if (viewChange) {
         storeResolutionChoice(selectedGameId!, nextChoice);
         activeResolutionChoice = nextChoice;
+        // The restarted page re-reads the choice; a ?resolution= from the launch would override it. A refused
+        // change above keeps the address, so a reload still matches the running game.
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('resolution')) {
+          url.searchParams.delete('resolution');
+          window.history.replaceState(window.history.state, '', url);
+        }
       }
       // Reuse the validated source and canvas context. Reloading loses unpersisted directory/HTTP selections.
       await releaseRuntime(true);

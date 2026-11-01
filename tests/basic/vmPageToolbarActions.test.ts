@@ -43,8 +43,8 @@ describe('toolbar view choice', () => {
     await actions({ onNativeViewChange, onRestartForResolution }).onResolution('moderate');
     expect(onNativeViewChange).toHaveBeenCalledWith('moderate');
     expect(onRestartForResolution).not.toHaveBeenCalled();
-    // The restarted page must not read the launcher's old view back from its address.
-    expect(new URL(page.href()).searchParams.has('resolution')).toBe(false);
+    // Remembering the choice and dropping the launch address belong to the accepted in-menu restart.
+    expect(new URL(page.href()).searchParams.get('resolution')).toBe('wide');
     expect(page.values.has('vm-resolution-yr')).toBe(false);
   });
 
@@ -55,6 +55,20 @@ describe('toolbar view choice', () => {
     });
     await expect(actions({ onNativeViewChange }).onResolution('classic')).rejects.toThrow(/对局中/);
     expect(page.values.has('vm-resolution-yr')).toBe(false);
+  });
+
+  it('native route keeps a fixed launch size in the address when the change is refused', async () => {
+    const page = stubPage('?backend=native&resolution=1280x720');
+    const onNativeViewChange = vi.fn(async () => {
+      throw new Error('本次启动指定了固定画面大小。');
+    });
+    await expect(actions({ onNativeViewChange }).onResolution('moderate')).rejects.toThrow(/固定画面/);
+    expect(new URL(page.href()).searchParams.get('resolution')).toBe('1280x720');
+  });
+
+  it('native route before the main menu is ready refuses without claiming the view was saved', async () => {
+    stubPage('?backend=native&native-viewport=1');
+    await expect(actions({}).onResolution('moderate')).rejects.toThrow(/still starting|还在启动/);
   });
 
   it('the web route remembers the choice and reloads the session', async () => {

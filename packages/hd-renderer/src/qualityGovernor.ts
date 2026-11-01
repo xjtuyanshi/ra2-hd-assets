@@ -259,8 +259,12 @@ export class QualityGovernor {
       trial.sum += mean;
       trial.count++;
       trial.remaining -= elapsed;
-      // Over budget and slower than the tier below: this tier costs what the scene cannot afford.
-      const worse = (value: number) => value > Math.max(this.overMs, trial.reference * (1 + this.gain));
+      // A try from a tier within budget fails as soon as it runs over budget: allowing the gain margin there
+      // would keep a tier that is slightly over budget and repeat the down-check-up cycle forever. A probe
+      // from a tier over budget fails only when it is also slower than that tier.
+      const probe = trial.reference > this.overMs;
+      const worse = (value: number) =>
+        probe ? value > Math.max(this.overMs, trial.reference * (1 + this.gain)) : value > this.overMs;
       if (
         (sustained && worse(this.overSum / this.overCount)) ||
         (trial.remaining <= 0 && worse(trial.sum / trial.count))

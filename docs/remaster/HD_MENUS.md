@@ -72,7 +72,8 @@ Its optional `inkArea` map gives each visible glyph's lit source-bitmap pixel co
 rejecting any ink box that disagrees with the reviewed metrics; the output remains a private asset.
 With `inkArea` and no outlines, `src/graphics/text/coverageGlyphFit.ts` fits a smooth host glyph to each
 source ink box and measures its rendered ink at the actual device scale: it picks the heaviest supplied face
-that is not heavier than the source (within 8%), then adds a round-joined stroke until ink matches within 2%.
+that is not heavier than the source (within 8%). A face within 8% of the source ink, lighter or heavier, is used as
+it is; only a face more than 8% lighter gets a round-joined stroke, added until ink matches within 2%.
 `src/games/yr/menuTypography.ts` supplies the YR policy: a PingFang SC 100–600 ladder for Chinese with a
 bounded 1.5 stretch for one-stroke glyphs, and Arial 400/700 and Arial Black 900 for small bold Latin/digits.
 Every glyph a screen can show, including unscrolled list rows, is fitted (8 ms per frame) before the layer

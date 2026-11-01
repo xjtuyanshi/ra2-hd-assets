@@ -142,18 +142,19 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
       const choice = parseResolutionChoice(value);
       if (choice === undefined) throw new Error(t('不支持的分辨率：{0}', value));
       const native = new URLSearchParams(window.location.search).get('backend') === 'native';
-      // The native page remembers the choice only when its launcher accepts the in-menu restart.
-      if (!native) storeResolutionChoice(gameId, choice);
+      // The native page remembers the choice, and drops a launch ?resolution=, only when its launcher accepts
+      // the in-menu restart: a refusal must leave the address matching the running game.
+      if (native) {
+        if (!onNativeViewChange) throw new Error(t('游戏还在启动，暂时不能切换视野。请到游戏主菜单后再选。'));
+        await onNativeViewChange(choice);
+        return;
+      }
+      storeResolutionChoice(gameId, choice);
       // The restart re-reads the choice; a ?resolution= in the address would override what was just picked.
       const url = new URL(window.location.href);
       if (url.searchParams.has('resolution')) {
         url.searchParams.delete('resolution');
         window.history.replaceState(window.history.state, '', url);
-      }
-      if (native) {
-        if (!onNativeViewChange) throw new Error(t('视野已记住。请关闭游戏和启动器，再启动一次以应用新视野。'));
-        await onNativeViewChange(choice);
-        return;
       }
       setRequestedResolution(resolutionViewScale(choice) !== null ? null : (choice as GameResolution | null));
       await onRestartForResolution();

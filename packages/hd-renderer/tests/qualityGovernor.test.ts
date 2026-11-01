@@ -179,6 +179,27 @@ describe('quality governor', () => {
     expect(governor.tier).toBe(2);
   });
 
+  it('does not keep re-trying a tier that runs just over budget once the tier below holds', () => {
+    const governor = new QualityGovernor({ tiers: 3, budgetMs: BUDGET, overFactor: OVER });
+    // rAF timestamps at 120 Hz: full quality misses one refresh in eight (a 25 ms interval), a mean of 17.7 ms,
+    // between the 1.04 budget margin and the 1.06 gain share; tier 1 keeps every frame on time.
+    let frame = 0;
+    let time = 0;
+    let previous = 0;
+    let changes = 0;
+    while (time < 600_000) {
+      frame++;
+      const ms = governor.tier === 0 && frame % 8 === 0 ? 25 : BUDGET;
+      time += ms;
+      const tier = governor.frame(ms);
+      if (tier !== previous) changes++;
+      previous = tier;
+    }
+    // Failed tries back off (waits doubling up to two minutes) instead of cycling every 10-20 s (60 changes).
+    expect(changes).toBeLessThanOrEqual(16);
+    expect(governor.tier).toBe(1);
+  });
+
   it('takes back a step that does not make the frames faster, and holds back the next ones', () => {
     // The owner's slow minutes: the frames are as slow at every tier (the main thread, the compositor or another
     // process holds them back, not a pass a tier gives up).

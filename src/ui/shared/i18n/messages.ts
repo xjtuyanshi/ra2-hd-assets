@@ -215,8 +215,8 @@ export const englishMessages = {
   '视野：适中': 'View: Balanced',
   '视野：宽': 'View: Wide',
   '视野 / 分辨率': 'View / resolution',
-  '视野已记住。请关闭游戏和启动器，再启动一次以应用新视野。':
-    'View saved. Close the game and launcher, then launch again to apply it.',
+  '游戏还在启动，暂时不能切换视野。请到游戏主菜单后再选。':
+    'The game is still starting. Choose the view again from the game main menu.',
   '跟随 INI': 'Use INI',
   '匹配窗口（清晰 1:1）': 'Match window (crisp 1:1)',
   '画面：高清': 'Picture: HD',
