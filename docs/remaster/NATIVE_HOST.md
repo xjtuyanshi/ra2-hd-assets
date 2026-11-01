@@ -85,12 +85,17 @@ By default the launcher serves and opens a plain Chinese start screen before sta
 clicks Fullscreen Start to enter fullscreen, wait for stable dimensions, and then measure the available play area, device pixel ratio and remembered
 view through an authenticated loopback endpoint. A smaller Window Start button starts at the current size. Waiting for this choice has no startup timeout. The views
 are **经典** / **适中** / **宽**, respectively `resolution=classic|moderate|wide` and 3 / 2.5 / 2 device pixels per
-game pixel; Wide is the default and `resolution=display` remains a Wide alias. Both launch routes accept
-`--view classic|moderate|wide` to select a view explicitly. They leave the default to the shared page so that later
-explicit choices remain remembered. Each game's old unversioned stored Classic choice migrates to Wide once;
-the old format did not distinguish the prior default from an explicit choice. Selecting Classic again, in the
-toolbar or with `--view classic`, records the new preference version and keeps Classic on later starts. Moderate,
-fixed resolutions and the explicit INI choice are preserved. The game frame is rounded down to even dimensions and
+game pixel; Moderate is the default and `resolution=display` remains a Wide alias. Both launch routes accept
+`--view classic|moderate|wide` to select a view explicitly (the page remembers it). Without `--view` they leave the
+choice to the shared page so that later explicit choices remain remembered; owner entries therefore pass `--view`
+only on request. A stored Wide (the former default, which older owner entries wrote on every launch) and an old
+unversioned Classic migrate to Moderate once per game; the old formats did not distinguish a default from a choice.
+Selecting a view again, in the toolbar or with `--view`, records the new preference version and keeps it on later
+starts. Moderate, fixed resolutions, the explicit INI choice and a Classic stored under the Wide default are
+preserved. On the owner's 2056×1329-point display at 75% zoom (4112×2580 device pixels in fullscreen) Moderate
+gives a 1644×1032 frame at exactly 2.5 device pixels per game pixel. In an out-of-match menu a toolbar view change
+restarts the owned game at the new view (about 20 seconds, the same path as the resize restart); during a match the
+page refuses with a Chinese notice. The game frame is rounded down to even dimensions and
 uses a smaller fitting scale if the window cannot fit the minimum 800×600 at the requested scale. At a 1728×914-point
 play area with DPR 2, the calculated Classic / Moderate / Wide frames are 1152×608 / 1382×730 / 1728×914; fullscreen
 1728×1117 gives Classic 1152×744, closest to original 1024×768 framing on that display. These dimensions describe

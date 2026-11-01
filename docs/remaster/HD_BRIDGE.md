@@ -739,18 +739,23 @@ choice of rate, and `hd-pipelines=sync` switches the asynchronous pipeline compi
 
 The view choice controls framing independently of HD rendering resolution. **经典** (`resolution=classic`) uses
 three device pixels per game pixel, **适中** (`resolution=moderate`) uses 2.5, and **宽** (`resolution=wide`) uses two.
-Wide is the default when the player has never selected a view; `resolution=display` remains a legacy alias for
-Wide. The page remembers the selected view between sessions. Both owner launchers accept `--view classic|moderate|wide`
-and otherwise defer to this shared page preference. Old unversioned stored Classic choices migrate to Wide once,
-per game, because their storage format could not distinguish the old default from an explicit choice. New toolbar
-and URL choices record the current default version, so selecting Classic again persists. Moderate, fixed resolutions
-and an explicit INI choice remain unchanged.
+Moderate is the default when the player has never selected a view: at Wide a large Retina display showed so much
+map that units looked no sharper than the original, and Classic showed too little. `resolution=display` remains a
+legacy alias for Wide. The page remembers the selected view between sessions. Both owner launchers accept
+`--view classic|moderate|wide` as an explicit, remembered choice and otherwise defer to this shared page preference;
+an owner entry passes `--view` only when the player asks for one. Each stored choice carries a default version
+(`moderate-v2`). Choices stored before it migrate to Moderate once, per game, when they may have been a former
+default rather than a choice: an unversioned Classic (the first default), and any Wide (the second default, which
+older owner entries also wrote into every launch address). A Classic stored under the Wide default, Moderate, fixed
+resolutions and an explicit INI choice remain unchanged; selecting Wide or Classic again persists.
 
 - Each display-matched choice divides the available stage's device pixels by its scale and rounds the game frame
   down to even dimensions within `GAME_RESOLUTION_LIMITS` (`src/games/resolution.ts`, 800x600 through 2560x1600).
   Fullscreen measurement retains the element's fractional CSS box. Both resolution negotiation and canvas fitting
   round that box to integral device pixels before dividing: at 75% zoom, 2741.3333 CSS pixels (or the rounded 2741
-  reported by `innerWidth`) at DPR 1.5 represent 4112 device pixels and exactly 2056 game pixels in Wide.
+  reported by `innerWidth`) at DPR 1.5 represent 4112 device pixels and exactly 2056 game pixels in Wide. The owner's
+  fullscreen area there (2056x1329-point display, 4112x2580 device pixels) gives Moderate 1644x1032 at exactly 2.5
+  device pixels per game pixel, well inside the 2560x1600 axis limits and the 3,145,728-pixel native picture bound.
   The smallest supported usable game frame is 800x600. If a small window cannot fit that minimum at the selected
   scale, the frame uses a smaller fitting scale; a window smaller than the minimum still fits the complete frame.
   On a 1728x914-point play area at DPR 2, the calculated Classic / Moderate / Wide frames are 1152x608 / 1382x730 /
@@ -765,7 +770,12 @@ and an explicit INI choice remain unchanged.
   The game resolution stays stable until the player presses the resize/restart button in an out-of-match menu.
   The button states the approximately 20-second wait; nothing restarts automatically, including on return from battle.
   The native launcher restarts its owned game and the web page reloads. Native menus retain their original frame dimensions until battle
-  starts. A selected view applies at the next game start.
+  starts. On the web route a toolbar view applies at the next game start (the page reloads). On a measured native launch
+  a toolbar choice in an out-of-match menu uses the same in-menu restart (about 20 seconds) even when the window is
+  unchanged. It keeps the area the session was matched to, because the toolbar is outside the fullscreen element and
+  leaving fullscreen to reach it must not replace that measurement; the resize restart still handles a real window
+  change. The choice is remembered once the menu allows the restart; during a match the page refuses with a Chinese
+  notice and keeps the current choice. A launch with a fixed `--size` cannot change its frame from the page.
   `resolution=WxH` still requests an explicit frame and `resolution=ini` the game's own INI. An explicit URL choice
   wins over the stored choice for that page load; changing the page control removes that URL override.
 - The HD canvas and the HD interface canvas are laid out on whole device pixels with one drawing-buffer pixel each
@@ -778,7 +788,7 @@ and an explicit INI choice remain unchanged.
   grid (`snapToPixelGrid`), and post-pass radii follow the view scale (`HdRenderer.setBufferScale`).
 
 `scripts/remaster/play.sh` (or a double click on `scripts/remaster/play.command` on macOS) starts the development
-server and opens the HD page with the approved look, the remembered view (Wide initially), `game-speed=3` (the original scale's normal
+server and opens the HD page with the approved look, the remembered view (Moderate initially), `game-speed=3` (the original scale's normal
 speed; the page's own startup default is the fastest, see
 [the startup configuration](../RA2_COMMAND_LINE_AND_SPAWNER.md#current-startup-configuration)) and the skirmish setup as
 the first page; `--view classic|moderate|wide` explicitly selects the framing, `--original` opens the original picture without the HD bridge, `--train` opens the practice lessons

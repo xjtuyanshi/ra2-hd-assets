@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_VIEW_CHOICE,
   DISPLAY_RESOLUTION,
   displayMatchIsStale,
   loadStoredResolutionChoice,
+  nativeViewportChoice,
   parseResolutionChoice,
   resolutionChoiceValue,
   resolveResolutionChoice,
@@ -33,6 +35,26 @@ describe('分辨率选择', () => {
     const frame = resolveResolutionChoice('wide', null, 1.5, area);
     expect(frame).toEqual({ width: 2056, height: 1290 });
     expect(resolveResolutionViewScale('wide', null, 1.5, frame, area)).toBe(2);
+  });
+  it('defaults to Moderate and matches the owner fullscreen frame at exactly 2.5 device pixels', () => {
+    expect(DEFAULT_VIEW_CHOICE).toBe('moderate');
+    // 2056x1329-point display, Chrome at 75% (DPR 1.5), fullscreen below the camera housing: 4112x2580 device pixels.
+    for (const width of [2741, 2741.3333, 4112 / 1.5]) {
+      const area = { width, height: 1720 };
+      const frame = resolveResolutionChoice(DEFAULT_VIEW_CHOICE, null, 1.5, area);
+      expect(frame).toEqual({ width: 1644, height: 1032 });
+      expect(resolveResolutionViewScale(DEFAULT_VIEW_CHOICE, null, 1.5, frame, area)).toBe(2.5);
+    }
+    const full = { width: 2741.3333, height: 2658 / 1.5 };
+    expect(resolveResolutionChoice('moderate', null, 1.5, full)).toEqual({ width: 1644, height: 1062 });
+    expect(nativeViewportChoice(DEFAULT_VIEW_CHOICE)).toEqual({ devicePixelsPerGamePixel: 2.5 });
+  });
+  it('asks the native launcher for a view scale, a fixed frame or the INI', () => {
+    expect(nativeViewportChoice('classic')).toEqual({ devicePixelsPerGamePixel: 3 });
+    expect(nativeViewportChoice('wide')).toEqual({ devicePixelsPerGamePixel: 2 });
+    expect(nativeViewportChoice(DISPLAY_RESOLUTION)).toEqual({ devicePixelsPerGamePixel: 2 });
+    expect(nativeViewportChoice({ width: 1280, height: 720 })).toEqual({ frameWidth: 1280, frameHeight: 720 });
+    expect(nativeViewportChoice(null)).toEqual({ followIni: true });
   });
   it('retains the negotiated scale after reloading a smaller native window', () => {
     expect(
@@ -84,22 +106,47 @@ describe('分辨率选择', () => {
   it('migrates the old remembered Classic default once and retains later explicit views', () => {
     const values = stubStorage();
     values.set('vm-resolution-yr', 'classic');
-    expect(loadStoredResolutionChoice('yr')).toBe('wide');
-    expect(values.get('vm-resolution-yr')).toBe('wide');
-    expect(loadStoredResolutionChoice('yr')).toBe('wide');
+    expect(loadStoredResolutionChoice('yr')).toBe('moderate');
+    expect(values.get('vm-resolution-yr')).toBe('moderate');
+    expect(loadStoredResolutionChoice('yr')).toBe('moderate');
     storeResolutionChoice('yr', 'classic');
     expect(loadStoredResolutionChoice('yr')).toBe('classic');
     values.set('vm-resolution-ra2', 'classic');
-    expect(loadStoredResolutionChoice('ra2')).toBe('wide');
+    expect(loadStoredResolutionChoice('ra2')).toBe('moderate');
     expect(loadStoredResolutionChoice('yr')).toBe('classic');
   });
 
-  it('preserves existing non-Classic choices during default migration', () => {
+  it('moves a Wide remembered under the forced-Wide launcher to Moderate once; a later Wide sticks', () => {
     const values = stubStorage();
-    for (const choice of ['moderate', 'wide', 'display', 'ini', '1280x720']) {
-      values.set('vm-resolution-yr', choice);
-      expect(loadStoredResolutionChoice('yr')).toEqual(parseResolutionChoice(choice));
-      expect(values.get('vm-resolution-yr')).toBe(choice);
+    // Build 10/11 owner entries put ?resolution=wide in every launch address, which the page stored as wide-v1.
+    for (const version of ['wide-v1', null]) {
+      values.clear();
+      values.set('vm-resolution-yr', 'wide');
+      if (version) values.set('vm-resolution-default-yr', version);
+      expect(loadStoredResolutionChoice('yr')).toBe('moderate');
+      expect(values.get('vm-resolution-yr')).toBe('moderate');
+      expect(values.get('vm-resolution-default-yr')).toBe('moderate-v2');
+    }
+    storeResolutionChoice('yr', 'wide');
+    expect(loadStoredResolutionChoice('yr')).toBe('wide');
+    expect(loadStoredResolutionChoice('yr')).toBe('wide');
+    // A Classic explicitly picked under the Wide default stays Classic and is only re-stamped.
+    values.set('vm-resolution-yr', 'classic');
+    values.set('vm-resolution-default-yr', 'wide-v1');
+    expect(loadStoredResolutionChoice('yr')).toBe('classic');
+    expect(values.get('vm-resolution-default-yr')).toBe('moderate-v2');
+  });
+
+  it('preserves other existing choices during default migration', () => {
+    const values = stubStorage();
+    for (const choice of ['moderate', 'display', 'ini', '1280x720']) {
+      for (const version of ['wide-v1', null]) {
+        values.clear();
+        values.set('vm-resolution-yr', choice);
+        if (version) values.set('vm-resolution-default-yr', version);
+        expect(loadStoredResolutionChoice('yr')).toEqual(parseResolutionChoice(choice));
+        expect(values.get('vm-resolution-yr')).toBe(choice);
+      }
     }
   });
 

@@ -897,6 +897,31 @@ test('native viewport matching resolves view choices and supported even sizes', 
   assert.throws(() => nativeViewportResolution({ width: 1728, height: 963, dpr: 0 }), /有效/);
 });
 
+test('the owner fullscreen frame at the Moderate default stays within every native picture bound', async () => {
+  const agentHeader = await readFile(join(repository, 'packages/native-host/agent/agent.h'), 'utf8');
+  const agentPixels = /#define NH_MAX_PICTURE_PIXELS \((\d+)u \* (\d+)u \* (\d+)u\)/.exec(agentHeader);
+  assert.ok(agentPixels, 'agent picture bound is declared as a product');
+  const pictureBound = agentPixels.slice(1).reduce((product, value) => product * Number(value), 1);
+  assert.equal(pictureBound, NATIVE_RESOLUTION_LIMITS.maxPixels);
+  // MacBook "More Space" 2056x1329 points, Chrome page zoom 75% (DPR 1.5), fullscreen below the camera housing:
+  // 4112x2580 device pixels; without the housing the whole 2658-pixel height is available.
+  for (const [height, expected] of [
+    [1720, { width: 1644, height: 1032 }],
+    [2658 / 1.5, { width: 1644, height: 1062 }],
+  ])
+    for (const width of [2741, 2741.3333, 4112 / 1.5]) {
+      const frame = nativeViewportResolution({ width, height, dpr: 1.5, devicePixelsPerGamePixel: 2.5 });
+      assert.deepEqual(frame, expected);
+      // 2.5 device pixels per game pixel exactly, with at most one odd device row/column left over.
+      assert.ok(4112 - frame.width * 2.5 < 2.5 && Math.round(height * 1.5) - frame.height * 2.5 < 5);
+      assert.deepEqual(capNativeResolution(frame), frame);
+      assert.ok(frame.width <= NATIVE_RESOLUTION_LIMITS.maxWidth && frame.height <= NATIVE_RESOLUTION_LIMITS.maxHeight);
+      assert.ok(frame.width * frame.height <= pictureBound);
+      assert.equal(frame.width % 2, 0);
+      assert.equal(frame.height % 2, 0);
+    }
+});
+
 test('native INI resolution follows only the video section with defaults for missing dimensions', () => {
   assert.deepEqual(nativeIniResolution(Buffer.alloc(0)), { width: 800, height: 600 });
   assert.deepEqual(
@@ -1034,11 +1059,19 @@ test('film readiness accepts observed successful playback outside a modal and re
   assert.equal(nativeFilmReady({}, state), false);
 });
 
-for (const stopFailure of [false, true])
+for (const mode of ['default', 'stopFailure', 'owner'])
   test(
-    `CLI lifecycle uses real Vite plus a synthetic authenticated agent; ${stopFailure ? 'failed stop-file delivery still restores its DLL and frees both ports' : 'SIGINT restores only its DLL and frees both ports'}`,
+    `CLI lifecycle uses real Vite plus a synthetic authenticated agent; ${
+      mode === 'stopFailure'
+        ? 'failed stop-file delivery still restores its DLL and frees both ports'
+        : mode === 'owner'
+          ? 'owner mode keeps tool output and the tokened address out of the terminal'
+          : 'SIGINT restores only its DLL and frees both ports'
+    }`,
     { timeout: 45000 },
     async (t) => {
+      const stopFailure = mode === 'stopFailure';
+      const owner = mode === 'owner';
       const { dir, target } = await fixture(t);
       const prefix = join(dir, 'prefix');
       await mkdir(prefix);
@@ -1061,6 +1094,7 @@ const { packet, Type, decodePacket } = await import(${JSON.stringify(wirePath)})
 const args = process.argv.slice(2);
 const unix = (path) => path.slice(2).replaceAll('\\\\', '/');
 if (args[0] === 'winepath.exe') {
+  console.error('fixme:synthetic winepath trace');
   console.log('Z:' + args[2].replaceAll('/', '\\\\'));
 } else if (args[0] === 'cmd.exe') {
   console.log('synthetic noisy Wine self-check '.repeat(8192));
@@ -1072,6 +1106,7 @@ if (args[0] === 'winepath.exe') {
   const status = value('--status-file');
   const game = await readFile(unix(args.at(-1)));
   await writeFile(value('--log'), 'synthetic launcher; no game was run');
+  await writeFile(${JSON.stringify(join(dir, 'game-env.json'))}, JSON.stringify({ winedebug: process.env.WINEDEBUG ?? null }));
   const server = new WebSocketServer({ host: '127.0.0.1', port: +process.env.RA2_NATIVE_AGENT_PORT,
     verifyClient: ({req}) => req.headers.origin === process.env.RA2_NATIVE_AGENT_ORIGIN &&
       new URL(req.url, 'http://localhost').searchParams.get('token') === process.env.RA2_NATIVE_AGENT_TOKEN });
@@ -1109,19 +1144,25 @@ if (args[0] === 'winepath.exe') {
         'bash',
         [
           'scripts/remaster/native/play-native.sh',
-          ...(stopFailure ? ['--size', '1280x720', '--hd-marks'] : ['--fullscreen']),
+          ...(stopFailure
+            ? ['--size', '1280x720', '--hd-marks']
+            : owner
+              ? ['--owner', '--fullscreen']
+              : ['--fullscreen']),
         ],
         {
           cwd: repository,
-          env: {
-            ...process.env,
-            RA2_NATIVE_GAME_DIR: dir,
-            RA2_NATIVE_WINE_PREFIX: prefix,
-            RA2_NATIVE_WINE: wine,
-            RA2_HD_CACHE_DIR: dir,
-            RA2_NATIVE_WINE_BOTTLE: '',
-            WINEPREFIX: '',
-          },
+          env: Object.fromEntries(
+            Object.entries({
+              ...process.env,
+              RA2_NATIVE_GAME_DIR: dir,
+              RA2_NATIVE_WINE_PREFIX: prefix,
+              RA2_NATIVE_WINE: wine,
+              RA2_HD_CACHE_DIR: dir,
+              RA2_NATIVE_WINE_BOTTLE: '',
+              WINEPREFIX: '',
+            }).filter(([key]) => key !== 'WINEDEBUG' && key !== 'RA2_NATIVE_WINEDEBUG'),
+          ),
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
@@ -1147,14 +1188,21 @@ if (args[0] === 'winepath.exe') {
         if (!exited) child.kill('SIGKILL');
       });
       const deadline = Date.now() + 30000;
-      while (!output.includes('Play URL: ') && !exited && Date.now() < deadline) await delay(100);
-      assert.match(output, /Play URL: /, output);
+      const pageAnnounced = owner ? 'play-url.txt' : 'Play URL: ';
+      while (!output.includes(pageAnnounced) && !exited && Date.now() < deadline) await delay(100);
+      assert.ok(output.includes(pageAnnounced), output);
       if (stopFailure) {
         assert.match(output, /影片已经开始播放.*Chrome.*跳过影片/);
         assert.doesNotMatch(output, /Native main menu ready/);
       }
-      const url = new URL(output.match(/Play URL: (\S+)/)[1]);
-      const runPath = output.match(/Private launch logs and DLL backups: (.+)/)[1];
+      const runPath = owner
+        ? output.match(/本次记录文件夹：(.+)/)[1]
+        : output.match(/Private launch logs and DLL backups: (.+)/)[1];
+      const url = new URL(
+        owner ? (await readFile(join(runPath, 'play-url.txt'), 'utf8')).trim() : output.match(/Play URL: (\S+)/)[1],
+      );
+      if (owner) assert.equal((await lstat(join(runPath, 'play-url.txt'))).mode & 0o777, 0o600);
+      const launcherReady = owner ? '游戏主菜单已就绪。' : 'Native process ';
       if (!stopFailure) {
         const endpoint = `${url.origin}/__native/viewport`;
         const headers = { Authorization: `Bearer ${url.searchParams.get('agent-token')}` };
@@ -1168,8 +1216,8 @@ if (args[0] === 'winepath.exe') {
         });
         assert.equal(response.status, 200);
         const readyDeadline = Date.now() + 30000;
-        while (!output.includes('Native process ') && !exited && Date.now() < readyDeadline) await delay(100);
-        assert.match(output, /Native process /, output);
+        while (!output.includes(launcherReady) && !exited && Date.now() < readyDeadline) await delay(100);
+        assert.ok(output.includes(launcherReady), output);
         assert.deepEqual(await (await fetch(endpoint, { headers })).json(), {
           ready: true,
           restarting: false,
@@ -1211,7 +1259,7 @@ if (args[0] === 'winepath.exe') {
       assert.equal(url.searchParams.get('resolution'), stopFailure ? '1280x720' : null);
       for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
       assert.match(
-        output,
+        owner ? await readFile(join(runPath, 'launcher-output.log'), 'utf8') : output,
         stopFailure ? /Native resolution: 1280x720 \(current game/ : /Native resolution: 1728x962 \(current game/,
       );
       assert.match(url.searchParams.get('agent-token'), /^[a-f0-9]{64}$/);
@@ -1274,5 +1322,16 @@ if (args[0] === 'winepath.exe') {
       // Forced cleanup must not invent an exit acknowledgement from the helper.
       assert.equal(status.running, stopFailure);
       if (stopFailure) assert.match(output, /无法写入停止请求，将继续关闭本次游戏/);
+      const gameEnvironment = JSON.parse(await readFile(join(dir, 'game-env.json'), 'utf8'));
+      assert.equal(gameEnvironment.winedebug, owner ? '-all' : null);
+      if (owner) {
+        // Only short Chinese progress lines: no token, no tool traces, no English diagnostics.
+        assert.doesNotMatch(output, /Play URL|agent-token|[0-9a-f]{64}|fixme:|Native |Private launch|Restored/);
+        assert.match(output, /已恢复游戏文件夹原来的 ddraw\.dll。/);
+        const launcherOutput = await readFile(join(runPath, 'launcher-output.log'), 'utf8');
+        assert.match(launcherOutput, /fixme:synthetic winepath trace/);
+        assert.match(launcherOutput, /Native process 123456/);
+        assert.match(launcherOutput, /Restored the original DLL|Removed the DLL/);
+      } else assert.match(output, /fixme:synthetic winepath trace/);
     },
   );

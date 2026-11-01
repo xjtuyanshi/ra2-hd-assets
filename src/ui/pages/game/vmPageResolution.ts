@@ -14,7 +14,12 @@ import { displayMatchedFrameSize } from './canvasFit';
 
 const STORED_RESOLUTION_PREFIX = 'vm-resolution-';
 const STORED_VIEW_DEFAULT_PREFIX = 'vm-resolution-default-';
-const VIEW_DEFAULT_VERSION = 'wide-v1';
+/**
+ * Stamp written with every explicit choice. 'wide-v1' marked choices of builds whose launcher forced Wide into the
+ * page address on every launch, so a remembered Wide under it may never have been picked by the player.
+ */
+const VIEW_DEFAULT_VERSION = 'moderate-v2';
+const WIDE_DEFAULT_VERSION = 'wide-v1';
 
 /** Toolbar/URL value of the display-matched choice. */
 export const DISPLAY_RESOLUTION = 'display';
@@ -26,7 +31,11 @@ const INI_RESOLUTION = 'ini';
  * Legacy 'display' retains the wide two-device-pixel view.
  */
 export const VIEW_SCALES = { classic: 3, moderate: 2.5, wide: 2 } as const;
-export const DEFAULT_VIEW_CHOICE = 'wide';
+/**
+ * Default HD view. Wide (2) showed so much of the map that units looked no sharper than the original on a large
+ * Retina display, and Classic (3) showed too little; Moderate is the owner-chosen middle.
+ */
+export const DEFAULT_VIEW_CHOICE = 'moderate';
 export type ViewChoice = keyof typeof VIEW_SCALES;
 export type ResolutionChoice = GameResolution | typeof DISPLAY_RESOLUTION | ViewChoice | null;
 
@@ -63,16 +72,15 @@ export function parseResolutionChoice(value: string | null, custom = false): Res
 export function loadStoredResolutionChoice(gameId: SupportedGameId): ResolutionChoice | undefined {
   try {
     const choice = parseResolutionChoice(window.localStorage.getItem(`${STORED_RESOLUTION_PREFIX}${gameId}`));
-    // Earlier builds could remember the former Classic default without recording whether it was explicitly
-    // selected. Move that unversioned value to Wide once; all new toolbar/URL choices record this version.
-    if (
-      choice === 'classic' &&
-      window.localStorage.getItem(`${STORED_VIEW_DEFAULT_PREFIX}${gameId}`) !== VIEW_DEFAULT_VERSION
-    ) {
-      storeResolutionChoice(gameId, DEFAULT_VIEW_CHOICE);
-      return DEFAULT_VIEW_CHOICE;
-    }
-    return choice;
+    const version = window.localStorage.getItem(`${STORED_VIEW_DEFAULT_PREFIX}${gameId}`);
+    if (choice === undefined || version === VIEW_DEFAULT_VERSION) return choice;
+    // Move remembered former defaults to the current default once: an unversioned Classic (the first default) and any
+    // Wide stored before this version (the second default, which the owner launcher also wrote on every launch).
+    // Other values, and a Classic picked under the Wide default, were explicit; they are only re-stamped.
+    const formerDefault = choice === 'wide' || (choice === 'classic' && version !== WIDE_DEFAULT_VERSION);
+    const kept = formerDefault ? DEFAULT_VIEW_CHOICE : choice;
+    storeResolutionChoice(gameId, kept);
+    return kept;
   } catch {
     return undefined;
   }
@@ -89,6 +97,19 @@ export function storeResolutionChoice(gameId: SupportedGameId, choice: Resolutio
   } catch {
     // Persistence may be unavailable in private mode; the page's default still applies after this restart.
   }
+}
+
+/**
+ * The launcher request for a choice: a view scale, a fixed frame, or the game's INI. Shared by the first measurement
+ * and the in-menu restart so both ask for the same thing.
+ */
+export function nativeViewportChoice(
+  choice: ResolutionChoice,
+): { devicePixelsPerGamePixel: number } | { frameWidth: number; frameHeight: number } | { followIni: true } {
+  const scale = resolutionViewScale(choice);
+  if (scale !== null) return { devicePixelsPerGamePixel: scale };
+  if (choice && typeof choice === 'object') return { frameWidth: choice.width, frameHeight: choice.height };
+  return { followIni: true };
 }
 
 /**

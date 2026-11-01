@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { closeSync, constants, openSync, writeSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -37,7 +37,7 @@ import {
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const packageDirectory = join(repository, 'packages/native-host');
-const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscreen] [--size WxH] [--view classic|moderate|wide] [--hd-marks]
+const help = `Usage: scripts/remaster/native/play-native.sh [--open] [--fullscreen] [--size WxH] [--view classic|moderate|wide] [--hd-marks] [--owner]
 
 Required environment:
   RA2_NATIVE_GAME_DIR           Player-owned game copy containing gamemd.exe.
@@ -48,18 +48,27 @@ Optional environment:
   RA2_NATIVE_WINE               Wine executable; otherwise PATH/CrossOver discovery.
                                With no scope, use local gameres/wine-free/wine-path.
   RA2_HD_CACHE_DIR              Existing HD cache, passed unchanged to Vite.
+  RA2_NATIVE_WINEDEBUG          With --owner: WINEDEBUG for the game (default -all).
   NATIVE_HOST_CC/WINDRES/GO      Installed local build tools.
 
 Starts a hidden native game and the local development page, attached directly to
 the supplied YR copy with the shared HD play look. --open opens Google Chrome.
 By default the page reports its real available area before the game starts, so
 the remembered view uses 3 (classic), 2.5 (moderate) or 2 (wide) device pixels per
-game pixel; wide is the default. The page migrates an old remembered classic
-choice to wide once; explicitly choosing classic again remembers it.
+game pixel; moderate is the default. Without --view the page keeps the view the
+player last chose; --view is an explicit choice that the page also remembers. The
+page migrates a remembered wide (the former default, which older owner entries
+forced on every launch) or old classic default to moderate once; explicitly
+choosing any view again remembers it. In a menu outside a match the toolbar view
+restarts this owned game at the new view (about 20 s); during a match it refuses.
 --fullscreen waits for the page's Start button before measurement; Chrome
 requires that user click for fullscreen.
 --hd-marks enables experimental sharp health bars and group numbers for this
 launch only (off by default). Stop with Ctrl-C and launch without it to turn them off.
+--owner keeps the terminal to short Chinese progress lines: Wine, build and page
+output go to the run folder, the tokened page address is written to play-url.txt
+there instead of the terminal, and the game runs with WINEDEBUG=-all unless
+RA2_NATIVE_WINEDEBUG names other channels.
 --size explicitly selects a fixed size and bypasses page measurement. Writes only
 the resolution keys in the supplied RA2MD.INI before start and retains its
 original backup. Resizing Chrome scales the current match immediately; in a menu
@@ -636,9 +645,11 @@ export async function runLauncher(arguments_, environment = process.env) {
   let hdMarks = false;
   let requestedSize = null;
   let requestedView = null;
+  let owner = false;
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index];
     if (argument === '--open') openBrowser = true;
+    else if (argument === '--owner') owner = true;
     else if (argument === '--fullscreen') fullscreenBrowser = true;
     else if (argument === '--hd-marks') hdMarks = true;
     else if (argument === '--size') requestedSize = parseNativeSize(arguments_[++index]);
@@ -670,10 +681,19 @@ export async function runLauncher(arguments_, environment = process.env) {
   await mkdir(join(packageDirectory, 'build'), { recursive: true });
   const runDirectory = await mkdtemp(join(packageDirectory, 'build/play-'));
   await chmod(runDirectory, 0o700);
-  console.log('正在启动游戏；本次记录和文件备份的位置如下。');
+  // Owner mode keeps tool output (Wine, MoltenVK, pnpm) and diagnostic lines in this private run folder; the
+  // terminal shows only short progress lines. Other modes keep everything visible for development.
+  const outputLogPath = join(runDirectory, 'launcher-output.log');
+  const outputFd = owner ? openSync(outputLogPath, 'a', 0o600) : null;
+  const detail = (text) => {
+    if (outputFd === null) console.log(text);
+    else writeSync(outputFd, `${text}\n`);
+  };
+  if (owner) console.log(`本次记录文件夹：${runDirectory}`);
+  else console.log('正在启动游戏；本次记录和文件备份的位置如下。');
   if (hdMarks)
     console.log('本次开启实验高清血条和编队数字；在启动器按 Ctrl-C 退出，重新启动时不加 --hd-marks 即可关闭。');
-  console.log(`Private launch logs and DLL backups: ${runDirectory}`);
+  detail(`Private launch logs and DLL backups: ${runDirectory}`);
   const stopPath = join(runDirectory, 'stop');
   const statusPath = join(runDirectory, 'status.json');
   const sessionStatusPath = join(runDirectory, 'session-state.json');
@@ -705,7 +725,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       cwd: repository,
       env: wine.environment,
       detached: true,
-      stdio: 'inherit',
+      stdio: outputFd === null ? 'inherit' : ['ignore', outputFd, outputFd],
       ...options,
     });
     const item = { child, exited: false, closed: false, error: null, code: null };
@@ -794,7 +814,13 @@ export async function runLauncher(arguments_, environment = process.env) {
       }
       if (installation) {
         const result = await installation.restore();
-        console.log(result.reason);
+        detail(result.reason);
+        if (owner)
+          console.log(
+            result.restored
+              ? '已恢复游戏文件夹原来的 ddraw.dll。'
+              : 'ddraw.dll 在游戏期间被改动，备份保留在本次记录文件夹。',
+          );
       }
       if (terminalDeliveryError) throw terminalDeliveryError;
     })();
@@ -963,7 +989,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       let output = '';
       let truncated = false;
       const item = start(wine.wine, [...wine.args, 'winepath.exe', '-w', path], {
-        stdio: ['ignore', 'pipe', 'inherit'],
+        stdio: ['ignore', 'pipe', outputFd ?? 'inherit'],
       });
       item.child.stdout.setEncoding('utf8');
       item.child.stdout.on('data', (chunk) => {
@@ -1041,6 +1067,21 @@ export async function runLauncher(arguments_, environment = process.env) {
       if (openBrowser)
         await complete(start('/usr/bin/open', ['-a', 'Google Chrome', url.href, '--args', '--start-maximized']));
     }
+    // The address carries this session's token: owner mode keeps it in the private run folder, not the terminal.
+    async function announcePage(...instructions) {
+      if (owner) {
+        await writeFile(join(runDirectory, 'play-url.txt'), `${url.href}\n`, { mode: 0o600 });
+        console.log(
+          openBrowser
+            ? '正在打开 Chrome 游戏页面；页面关掉后可用本次记录文件夹中 play-url.txt 的网址重新打开。'
+            : '游戏网址在本次记录文件夹的 play-url.txt 中，请用 Chrome 打开。',
+        );
+      } else {
+        console.log(`Play URL: ${url.href}`);
+        for (const line of instructions) console.log(line);
+      }
+      await openPage();
+    }
     let viewport;
     async function resolutionForViewport(nextViewport) {
       const ini = nextViewport.followIni
@@ -1056,10 +1097,10 @@ export async function runLauncher(arguments_, environment = process.env) {
       return nativeViewportResolution(nextViewport, ini);
     }
     if (!resolution) {
-      console.log(`Play URL: ${url.href}`);
-      console.log('请在 Chrome 打开上面的游戏网址；游戏将按页面实际大小启动。保留本窗口；按 Ctrl-C 可退出。');
-      if (fullscreenBrowser) console.log('请在页面点击“开始”；浏览器进入全屏后，游戏会按实际画面大小启动。');
-      await openPage();
+      await announcePage(
+        '请在 Chrome 打开上面的游戏网址；游戏将按页面实际大小启动。保留本窗口；按 Ctrl-C 可退出。',
+        ...(fullscreenBrowser ? ['请在页面点击“开始”；浏览器进入全屏后，游戏会按实际画面大小启动。'] : []),
+      );
       for (;;) {
         if (stopping || page.exited) throw new Error('游戏页面在测量画面时退出。请重新启动。');
         try {
@@ -1076,7 +1117,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       }
     }
     const configured = await configureNativeResolution(gameDirectory, runDirectory, resolution);
-    console.log(`Native resolution: ${resolution.width}x${resolution.height} (current game; ${configured.target})`);
+    detail(`Native resolution: ${resolution.width}x${resolution.height} (current game; ${configured.target})`);
     console.log(
       `本次游戏画面为 ${resolution.width}×${resolution.height}；改变窗口后画面可能留黑边；可在菜单点击按钮，按新窗口大小重开。`,
     );
@@ -1089,6 +1130,8 @@ export async function runLauncher(arguments_, environment = process.env) {
       // Visible operation is an explicit diagnostic comparison mode. Owner
       // launches retain hidden operation unless this exact opt-out is supplied.
       RA2_NATIVE_AGENT_HIDDEN: environment.RA2_NATIVE_AGENT_HIDDEN === '0' ? '0' : '1',
+      // Owner play needs no Wine trace channels (fixme lines cost time and fill wine.log); a debug run names its own.
+      ...(owner ? { WINEDEBUG: environment.RA2_NATIVE_WINEDEBUG || '-all' } : {}),
       WINEDLLOVERRIDES: `${wine.environment.WINEDLLOVERRIDES ? `${wine.environment.WINEDLLOVERRIDES};` : ''}ddraw=n,b`,
     };
     async function launchOwnedGame(ownedLogFile = logFile) {
@@ -1124,7 +1167,8 @@ export async function runLauncher(arguments_, environment = process.env) {
           receivedHello = false; // A valid identity can precede usable native input.
           const inputState = JSON.parse((await client.request(Type.INPUT_STATE)).toString());
           if (nativeMainMenuReady(hello, inputState)) {
-            console.log(`Native main menu ready: ${Date.now() - gameStartedAt} ms since game start`);
+            detail(`Native main menu ready: ${Date.now() - gameStartedAt} ms since game start`);
+            if (owner) console.log('游戏主菜单已就绪。');
           } else if (nativeFilmReady(hello, inputState)) {
             console.log(
               `影片已经开始播放，可以在 Chrome 页面点击“跳过影片”（启动后 ${Date.now() - gameStartedAt} 毫秒）。`,
@@ -1154,14 +1198,10 @@ export async function runLauncher(arguments_, environment = process.env) {
         await writeFile(pending, JSON.stringify({ viewport, ready: true, resolution }), { mode: 0o600 });
         await rename(pending, viewportStatusPath);
       }
-      console.log(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
+      detail(`Native process ${hello.pid}; agent ${ports.agent}; page ${ports.page}`);
     }
     await launchOwnedGame();
-    if (requestedSize) {
-      console.log(`Play URL: ${url.href}`);
-      console.log('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
-      await openPage();
-    }
+    if (requestedSize) await announcePage('请在 Chrome 打开上面的游戏网址。保留本窗口；按 Ctrl-C 可退出本次游戏。');
     async function waitForViewportRestart(current) {
       while (!stopping && !current.exited && !page.exited) {
         if (!requestedSize) {
@@ -1223,7 +1263,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       if (!nextViewport || stopping || page.exited || launcher.exited) break;
       const nextResolution = await resolutionForViewport(nextViewport);
       await publishSessionState('restarting');
-      console.log('窗口大小改变了，正在重新打开菜单，请稍等……');
+      console.log('窗口大小或视野改变了，正在重新打开菜单，约 20 秒……');
       await stopOwnedGameForResize();
       if (stopping) break;
       const resizeDirectory = join(runDirectory, `resize-${++resizeCount}`);
@@ -1234,7 +1274,7 @@ export async function runLauncher(arguments_, environment = process.env) {
       const resizeLogFile = await windowsPath(join(resizeDirectory, 'launcher.log'));
       await launchOwnedGame(resizeLogFile);
       await publishSessionState('running');
-      console.log(`菜单已按新窗口重新打开：${resolution.width}×${resolution.height}。`);
+      console.log(`菜单已按新的画面重新打开：${resolution.width}×${resolution.height}。`);
     }
     if (!stopping && page.exited) throw new Error('游戏页面已停止，正在关闭本次游戏。');
     if (!stopping && launcher.error) throw launcher.error;
@@ -1246,7 +1286,11 @@ export async function runLauncher(arguments_, environment = process.env) {
       if (!normalClosure) throw new Error('游戏异常退出。请查看本次启动记录中的 launcher.log 和 wine.log。');
     }
   } finally {
-    await cleanup();
+    try {
+      await cleanup();
+    } finally {
+      if (outputFd !== null) closeSync(outputFd);
+    }
     process.off('SIGINT', signalHandler);
     process.off('SIGTERM', signalHandler);
     process.off('SIGHUP', signalHandler);

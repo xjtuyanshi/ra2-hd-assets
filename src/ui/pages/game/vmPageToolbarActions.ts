@@ -14,7 +14,12 @@ import type { FrameEffectController } from '../../../app/session/frameEffectCont
 import type { FramePresenter } from '../../../graphics/framePresenter';
 import type { VmFrameRenderer } from './vmFrameRenderer';
 import type { RuntimeToolbar, RuntimeToolbarCallbacks } from './runtimeToolbar';
-import { resolutionViewScale, parseResolutionChoice, storeResolutionChoice } from './vmPageResolution';
+import {
+  resolutionViewScale,
+  parseResolutionChoice,
+  storeResolutionChoice,
+  type ResolutionChoice,
+} from './vmPageResolution';
 import { collectPerformanceReport } from './performanceDiagnostics';
 import { upscaleStatus } from './state/uiState';
 import { sendCheatKey, sendCheatSequence } from './input';
@@ -45,6 +50,11 @@ export interface VmPageToolbarActionDeps {
   setRequestedVolume: (linear: number) => void;
   setPerformanceLine: (summary: string) => void;
   onRestartForResolution: () => Promise<void>;
+  /**
+   * Native route: restart the owned game at this choice from an out-of-match menu and remember it, or throw a notice.
+   * The page owns the launcher restart; this module only routes the toolbar choice to it.
+   */
+  onNativeViewChange?: (choice: ResolutionChoice) => Promise<void>;
   /** Switch between the HD view and the original picture (development HD bridge only). */
   onToggleHdView?: () => void;
   onChangeGameSource: () => Promise<void>;
@@ -69,6 +79,7 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
     setRequestedVolume,
     setPerformanceLine,
     onRestartForResolution,
+    onNativeViewChange,
     onToggleHdView,
     onChangeGameSource,
     onSchedulePerformanceRender,
@@ -130,15 +141,20 @@ export function createVmPageToolbarActions(deps: VmPageToolbarActionDeps): Runti
       if (!gameId) return;
       const choice = parseResolutionChoice(value);
       if (choice === undefined) throw new Error(t('不支持的分辨率：{0}', value));
-      storeResolutionChoice(gameId, choice);
+      const native = new URLSearchParams(window.location.search).get('backend') === 'native';
+      // The native page remembers the choice only when its launcher accepts the in-menu restart.
+      if (!native) storeResolutionChoice(gameId, choice);
       // The restart re-reads the choice; a ?resolution= in the address would override what was just picked.
       const url = new URL(window.location.href);
       if (url.searchParams.has('resolution')) {
         url.searchParams.delete('resolution');
         window.history.replaceState(window.history.state, '', url);
       }
-      if (new URLSearchParams(window.location.search).get('backend') === 'native')
-        throw new Error(t('视野已记住。请关闭游戏和启动器，再启动一次以应用新视野。'));
+      if (native) {
+        if (!onNativeViewChange) throw new Error(t('视野已记住。请关闭游戏和启动器，再启动一次以应用新视野。'));
+        await onNativeViewChange(choice);
+        return;
+      }
       setRequestedResolution(resolutionViewScale(choice) !== null ? null : (choice as GameResolution | null));
       await onRestartForResolution();
     },

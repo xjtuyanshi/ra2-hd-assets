@@ -59,6 +59,7 @@ import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import {
   DEFAULT_VIEW_CHOICE,
   loadStoredResolutionChoice,
+  nativeViewportChoice,
   parseResolutionChoice,
   resolveResolutionChoice,
   resolutionViewScale,
@@ -119,6 +120,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   let resizeBusy = false;
   let refreshNoticeTimer: number | undefined;
   let restartForViewport = async () => {};
+  /** Apply a toolbar choice on the native route; undefined where the launcher cannot restart this session. */
+  let restartForNativeView: ((choice: ResolutionChoice) => Promise<void>) | undefined;
   const readArea = () => measurePlayViewport(canvas);
   movieSkip.set(null);
   activeNativeViewportAbort?.abort();
@@ -313,6 +316,14 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
           performanceLine = summary;
         },
         onRestartForResolution: () => restartForResolution(),
+        onNativeViewChange: async (choice) => {
+          if (restartForNativeView) return restartForNativeView(choice);
+          toolbar.setResolution(activeResolutionChoice);
+          // A launch with a fixed --size never measured this page, so its launcher cannot restart at a new view.
+          if (new URLSearchParams(window.location.search).get('native-viewport') === '1')
+            throw new Error('游戏还在启动。请等主菜单出现后再切换视野。');
+          throw new Error('本次启动指定了固定画面大小，不能在页面切换视野。请关闭游戏和启动器，再启动一次。');
+        },
         onToggleHdView: () => toggleHdView(),
         onChangeGameSource: () => changeGameSource(),
         onSchedulePerformanceRender: () => schedulePerformanceRender(),
@@ -542,7 +553,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     if (generation === pageGeneration) hotkeySheet.set(sheet);
   });
   // ?resolution= (a size, `display` or `ini`) wins for this page load; otherwise the stored toolbar choice. Without
-  // either, the HD bridge uses Wide framing (two device pixels per game pixel).
+  // either, the HD bridge uses Moderate framing (2.5 device pixels per game pixel). A view named in the address is an
+  // explicit launcher choice and is remembered; launchers pass one only when the player asked for it.
   const urlChoice = parseResolutionChoice(new URLSearchParams(window.location.search).get('resolution'), true);
   if (urlChoice === 'classic' || urlChoice === 'moderate' || urlChoice === 'wide')
     storeResolutionChoice(selectedGameId, urlChoice);
@@ -910,79 +922,104 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   }
   // Resizing only scales the picture. Re-negotiate the game's video mode on
   // the player's explicit menu action; pause/options dialogs never allow it.
-  if (resolutionViewScale(activeResolutionChoice) !== null) {
-    const initialArea = nativeArea ?? readArea();
-    let menuCheckPending = false;
-    const canRestartInMenu = async () => {
-      if (!vm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
-      // Incomplete archive providers are cancelled on release; keep their current session until extraction finishes.
-      const resources = progressiveFilesOf(gameSource!.files);
-      if (resources && resources.status().phase !== 'complete') return false;
-      const currentVm = vm;
-      const menu = await currentVm.getMenuSnapshot?.();
-      if (!menu || vm !== currentVm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
-      return (
-        identifyYrHdMenu(menu) === 'main' ||
-        (vm.runtimeInfo.backend === 'native' &&
-          requestedResolution !== null &&
-          (requestedResolution.width > 800 || requestedResolution.height > 600) &&
-          menu.width === 800 &&
-          menu.height === 600 &&
-          gameFrameWidth === 800 &&
-          gameFrameHeight === 600)
-      );
-    };
-    restartForViewport = async () => {
-      if (JSON.stringify(initialArea) === JSON.stringify(readArea())) return;
-      const menuAvailable = await canRestartInMenu().catch((error) => {
-        console.warn('[viewport] Menu state unavailable:', error);
-        return false;
-      });
-      if (!menuAvailable) return;
-      if (resizeBusy || runtimeReleased || generation !== pageGeneration) return;
-      resizeBusy = true;
-      toolbar.setViewportRestart(false);
-      try {
-        const native = vm!.runtimeInfo.backend === 'native';
-        const nextArea = readArea();
-        // Reuse the validated source and canvas context. Reloading loses unpersisted directory/HTTP selections.
-        await releaseRuntime(true);
-        if (generation !== pageGeneration) return;
-        bootState.set({
-          game: gameSource!.game,
-          status: { phase: 'loading', detail: '正在按现在的窗口大小重新启动游戏，约 20 秒…' },
-          cancel: async () => {
-            viewportAbort.abort();
-            stopVmPage();
-            mainPanel.set({ phase: 'exited', detail: '调整已停止。请重新打开本次启动器的页面。' });
-          },
-        });
-        if (native) {
-          const query = new URLSearchParams(window.location.search);
-          const response = await fetch(new URL('/__native/viewport', window.location.href), {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${query.get('agent-token')}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...nextArea,
-              devicePixelsPerGamePixel: resolutionViewScale(activeResolutionChoice),
-              restart: true,
-            }),
-            signal: AbortSignal.any([viewportAbort.signal, AbortSignal.timeout(5000)]),
-          });
-          if (!response.ok) throw new Error('无法按新的窗口大小重开菜单。请重新启动启动器。');
-        }
-        if (!viewportAbort.signal.aborted && generation === pageGeneration) {
-          await startVmPage(canvas, gameSource!);
-        }
-      } catch (error) {
-        if (!viewportAbort.signal.aborted && generation === pageGeneration) {
-          bootState.set(null);
-          mainPanel.set({ phase: 'error', detail: error instanceof Error ? error.message : String(error) });
-        }
-      } finally {
-        resizeBusy = false;
+  // A measured native session can also apply a new toolbar choice the same way.
+  const nativeRestartable =
+    vm.runtimeInfo.backend === 'native' && new URLSearchParams(window.location.search).get('native-viewport') === '1';
+  const restartFollowsWindow = resolutionViewScale(activeResolutionChoice) !== null;
+  const initialArea = nativeArea ?? readArea();
+  let menuCheckPending = false;
+  const canRestartInMenu = async () => {
+    if (!vm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
+    // Incomplete archive providers are cancelled on release; keep their current session until extraction finishes.
+    const resources = progressiveFilesOf(gameSource!.files);
+    if (resources && resources.status().phase !== 'complete') return false;
+    const currentVm = vm;
+    const menu = await currentVm.getMenuSnapshot?.();
+    if (!menu || vm !== currentVm || runtimeReleased || resizeBusy || generation !== pageGeneration) return false;
+    return (
+      identifyYrHdMenu(menu) === 'main' ||
+      (vm.runtimeInfo.backend === 'native' &&
+        requestedResolution !== null &&
+        (requestedResolution.width > 800 || requestedResolution.height > 600) &&
+        menu.width === 800 &&
+        menu.height === 600 &&
+        gameFrameWidth === 800 &&
+        gameFrameHeight === 600)
+    );
+  };
+  /**
+   * Restart the owned game from an out-of-match menu. Without `nextChoice` this follows a changed window and does
+   * nothing while the area is unchanged. With it (a toolbar choice) the area this session was matched to is restarted
+   * at the new choice: the toolbar is outside the fullscreen element, so the player leaves fullscreen to reach it and
+   * the current window must not replace the fullscreen measurement (the resize restart remains for real changes).
+   * The choice is remembered once the menu allows the restart; a refusal keeps the current choice.
+   */
+  const restartInMenu = async (nextChoice?: ResolutionChoice) => {
+    const viewChange = nextChoice !== undefined;
+    if (!viewChange && JSON.stringify(initialArea) === JSON.stringify(readArea())) return;
+    const menuAvailable = await canRestartInMenu().catch((error) => {
+      console.warn('[viewport] Menu state unavailable:', error);
+      return false;
+    });
+    if (!menuAvailable || resizeBusy || runtimeReleased || generation !== pageGeneration) {
+      if (!viewChange) return;
+      toolbar.setResolution(activeResolutionChoice);
+      throw new Error('对局中不能切换视野。请回到游戏主菜单后再选，约 20 秒后会按新视野重开菜单。');
+    }
+    resizeBusy = true;
+    toolbar.setViewportRestart(false);
+    try {
+      const native = vm!.runtimeInfo.backend === 'native';
+      const nextArea = viewChange ? initialArea : readArea();
+      if (viewChange) {
+        storeResolutionChoice(selectedGameId!, nextChoice);
+        activeResolutionChoice = nextChoice;
       }
-    };
+      // Reuse the validated source and canvas context. Reloading loses unpersisted directory/HTTP selections.
+      await releaseRuntime(true);
+      if (generation !== pageGeneration) return;
+      bootState.set({
+        game: gameSource!.game,
+        status: {
+          phase: 'loading',
+          detail: viewChange ? '正在按新视野重新启动游戏，约 20 秒…' : '正在按现在的窗口大小重新启动游戏，约 20 秒…',
+        },
+        cancel: async () => {
+          viewportAbort.abort();
+          stopVmPage();
+          mainPanel.set({ phase: 'exited', detail: '调整已停止。请重新打开本次启动器的页面。' });
+        },
+      });
+      if (native) {
+        const query = new URLSearchParams(window.location.search);
+        const response = await fetch(new URL('/__native/viewport', window.location.href), {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${query.get('agent-token')}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...nextArea,
+            ...nativeViewportChoice(activeResolutionChoice),
+            restart: true,
+          }),
+          signal: AbortSignal.any([viewportAbort.signal, AbortSignal.timeout(5000)]),
+        });
+        if (!response.ok) throw new Error('无法按新的画面设置重开菜单。请重新启动启动器。');
+      }
+      if (!viewportAbort.signal.aborted && generation === pageGeneration) {
+        await startVmPage(canvas, gameSource!);
+      }
+    } catch (error) {
+      if (!viewportAbort.signal.aborted && generation === pageGeneration) {
+        bootState.set(null);
+        mainPanel.set({ phase: 'error', detail: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      resizeBusy = false;
+    }
+  };
+  if (restartFollowsWindow) restartForViewport = () => restartInMenu();
+  if (nativeRestartable) restartForNativeView = (choice) => restartInMenu(choice);
+  // Fixed-size and INI sessions have no window match to go stale; only view choices offer the resize restart.
+  if (restartFollowsWindow) {
     resizeTimer = window.setInterval(() => {
       // Menu availability is asynchronous. Keep the one-time battle hint tied
       // to an observed battle, not the initial false value of that menu check.

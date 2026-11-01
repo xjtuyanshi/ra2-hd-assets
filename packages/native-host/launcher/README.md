@@ -133,18 +133,21 @@ or installation; live diagnostics and picture checks establish actual acceptance
 original game. The page reports its actual available play area and device pixel
 ratio and remembered view through an authenticated loopback endpoint. The page
 offers **视野：经典 / 适中 / 宽**: `classic` / `moderate` / `wide` use 3 / 2.5 / 2
-device pixels per game pixel, with Wide initially selected. Each game's old unversioned
-remembered Classic choice migrates to Wide once. Explicitly selecting Classic again
-records the new preference version and keeps that choice on later starts; Moderate,
-fixed sizes and the INI choice remain unchanged. `--view classic|moderate|wide`
-selects that framing explicitly on both launch routes; `resolution=display` remains
-a legacy Wide alias. Fullscreen measurement retains fractional CSS dimensions;
+device pixels per game pixel, with Moderate initially selected. A remembered Wide
+(the former default, which older owner entries forced on every launch) and an old
+unversioned Classic migrate to Moderate once per game. Explicitly selecting a view
+again records the new preference version and keeps that choice on later starts;
+Moderate, fixed sizes and the INI choice remain unchanged. `--view classic|moderate|wide`
+selects that framing explicitly on both launch routes and is remembered; without it
+the page's remembered choice applies. `resolution=display` remains a legacy Wide alias.
+In an out-of-match menu the toolbar view restarts the owned game at the new view
+(about 20 seconds, as for a resize); during a match the page refuses with a notice. Fullscreen measurement retains fractional CSS dimensions;
 both launch routes round those to integral device pixels before calculating the
 even-sized game frame. A small window uses a
 smaller fitting scale when necessary to keep the minimum usable 800×600 frame.
 Sizes must fit the shared 800×600 through 2560×1600 session range and the native
 picture protocol's 3,145,728-pixel allocation limit. This admits a 2056×1290 Wide
-frame and its 4112×2580 device-pixel view at 75% browser zoom (DPR 1.5); the HD
+frame (Moderate: 1644×1032) for a 4112×2580 device-pixel view at 75% browser zoom (DPR 1.5); the HD
 backing budget is 12,000,000 pixels. Explicit `--size` retains the existing proportional
 capping behavior and bypasses page measurement. The launcher prints the applied
 size and writes only `ScreenWidth`, `ScreenHeight` and `AllowHiResModes` in the
@@ -170,6 +173,14 @@ shutdown. Each resize keeps its preceding INI backup and a fresh helper log in
 `resize-N/` within the original private run directory; the Wine log is appended.
 An explicit `--size` remains fixed. The native main menu retains its original
 menu dimensions until a match begins.
+
+`--owner` is for the player's own launch entry. The terminal shows only short
+Chinese progress lines; Wine, MoltenVK, build and other tool output and the
+English diagnostic lines go to `launcher-output.log` in the private run
+directory, the tokened page address goes to `play-url.txt` there (mode 0600)
+instead of the terminal, and the owned game runs with `WINEDEBUG=-all` unless
+`RA2_NATIVE_WINEDEBUG` names other channels. Without `--owner` all output stays
+visible for development and tests.
 The native URL records the selected view and uses `native-viewport=1`; the
 page waits for the usable original main menu before attaching. Explicit sizes
 remain recorded in the URL. On a 1728×914-point play area at DPR 2 the calculated
