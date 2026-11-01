@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 /** One row of cells: level-0 ground, a ramp up to level 1, level-1 ground and a level-3 plateau behind a cliff. */
-function terrain() {
+function terrain(ref = { width: 128, height: 64, scale: 1 }) {
   const width = 4;
   const exists = new Uint8Array(width).fill(1);
   const levels = new Uint8Array([0, 0, 1, 3]);
@@ -40,7 +40,7 @@ function terrain() {
       waterBed: false,
       waterDetail: texture,
       waterSurface: null,
-      ref: { file: 'terrain.png', width: 128, height: 64, scale: 1, originX: 0, originY: 0 },
+      ref: { file: 'terrain.png', ...ref, originX: 0, originY: 0 },
     },
   } as unknown as Ra2Cache;
   expect(tile.includes(NO_TILE)).toBe(false);
@@ -89,5 +89,21 @@ describe('terrain surface height', () => {
     const up = new Vector3(0, 1, 0);
     expect(ground.normal!(0.5, 0.5, normal).distanceTo(up)).toBe(0);
     expect(ground.normal!(3, 0.5, normal).distanceTo(up)).toBe(0);
+  });
+});
+
+describe('terrain composite at a fractional scale', () => {
+  it('samples every surface point at the same engine position as the scale-1 composite', () => {
+    // A map too wide for 2x is fitted to 451/256 with each side rounded up (packages/ra2-assets terrainScale).
+    const scale = 451 / 256;
+    const fitted = { width: Math.ceil(128 * scale), height: Math.ceil(64 * scale), scale };
+    const base = terrain().mesh.geometry.getAttribute('atlasUv');
+    const wide = terrain(fitted).mesh.geometry.getAttribute('atlasUv');
+    expect(wide.count).toBe(base.count);
+    for (let i = 0; i < base.count; i++) {
+      // Back from normalized texture coordinates to engine pixels: uv * image size / scale.
+      expect((wide.getX(i) * fitted.width) / scale).toBeCloseTo(base.getX(i) * 128, 3);
+      expect((wide.getY(i) * fitted.height) / scale).toBeCloseTo(base.getY(i) * 64, 3);
+    }
   });
 });
