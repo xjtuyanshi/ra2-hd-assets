@@ -24,7 +24,19 @@ import {
 } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
 import type { VoxelProjectionInputs, VoxelProjectionState } from './voxelProjection';
-import { highlightExponent, type SpriteLookState } from './spriteLook';
+import { highlightExponent } from './spriteLook';
+
+/**
+ * The look's light gains a projected redraw takes: the voxel units' own (VoxelLightingState, set from HdSettings
+ * vehicleSunGain / vehicleSpecularSize by the renderer), not the sprite look's, so vehicles can be lit apart from
+ * terrain, buildings and infantry.
+ */
+export interface VoxelLookGains {
+  /** Sun weight of the Lambert terms (form light, house paint shade, relight ratio); 1 = neutral. */
+  sunGain: ShaderNode;
+  /** Highlight size: glint exponents divided by its square, intensity multiplied by its square; 1 = neutral. */
+  specularSize: ShaderNode;
+}
 
 /** Upright source coordinates for a projected twin whose draw matrix has been flattened or mirrored. */
 interface ProjectionBasis {
@@ -45,7 +57,7 @@ export function projectedVoxelColour(
   rawPalette: (index: ShaderNode) => ShaderNode,
   referenceLight: ShaderNode,
   currentLight: ShaderNode,
-  look: SpriteLookState,
+  gains: VoxelLookGains,
   basis?: ProjectionBasis,
 ): { colour: ShaderNode; albedo: ShaderNode; coverage: ShaderNode; paint: ShaderNode } {
   const matrix = basis?.matrix ?? modelWorldMatrix;
@@ -103,7 +115,7 @@ export function projectedVoxelColour(
   const paintWeight: ShaderNode = ma.add(mb);
   const mask: ShaderNode = paintWeight.div(max(coverage, 1e-5));
   const n: ShaderNode = basis?.normal ?? normalWorld;
-  const highlightGain: ShaderNode = look.specularSize.mul(look.specularSize);
+  const highlightGain: ShaderNode = gains.specularSize.mul(gains.specularSize);
   let albedo: ShaderNode = colour;
   if (house) {
     const ramp: ShaderNode = a.paint.gb.mul(ma).add(b.paint.gb.mul(mb)).div(max(paintWeight, 1e-5));
@@ -118,7 +130,7 @@ export function projectedVoxelColour(
     const lambert: ShaderNode = max(n.dot(currentLight), 0);
     const shade: ShaderNode = lambert
       .mul(0.75)
-      .mul(look.sunGain)
+      .mul(gains.sunGain)
       .add(0.35)
       .div(0.35 + 0.75 * 0.65);
     const view: ShaderNode = cameraWorldMatrix.mul(vec4(0, 0, 1, 0)).xyz.normalize();
@@ -135,7 +147,7 @@ export function projectedVoxelColour(
   const lit: ShaderNode = max(n.dot(currentLight), 0);
   const form: ShaderNode = lit
     .mul(0.8)
-    .mul(look.sunGain)
+    .mul(gains.sunGain)
     .add(0.3)
     .div(0.3 + 0.8 * 0.65);
   colour = colour.mul(mix(1, form, state.formShade.clamp().mul(float(1).sub(mask))));
@@ -156,7 +168,7 @@ export function projectedVoxelColour(
   colour = colour.add(vec3(1, 0.97, 0.92).mul(sheen));
   const ratio: ShaderNode = max(n.dot(currentLight), 0)
     .mul(0.4)
-    .mul(look.sunGain)
+    .mul(gains.sunGain)
     .add(0.6)
     .div(max(n.dot(referenceLight), 0).mul(0.4).add(0.6));
   const grey: ShaderNode = colour.dot(vec3(0.2126, 0.7152, 0.0722));

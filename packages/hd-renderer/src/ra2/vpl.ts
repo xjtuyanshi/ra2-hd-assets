@@ -155,6 +155,17 @@ export class VoxelLightingState {
   readonly voxelSheen = uniform(0);
   readonly voxelSheenCap = uniform(SPECULAR_CAP);
   readonly voxelSunDiffuse = uniform(SUN_DIFFUSE);
+  /**
+   * The look's light gains as voxel units take them, set every frame by the renderer (HdRenderer vehicleLookGains:
+   * the scene's sunGain / specularSize / aoPower unless the look gives vehicles their own) and 1 in the faithful
+   * branch: sun weight of the direct and form light, highlight size (lobe width and squared intensity) and crease AO
+   * power. Separate from the sprite look so a look can light vehicles apart from terrain, buildings and infantry.
+   */
+  readonly sunGain = uniform(1);
+  readonly specularSize = uniform(1);
+  readonly aoPower = uniform(1);
+  /** Linear gain on the finished voxel unit colour (HdSettings.vehicleExposure; 1 = none). */
+  readonly exposure = uniform(1);
   readonly lightDirection = uniform(derivedVoxelLight());
   loaded: LoadedTable | null = null;
   loading: Promise<boolean> | null = null;
@@ -245,7 +256,6 @@ class VoxelLightingModel extends PhysicalLightingModel {
     private readonly raw: ShaderNode,
     private readonly matp: ShaderNode,
     private readonly state: VoxelLightingState,
-    private readonly look: SpriteLookState,
     private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
@@ -263,7 +273,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
   }: Parameters<PhysicalLightingModel['direct']>[0]): void {
     const live: ShaderNode = float(1).sub(step(0.5, this.state.voxelDebug));
     const dotNL: ShaderNode = (normalView as ShaderNode).dot(l).clamp();
-    const irradiance: ShaderNode = dotNL.mul(lightColor).mul(this.look.sunGain);
+    const irradiance: ShaderNode = dotNL.mul(lightColor).mul(this.state.sunGain);
     (reflectedLight.directDiffuse as ShaderNode).addAssign(
       irradiance.mul(BRDF_Lambert({ diffuseColor: (diffuseColor as ShaderNode).rgb })),
     );
@@ -274,12 +284,12 @@ class VoxelLightingModel extends PhysicalLightingModel {
           lightDirection: l,
           f0,
           f90: 1,
-          roughness: highlightRoughness(roughness, this.look.specularSize),
+          roughness: highlightRoughness(roughness, this.state.specularSize),
         } as never),
       )
       .mul(this.matp.z)
       .mul(this.state.voxelSheen)
-      .mul(this.look.specularSize.mul(this.look.specularSize))
+      .mul(this.state.specularSize.mul(this.state.specularSize))
       .mul(live);
     (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(this.state.voxelSheenCap)));
   }
@@ -307,7 +317,7 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
     return this;
   }
   override setupLightingModel(): PhysicalLightingModel {
-    return new VoxelLightingModel(this.raw, this.matp, this.state, this.look, this.sceneMultiplier);
+    return new VoxelLightingModel(this.raw, this.matp, this.state, this.sceneMultiplier);
   }
 }
 
@@ -390,7 +400,7 @@ function createGraph(
   if (projection) material.name += '-projected';
   const rows = sections + 2;
   const occlusion: ShaderNode = attribute('occlusion', 'float');
-  const ao: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(voxelOcclusion)), look.aoPower);
+  const ao: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(voxelOcclusion)), state.aoPower);
   const pindex: ShaderNode = attribute('pindex', 'float');
   const u: ShaderNode = pindex.add(0.5).div(256);
   const row = (r: ShaderNode | number): ShaderNode => texture(lut, vec2(u, float(r).add(0.5).div(rows))).rgb;
@@ -447,10 +457,10 @@ function createGraph(
       (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
       lightDirection,
       look.sunDirection,
-      look,
+      state,
     );
     const projState = voxelProjectionFor(nodes);
-    const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), look.aoPower);
+    const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), state.aoPower);
     const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
     const projectedShade: ShaderNode = sceneLitColour(
       mix(moonlit(colour, nodes), colour, projected.paint).mul(voxelFill),
@@ -469,7 +479,10 @@ function createGraph(
   // The drawn unit's picture tint (objectTint.ts) on the finished colour, highlights included: per-mesh data of this
   // one graph, so a unit under the Iron Curtain compiles nothing.
   material.outputNode = Fn(() =>
-    vec4(applyObjectTint(output.rgb, meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight), output.a),
+    vec4(
+      applyObjectTint(output.rgb.mul(state.exposure), meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight),
+      output.a,
+    ),
   )();
   registerVoxelReflectionColour(material, (sourceMatrix) => {
     const sourceNormal = voxelReflectionNormal(sourceMatrix);
@@ -496,10 +509,10 @@ function createGraph(
         (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
         lightDirection,
         look.sunDirection,
-        look,
+        state,
         { matrix: sourceMatrix, position: positionGeometry, normal: sourceNormal },
       );
-      const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), look.aoPower);
+      const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), state.aoPower);
       const projectionLevel: ShaderNode = sourceLevel.div(projState.levelRef.max(0.01));
       const projectedAlbedo: ShaderNode = srgbScale(projected.albedo, projectionLevel).mul(formAo);
       const projectedLit: ShaderNode = srgbScale(projected.colour, projectionLevel).mul(formAo);
@@ -514,7 +527,7 @@ function createGraph(
     }
     // The exact source emissive term is a lower bound on its complete (nonnegative) lighting. Clamp to that
     // bound so darker source faces stay dark; direct sun/glints above never add radiance to the water twin.
-    return voxelReflectionAmbient(albedo, voxelFill, ceiling);
+    return voxelReflectionAmbient(albedo, voxelFill, ceiling).mul(state.exposure);
   });
   return { prototype: material, lookup: lut, projection };
 }

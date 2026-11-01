@@ -47,7 +47,7 @@ import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrad
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
-import { voxelLightingFor } from './vpl';
+import { voxelLightingFor, type VoxelLightingState } from './vpl';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
 import { applyObjectTint, meshObjectTint } from '../objectTint';
@@ -246,7 +246,7 @@ class RemasterLighting extends PhysicalLightingModel {
   constructor(
     private readonly ao: ShaderNode,
     private readonly state: VoxelPbrState,
-    private readonly look: SpriteLookState,
+    private readonly gains: VoxelLightingState,
     private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
@@ -264,11 +264,11 @@ class RemasterLighting extends PhysicalLightingModel {
     // Key/fill balance: sunGain scales the direct (sun) terms, fill the sky's diffuse, so vehicles can carry the
     // directional contrast of the painted art around them without changing the scene's lights.
     (reflected.directDiffuse as ShaderNode).mulAssign(diffuse.mul(this.state.sunGain));
-    (reflected.directDiffuse as ShaderNode).mulAssign(this.look.sunGain);
+    (reflected.directDiffuse as ShaderNode).mulAssign(this.gains.sunGain);
     (reflected.indirectDiffuse as ShaderNode).mulAssign(diffuse.mul(this.state.fill));
     (reflected.directSpecular as ShaderNode).mulAssign(specular.mul(this.state.sunGain));
     (reflected.directSpecular as ShaderNode).mulAssign(
-      this.look.sunGain.mul(this.look.specularSize.mul(this.look.specularSize)),
+      this.gains.sunGain.mul(this.gains.specularSize.mul(this.gains.specularSize)),
     );
     (reflected.indirectSpecular as ShaderNode).mulAssign(specular);
   }
@@ -278,6 +278,8 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
   ao!: ShaderNode;
   state!: VoxelPbrState;
   look!: SpriteLookState;
+  /** The voxel units' look gains (VoxelLightingState sunGain / specularSize / aoPower / exposure). */
+  gains!: VoxelLightingState;
   sceneMultiplier!: ShaderNode;
   override copy(source: this): this {
     super.copy(source);
@@ -286,6 +288,7 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
     this.ao = source.ao;
     this.state = source.state;
     this.look = source.look;
+    this.gains = source.gains;
     this.sceneMultiplier = source.sceneMultiplier;
     // A clone draws the palette its source draws (opacity and native-depth variants of one unit).
     inheritSlotBinder(this, source);
@@ -295,7 +298,7 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
     return this.envNode ? new SpecularSky(this.envNode) : null;
   }
   override setupLightingModel(): PhysicalLightingModel {
-    return new RemasterLighting(this.ao, this.state, this.look, this.sceneMultiplier);
+    return new RemasterLighting(this.ao, this.state, this.gains, this.sceneMultiplier);
   }
 }
 
@@ -329,9 +332,10 @@ function createGraph(
   const pos: ShaderNode = attribute('vpos', 'vec3');
   const curvature: ShaderNode = attribute('curvature', 'float');
   const look = (material.look = spriteLookFor(nodes));
+  const gains = (material.gains = voxelLightingFor(nodes));
   const ao: ShaderNode = poweredOcclusion(
     float(1).sub(attribute('occlusion', 'float').mul(state.aoStrength)).clamp(),
-    look.aoPower,
+    gains.aoPower,
   );
   material.ao = ao;
   const noise: ShaderNode = valueNoise(pos.div(0.7));
@@ -416,7 +420,7 @@ function createGraph(
   r = mix(r, 0.9, dust);
   material.roughnessNode = highlightRoughness(
     mix(r, 0.12, glass).clamp(0.04, 1),
-    mix(look.specularSize, look.specularSize.max(0).sqrt(), glass),
+    mix(gains.specularSize, gains.specularSize.max(0).sqrt(), glass),
   );
   const surfaceMetalness = ({ grime, dust }: ReturnType<typeof surfaceTerms>): ShaderNode =>
     mix(mix(mix(params.g, 0.9, wear), 0, grime), 0, dust).clamp();
@@ -425,7 +429,10 @@ function createGraph(
   const lit = srgbScale(albedo, level);
   // The drawn unit's picture tint (objectTint.ts) on the finished colour: per-mesh data of this one graph.
   material.outputNode = Fn(() =>
-    vec4(applyObjectTint(output.rgb, meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight), output.a),
+    vec4(
+      applyObjectTint(output.rgb.mul(gains.exposure), meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight),
+      output.a,
+    ),
   )();
   // Standard Lambert already divides irradiance by pi. HdRenderer's noon exposure is pi/E_noon; no emissive
   // daylight fill or second exposure factor belongs here. Metal energy conservation and GGX remain physical.
@@ -475,7 +482,7 @@ function createGraph(
       // Keep the ambient attenuation on the ceiling, leaving headroom for the physical BRDF's Fresnel loss.
       .mul(VOXEL_REFLECTION_AMBIENT);
     const ambient: ShaderNode = hemisphere.mul(float(1).sub(surfaceMetalness(reflectedSurface)));
-    return voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor);
+    return voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor).mul(gains.exposure);
   });
   return { prototype: material, lookup: lut };
 }

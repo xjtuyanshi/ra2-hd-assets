@@ -213,6 +213,40 @@ export interface HdSettings extends CinematicGradeParams {
   voxelSheen: number | null;
   voxelSheenCap: number | null;
   voxelOcclusion: number | null;
+  /**
+   * The look's light gains for voxel units only (vehicles, ships, aircraft and voxel turrets: engine-look, remaster
+   * and projected redraw materials): sun weight, highlight size and crease AO power. null follows sunGain,
+   * specularSize and aoPower; the faithful branch keeps all of them at 1 like the scene gains. Sprites, terrain,
+   * buildings and infantry never read these.
+   */
+  vehicleSunGain: number | null;
+  vehicleSpecularSize: number | null;
+  vehicleAoPower: number | null;
+  /** Linear gain on the finished voxel unit colour in an enhanced look (1 = none; the faithful branch keeps 1). */
+  vehicleExposure: number;
+}
+
+/** Effective voxel unit gains of a look (see HdSettings.vehicleSunGain); `enhanced` is the look's enhanced branch. */
+export function vehicleLookGains(
+  settings: Pick<
+    HdSettings,
+    | 'sunGain'
+    | 'specularSize'
+    | 'aoPower'
+    | 'vehicleSunGain'
+    | 'vehicleSpecularSize'
+    | 'vehicleAoPower'
+    | 'vehicleExposure'
+  >,
+  enhanced: boolean,
+): { sunGain: number; specularSize: number; aoPower: number; exposure: number } {
+  if (!enhanced) return { sunGain: 1, specularSize: 1, aoPower: 1, exposure: 1 };
+  return {
+    sunGain: settings.vehicleSunGain ?? settings.sunGain,
+    specularSize: settings.vehicleSpecularSize ?? settings.specularSize,
+    aoPower: settings.vehicleAoPower ?? settings.aoPower,
+    exposure: settings.vehicleExposure,
+  };
 }
 
 /** Named looks, including the approved S2 direction with medium cooling (settings plus a suggested hour). */
@@ -233,6 +267,10 @@ type LookSettings = Partial<HdSettings> &
     | 'shadowLength'
     | 'shadowDarkness'
     | 'infantryShadow'
+    | 'vehicleSunGain'
+    | 'vehicleSpecularSize'
+    | 'vehicleAoPower'
+    | 'vehicleExposure'
   >;
 
 const GOLDEN_SETTINGS: LookSettings = {
@@ -259,6 +297,10 @@ const GOLDEN_SETTINGS: LookSettings = {
   voxelSheen: 1,
   voxelSheenCap: 0.35,
   voxelOcclusion: 0.35,
+  vehicleSunGain: null,
+  vehicleSpecularSize: null,
+  vehicleAoPower: null,
+  vehicleExposure: 1,
   whiteAdapt: 0,
   mapTintAdapt: 0,
   mapSourcesByDay: 1,
@@ -291,6 +333,10 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       voxelSheen: 0,
       voxelSheenCap: 0.05,
       voxelOcclusion: 0.15,
+      vehicleSunGain: null,
+      vehicleSpecularSize: null,
+      vehicleAoPower: null,
+      vehicleExposure: 1,
       whiteAdapt: 0,
       mapTintAdapt: 0,
       mapSourcesByDay: 1,
@@ -320,6 +366,17 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // instead of the original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurements and the
       // owner's feedback.
       infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
+      // Vehicles keep the scene's sun and AO power but not its highlight size. specularSize 1.6 was set on terrain
+      // and buildings; on the projected vehicle redraws it widens the camera glint and multiplies it by 2.56, which
+      // turned light top decks white at some facings (frozen same-moment pairs, owner's look, snow / temperate /
+      // lunar pads and the player's units at facing 0: HD/original hull p90 x1.13 median, up to x1.36 on a Lasher,
+      // light share +3 points, while the medians matched). 1.1 with a small exposure that returns the hull median
+      // the wider glint used to supply: hull median x0.99, dark share -0.1 points, p90 x0.96 over 148 pad and water
+      // cells; at facing 0 p90 x1.07 (max x1.20). Sun weight and AO power had no measurable effect on these numbers.
+      vehicleSunGain: null,
+      vehicleSpecularSize: 1.1,
+      vehicleAoPower: null,
+      vehicleExposure: 1.08,
       // L5 depth pass (scratchpad finallook5/light, metrics against the battle and park targets): the band-pass clarity
       // brings mid-scale local contrast to the battle target's (|blur2 - blur8| of L* 5.0 -> 5.7, target 5.7) without
       // pixel-scale grain; a gentler S-curve with a higher pivot lifts the too-dark mid-tones and deep-shade share
@@ -661,6 +718,10 @@ export class HdRenderer {
     voxelSheen: null,
     voxelSheenCap: null,
     voxelOcclusion: null,
+    vehicleSunGain: null,
+    vehicleSpecularSize: null,
+    vehicleAoPower: null,
+    vehicleExposure: 1,
   };
   /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
   readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
@@ -1859,6 +1920,14 @@ export class HdRenderer {
     look.shadowLength.value = on ? s.shadowLength : 1;
     look.shadowDarkness.value = on ? s.shadowDarkness : 1;
     look.infantryShadow.value = on ? s.infantryShadow : 1;
+    // Voxel units take the look's gains through their own uniforms (vehicleLookGains), so a look can light vehicles
+    // apart from the sprites, terrain, buildings and infantry above.
+    const vehicles = vehicleLookGains(s, on);
+    const voxels = voxelLightingFor(this.nodes);
+    voxels.sunGain.value = vehicles.sunGain;
+    voxels.specularSize.value = vehicles.specularSize;
+    voxels.aoPower.value = vehicles.aoPower;
+    voxels.exposure.value = vehicles.exposure;
     for (const pass of look.groundPasses) pass.visible = on;
     updateUnlitSpriteLook(look, s);
     if (!on) {
