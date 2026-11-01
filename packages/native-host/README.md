@@ -73,7 +73,9 @@ backup/restore behavior and local Go helper are documented in
 - Input passes through game-facing WinAPI cursor/key hooks and bounded tagged
   messages on the game window thread. Battle input reaches its original WndProc;
   logically visible owned dialogs route picture-coordinate mouse messages to
-  their deepest enabled child or owned Combo popup, with virtual control capture/focus and keyboard
+  the window USER32 hit testing would choose (deepest enabled child, passing
+  `HTTRANSPARENT` windows such as plain Statics on to the window below; YR's
+  campaign logos depend on this) or the owned Combo popup, with virtual control capture/focus and keyboard
   dialog navigation. Virtual focus does not select an OS window. `INPUT_STATE`
   exposes accepted/delivered/API-consumption counters and bounded control IDs,
   text, geometry, bounded Combo selection/list diagnostics and routing counters. DirectInput is explicitly unsupported.
@@ -81,7 +83,10 @@ backup/restore behavior and local Go helper are documented in
 - Configured sessions observe successful Bink opens and their matching closes.
   `INPUT_STATE` adds `moviePlaying`, `movieOpens` and completed `movieTotalMs`,
   retained across browser connections so films before page attachment can be
-  measured. `movieTrackingFailures` reports unavailable allocation evidence;
+  measured. Only screen-sized decoders (`NH_FILM_MIN_WIDTH` x `NH_FILM_MIN_HEIGHT`)
+  count as films; smaller in-picture clips, such as campaign Sidebar clips that
+  play while the match runs, are reported as `clipOpens`/`clipActive` and never
+  set `moviePlaying`. `movieTrackingFailures` reports unavailable allocation evidence;
   in that case `moviePlaying` is unknown (`null`). Picture delivery and existing
   state queries forward observed playback transitions to the page, with no
   timer-generated keys or altered playback clocks.

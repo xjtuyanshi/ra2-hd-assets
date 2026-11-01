@@ -39,9 +39,9 @@ static uint32_t owner_drawn_wheels, owner_drawn_wheel_fallbacks, last_wheel_targ
 static int last_wheel_delta, last_wheel_top_before = -1, last_wheel_top_after = -1;
 nh_bink_open_proc nh_real_bink_open;
 nh_bink_close_proc nh_real_bink_close;
-struct movie_playback { void *handle; LARGE_INTEGER opened_at; struct movie_playback *next; };
+struct movie_playback { void *handle; LARGE_INTEGER opened_at; int film; struct movie_playback *next; };
 static struct movie_playback *movies;
-static uint32_t movie_opens, movie_active, movie_tracking_failures;
+static uint32_t movie_opens, movie_active, movie_tracking_failures, clip_opens, clip_active;
 static uint64_t movie_total_us;
 
 static void initialize(void)
@@ -72,20 +72,27 @@ void *WINAPI nh_movie_open(const char *name, uint32_t flags)
     void *handle = original(name, flags);
     if (!handle || !nh_agent_configured()) return handle;
     initialize();
+    /* A successful open returns Bink's public BINK record, which starts with
+     * the frame Width and Height. Only screen-sized decoders count as films. */
+    const uint32_t *size = (const uint32_t *)handle;
+    int film = size[0] >= NH_FILM_MIN_WIDTH && size[1] >= NH_FILM_MIN_HEIGHT;
     struct movie_playback *entry = HeapAlloc(GetProcessHeap(), 0, sizeof(*entry));
     LARGE_INTEGER opened_at;
     QueryPerformanceCounter(&opened_at);
     EnterCriticalSection(&input_lock);
-    movie_opens++;
+    if (film) movie_opens++;
+    else clip_opens++;
     if (entry)
     {
         entry->handle = handle;
         entry->opened_at = opened_at;
+        entry->film = film;
         entry->next = movies;
         movies = entry;
-        movie_active++;
+        if (film) movie_active++;
+        else clip_active++;
     }
-    else movie_tracking_failures++;
+    else if (film) movie_tracking_failures++;
     LeaveCriticalSection(&input_lock);
     return handle;
 }
@@ -105,8 +112,12 @@ void WINAPI nh_movie_close(void *movie)
         if ((*link)->handle != movie) continue;
         closed = *link;
         *link = closed->next;
-        movie_active--;
-        movie_total_us += elapsed_us(closed->opened_at);
+        if (closed->film)
+        {
+            movie_active--;
+            movie_total_us += elapsed_us(closed->opened_at);
+        }
+        else clip_active--;
         break;
     }
     LeaveCriticalSection(&input_lock);
@@ -233,6 +244,35 @@ static HWND child_at(HWND root, POINT screen, int depth)
         return child_at(child, screen, depth + 1);
     }
     return root;
+}
+
+/* USER32 hit testing asks the deepest window under the point for WM_NCHITTEST
+ * and passes HTTRANSPARENT on to the sibling below it, then to the parent. The
+ * hidden root skips that walk, so the GUI thread repeats it for mouse input.
+ * Plain Statics are transparent: a dialog drawing pictures in them receives the
+ * hit test and the mouse messages itself. Returns NULL when every window under
+ * the point is transparent. */
+static HWND hit_test_at(HWND window, POINT screen, int depth)
+{
+    if (depth < 16)
+        for (HWND child = GetWindow(window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+        {
+            RECT rect;
+            if (!nh_hidden_visible(child) || !IsWindowEnabled(child) ||
+                !GetWindowRect(child, &rect) || !PtInRect(&rect, screen)) continue;
+            HWND hit = hit_test_at(child, screen, depth + 1);
+            if (hit) return hit;
+        }
+    /* Like USER32, only windows of the input thread can be passed over. */
+    if (GetWindowThreadProcessId(window, NULL) != g_ddraw.gui_thread_id) return window;
+    LRESULT code = SendMessageA(window, WM_NCHITTEST, 0, MAKELPARAM(screen.x, screen.y));
+    return code == HTTRANSPARENT ? NULL : window;
+}
+
+static HWND window_at(HWND root, POINT screen)
+{
+    HWND hit = hit_test_at(root, screen, 0);
+    return hit ? hit : root;
 }
 
 static int popup_for(HWND hwnd, HWND root)
@@ -731,7 +771,7 @@ static void input_state(uint32_t id, int skip_controls)
         "\"lastMessage\":%u,\"lastKeyMessage\":%u,\"lastKeyVirtualKey\":%u,\"injectedKeyReads\":%ld,"
         "\"lastInjectedKey\":%ld,\"cursorLastReadX\":%ld,\"cursorLastReadY\":%ld,\"modal\":%s,"
         "\"moviePlaying\":%s,\"movieOpens\":%u,\"movieTotalMs\":%llu,\"movieTrackingFailures\":%u,"
-        "\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
+        "\"clipOpens\":%u,\"clipActive\":%u,\"dialogMessages\":%u,\"lastTargetHwnd\":%u,\"lastTargetId\":%u,\"dialogHwnd\":%u,"
         "\"focusHwnd\":%u,\"gameCaptureHwnd\":%u,\"redirectedCapturedReleases\":%u,"
         "\"consumedCapturedReleases\":%u,\"lastDeliveryQueueUs\":%llu,\"maxDeliveryQueueUs\":%llu,"
         "\"lastHandlerUs\":%llu,\"maxHandlerUs\":%llu,\"ownerDrawnWheels\":%u,\"ownerDrawnWheelFallbacks\":%u,"
@@ -744,7 +784,7 @@ static void input_state(uint32_t id, int skip_controls)
         InterlockedCompareExchange(&injected_key_reads, 0, 0), InterlockedCompareExchange(&last_injected_key, 0, 0),
         InterlockedCompareExchange(&cursor_last_read_x, 0, 0), InterlockedCompareExchange(&cursor_last_read_y, 0, 0), modal ? "true" : "false",
         movie_tracking_failures ? "null" : movie_active ? "true" : "false", movie_opens,
-        (unsigned long long)(movie_total_us / 1000), movie_tracking_failures,
+        (unsigned long long)(movie_total_us / 1000), movie_tracking_failures, clip_opens, clip_active,
         dialog_messages, last_target, last_target_id, (uint32_t)(uintptr_t)(modal ? target : NULL),
         (uint32_t)(uintptr_t)nh_input_get_focus(), (uint32_t)(uintptr_t)nh_hidden_get_capture(),
         redirected_captured_releases, consumed_captured_releases,
@@ -997,7 +1037,7 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
          * press target, including clicks outside the popup used to dismiss it. */
         target = captured ? game_capture :
             belongs_to((HWND)virtual_capture.target, root) || popup_for((HWND)virtual_capture.target, root) ? (HWND)virtual_capture.target :
-            popup.target ? popup.target : child_at(root, screen, 0);
+            popup.target ? popup.target : window_at(root, screen);
         if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN)
         {
             nh_input_capture_begin(&virtual_capture, (uintptr_t)target, (uintptr_t)root);

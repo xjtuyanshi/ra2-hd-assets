@@ -123,6 +123,11 @@ typedef void *(WINAPI *nh_bink_open_proc)(const char *name, uint32_t flags);
 typedef void (WINAPI *nh_bink_close_proc)(void *movie);
 extern nh_bink_open_proc nh_real_bink_open;
 extern nh_bink_close_proc nh_real_bink_close;
+/* Bink decoders smaller than this are retained in-picture clips, not films that own the screen.
+ * The YR 1.001 copy holds 800x600 films and 140x110 campaign Sidebar clips (movmd03.mix);
+ * the Sidebar path keeps the match running while its clip plays. */
+#define NH_FILM_MIN_WIDTH 320
+#define NH_FILM_MIN_HEIGHT 200
 void *WINAPI nh_movie_open(const char *name, uint32_t flags);
 void WINAPI nh_movie_close(void *movie);
 void nh_picture_sent(void);
