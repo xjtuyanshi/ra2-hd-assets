@@ -8,7 +8,8 @@ const usage = `usage: prepare-map --map <file or id> [--game <dir>] [--cache <di
   [--steps extract,terrain,upscale,sprites,library,library-sprites,remat] [--scale 2] [--force] [--dry-run]
 
 Defaults: all steps except remat; existing extraction and current outputs are reused.
---scale accepts an integer from 1 to 4; terrain scale is reduced to fit 16384 px per side.
+--scale accepts an integer from 1 to 4. A terrain that would exceed 16384 px per side at that scale is fitted at the
+largest fractional scale that fits (terrain-map@<scale>x-fit.png) instead.
 --force rebuilds selected map steps; current shared library assets are reused.
 --dry-run only prints the plan and never writes files.
 remat is opt-in; include it in --steps to use the separately installed local Python environment.

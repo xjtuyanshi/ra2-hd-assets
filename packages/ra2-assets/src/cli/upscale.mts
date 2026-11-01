@@ -15,11 +15,12 @@ const { values } = parseArgs({
     bin: { type: 'string' },
     tile: { type: 'string', default: '256' },
     compare: { type: 'string' },
+    'max-side': { type: 'string', default: '16384' },
   },
 });
 if (!values.map?.length) {
   console.error(
-    'usage: upscale --map <mapId> [--map ...] [--scale 2] [--model realesrgan-x4plus] [--bin <path>] [--tile 256] [--cache <dir>] [--compare x,y,w,h]',
+    'usage: upscale --map <mapId> [--map ...] [--scale 2] [--model realesrgan-x4plus] [--bin <path>] [--tile 256] [--cache <dir>] [--compare x,y,w,h] [--max-side 16384]',
   );
   process.exit(2);
 }
@@ -39,6 +40,7 @@ try {
       scale: Number(values.scale),
       model: values.model!,
       tile: Number(values.tile),
+      maxSide: Number(values['max-side']),
       ...(values.bin ? { bin: resolve(values.bin) } : {}),
       ...(compare ? { compare } : {}),
     });

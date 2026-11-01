@@ -123,7 +123,10 @@ export const defaultPrepareRunners: PrepareRunners = {
   },
   async upscale(context, plan) {
     if (plan.scale === undefined) throw new Error('upscale requires a planned scale');
-    const result = await upscaleTerrainMap({ cacheDir: context.mapDir, scale: plan.scale, bin: context.bin });
+    // The upscaler fits the requested scale exactly as the planner did (terrainScale.ts).
+    const result = await upscaleTerrainMap({ cacheDir: context.mapDir, scale: context.scale, bin: context.bin });
+    if (result.scale !== plan.scale)
+      throw new Error(`upscale produced scale ${result.scale}, but the plan expected ${plan.scale}`);
     context.log(`  ${result.width}x${result.height} (${result.scale}x) -> ${result.file}`);
   },
   async sprites(context) {

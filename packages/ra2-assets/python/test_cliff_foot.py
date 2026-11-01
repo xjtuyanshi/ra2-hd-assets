@@ -67,6 +67,20 @@ class CliffFootTests(unittest.TestCase):
         np.testing.assert_array_equal(without_flood.water_mask, mask)
         np.testing.assert_array_equal(without_flood.terrain, result.terrain)
 
+    def test_fitted_fractional_scale_rasterizes_at_the_same_engine_positions(self):
+        """A composite fitted under the texture limit (terrain_scale.py) has a fractional terrainMap scale."""
+        manifest, _, _ = cliff()
+        two = cf.rasterize_levels(manifest, (320, 400))
+        manifest["terrainMap"]["scale"] = 451 / 256
+        fitted = cf.rasterize_levels(manifest, (282, 353))
+        # The 2x test points (plateau, wall, open ground) at the same engine positions.
+        for row, col, level in ((50, 200, 3), (120, 200, -1), (220, 200, 0)):
+            self.assertEqual(two[row, col], level)
+            self.assertEqual(fitted[int(row / 2 * 451 / 256), int(col / 2 * 451 / 256)], level)
+        # Covered area scales with the square of the scale (edges differ by a pixel at most).
+        ratio = (fitted >= 0).sum() / (two >= 0).sum()
+        self.assertAlmostEqual(ratio, (451 / 256 / 2) ** 2, delta=0.03)
+
     def test_water_level_comparison_is_relative_on_terraced_maps(self):
         manifest, terrain, mask = cliff()
         base = cf.prepare(manifest, terrain, mask)

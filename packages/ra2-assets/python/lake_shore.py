@@ -15,6 +15,10 @@ fading by 0.9 cells and pebbles by 0.6 cells. Linear-light painting uses gamma
 2.2 and deterministic noise seed 7; the tuned noise scales/amplitudes remain
 beside each operation below. Alpha is retained exactly. The outputs feed
 materials.json terrainMap/waterMask plus waterBed: true; no JSON is modified.
+
+The pixel constants assume 2x and no manifest scale is read. For a map whose composite
+is fitted at a fractional scale (terrain_scale.py), run this on 2x inputs and fit the
+terrain and mask outputs with `pnpm hd:fit-terrain --input ... --mask ...`.
 """
 
 from __future__ import annotations

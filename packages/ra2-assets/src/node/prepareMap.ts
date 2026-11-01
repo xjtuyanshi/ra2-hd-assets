@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { HD_CACHE_VERSION, type HdCacheManifest, type SpriteAtlasHdRef } from '../manifest.ts';
 import { TYPE_LIBRARY_VERSION, type TypeLibrary } from '../library.ts';
 import { THEATERS, type TheaterId } from '../theater.ts';
+import { fitTerrainScale, TERRAIN_MAX_SIDE, terrainMapNames } from '../terrainScale.ts';
 import { terrainLayout } from './terrain.ts';
 import { defaultPrepareRunners } from './prepareMapRunners.ts';
 
@@ -188,15 +189,14 @@ function hdFresh(
   );
 }
 
-/** This pipeline reuses x4plus, whose supported output scales are 1..4. */
+/**
+ * This pipeline reuses x4plus, whose supported requested scales are 1..4. A request that does not fit 16384 px per
+ * side becomes the largest fitting fractional scale (terrainScale.ts), not a smaller integer.
+ */
 export function chooseScale(width: number, height: number, requestedScale: number): number {
-  if (![width, height].every((n) => Number.isSafeInteger(n) && n > 0))
-    throw new RangeError('Invalid terrain dimensions');
   if (!Number.isInteger(requestedScale) || requestedScale < 1 || requestedScale > 4)
     throw new RangeError('scale must be an integer from 1 to 4');
-  const scale = Math.min(requestedScale, Math.floor(16384 / Math.max(width, height)));
-  if (scale < 1) throw new RangeError(`Terrain ${width}x${height} exceeds 16384 px even at scale 1`);
-  return scale;
+  return fitTerrainScale(width, height, requestedScale, TERRAIN_MAX_SIDE).scale;
 }
 function baseSize(ctx: PrepareContext, m: Manifest, rebuilding: boolean): [number, number] {
   const file = join(ctx.mapDir, 'terrain-map.png');
@@ -275,24 +275,26 @@ function planStep(
       return skip('scale-1 terrain and mask are current');
   } else if (step === 'upscale') {
     const [width, height] = baseSize(ctx, m, terrainChanged);
-    result.scale = chooseScale(width, height, ctx.scale);
+    const fit = fitTerrainScale(width, height, ctx.scale, TERRAIN_MAX_SIDE);
+    result.scale = fit.scale;
     const ref = m.terrainMap;
-    const waterMask = `terrain-water@${result.scale}x.png`;
-    const output = `terrain-map@${result.scale}x.png`;
+    const { file: output, waterMask } = terrainMapNames(fit, ctx.scale);
     // A later remat reference at the same scale is valid; do not reset it to the ESRGAN source on every run.
     if (
       !ctx.force &&
       !invalidated &&
       !terrainChanged &&
-      ref?.scale === result.scale &&
-      ref.width === width * result.scale &&
-      ref.height === height * result.scale &&
+      ref?.scale === fit.scale &&
+      ref.width === fit.width &&
+      ref.height === fit.height &&
       ref.waterMask === waterMask &&
       fresh([mapFile(output), mapFile(waterMask), mapFile(ref.file)], base) &&
       compatible(state, 'terrain', terrainInputs(m))
     )
       return skip('upscaled terrain and mask are current');
-    result.reason = `upscale terrain ${width}x${height} at ${result.scale}x (${width * result.scale}x${height * result.scale})`;
+    result.reason =
+      `upscale terrain ${width}x${height} at ${fit.scale}x (${fit.width}x${fit.height})` +
+      (fit.fitted ? `, fitted from ${ctx.scale}x to ${TERRAIN_MAX_SIDE} px per side` : '');
   } else if (step === 'sprites') {
     if (
       !ctx.force &&
@@ -504,11 +506,14 @@ export async function prepareMap(
         if (step === 'upscale' && plan.scale) {
           const m = readJson<Manifest>(join(ctx.mapDir, 'manifest.json'))!;
           const [width, height] = baseSize(ctx, m, false);
+          const fit = fitTerrainScale(width, height, ctx.scale, TERRAIN_MAX_SIDE);
           if (plan.scale < ctx.scale)
-            ctx.warn(`Reduced scale from ${ctx.scale} to ${plan.scale} to stay within 16384 px per side.`);
-          if (Math.max(width, height) * plan.scale > 8192)
             ctx.warn(
-              `Output ${width * plan.scale}x${height * plan.scale} exceeds the 8192 px WebGPU default; the renderer requests the adapter maximum (up to 16384).`,
+              `Reduced scale from ${ctx.scale} to ${plan.scale} (${fit.width}x${fit.height}) to stay within ${TERRAIN_MAX_SIDE} px per side.`,
+            );
+          if (Math.max(fit.width, fit.height) > 8192)
+            ctx.warn(
+              `Output ${fit.width}x${fit.height} exceeds the 8192 px WebGPU default; the renderer requests the adapter maximum (up to 16384).`,
             );
         }
         report.state[`pending:${step}`] = { signature: 'incomplete' };

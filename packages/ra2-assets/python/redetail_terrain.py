@@ -259,6 +259,12 @@ def run(args: argparse.Namespace) -> Path:
     source = np.asarray(Image.open(remat.map_path(directory, args.source)).convert("RGBA"))
     scale = base.shape[1] // source.shape[1]
     if scale * source.shape[1] != base.shape[1] or abs(base.shape[0] - scale * source.shape[0]) > 1:
+        if not float(ref.get("scale") or 1).is_integer():
+            # A composite fitted under the texture limit (terrain_scale.py) has no integer pixel grid over the source.
+            raise ValueError(
+                f"base {base.shape[1]}x{base.shape[0]} is fitted at fractional scale {ref['scale']}; re-detail works on "
+                "an integer multiple of the source: pass --base with an integer-scale (e.g. 2x) image and fit the "
+                "result with `pnpm hd:fit-terrain` (packages/ra2-assets README, 'Fitted terrain')")
         raise ValueError("base image must be an integer multiple of the source composite")
     gen = args.gen_scale
     if gen % scale:

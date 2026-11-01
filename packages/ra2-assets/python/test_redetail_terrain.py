@@ -121,6 +121,22 @@ class PipelineTests(unittest.TestCase):
             ramp = np.abs(out[40, 32:40, :3].astype(np.float32) - 90).mean(-1)
             self.assertLess(ramp[0], ramp[-1])
 
+    def test_fitted_fractional_base_is_refused_with_the_fit_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "gameres/hd-cache/WIDE"
+            directory.mkdir(parents=True)
+            Image.fromarray(textured_source(64, 48)).save(directory / "terrain-map.png")
+            # 64 x 48 at 451/256: ceil per side (ra2-assets terrainScale.ts).
+            Image.fromarray(np.zeros((85, 113, 4), np.uint8)).save(directory / "terrain-map@2x-fit.png")
+            (directory / "manifest.json").write_text(json.dumps({"terrainMap": {
+                "file": "terrain-map@2x-fit.png", "scale": 451 / 256, "width": 113, "height": 85}}))
+            args = rt.build_parser().parse_args(["--map", "WIDE", "--cache", str(root / "gameres/hd-cache"),
+                                                 "--output", str(root / "out.png"), "--work", str(root / "work"),
+                                                 "--dry-run"])
+            with self.assertRaisesRegex(ValueError, "fractional scale.*fit-terrain"):
+                rt.run(args)
+
 
 if __name__ == "__main__":
     unittest.main()

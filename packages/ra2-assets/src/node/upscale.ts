@@ -5,12 +5,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HdCacheManifest, TerrainMapRef } from '../manifest.ts';
+import { fitTerrainScale, TERRAIN_MAX_SIDE, terrainMapNames } from '../terrainScale.ts';
 import { decodePng, encodePng, type PngImage, type PngChannels } from './png.ts';
 
 export interface UpscaleOptions {
   cacheDir: string;
-  /** Integer output pixels per engine pixel, 1..4 (default 2). */
+  /**
+   * Requested integer output pixels per engine pixel, 1..4 (default 2). When it exceeds `maxSide` on either axis,
+   * the output is fitted at the largest fractional scale that fits (see terrainScale.ts).
+   */
   scale?: number;
+  /** Largest output side in pixels (default 16384, the renderer's texture limit). */
+  maxSide?: number;
   /** Default realesrgan-x4plus. Anime video models use their requested native scale. */
   model?: string;
   /** Defaults to gameres/tools/realesrgan/realesrgan-ncnn-vulkan in this checkout. */
@@ -157,24 +163,110 @@ export function downsampleLinearRgb(
   return out;
 }
 
-/** Pixel-centre bilinear interpolation with clamped edge samples, matching normalized linear texture sampling. */
-export function resizeBilinear(image: PngImage, width: number, height: number): PngImage {
+/**
+ * Exact area resampling for any reduction factor: output pixel (x, y) is the mean of the source over
+ * [x * step, (x + 1) * step) x [y * step, (y + 1) * step), with partially covered source pixels weighted by their
+ * covered area. `step` is source pixels per output pixel (default: the input/output size ratio of each axis); an
+ * output pixel reaching past the source's right or bottom edge averages only the part it covers. The first
+ * `srgbChannels` channels are averaged in linear light (sRGB colour); the rest (alpha, masks) as plain values.
+ * For integer factors the result equals downsampleLinearRgb's box filter byte for byte.
+ */
+export function resampleArea(
+  image: PngImage,
+  outWidth: number,
+  outHeight: number,
+  options: { step?: number; srgbChannels?: number } = {},
+): PngImage {
+  const { width, height, channels, data } = image;
+  checkImage(data, width, height, channels);
+  const srgbChannels = options.srgbChannels ?? Math.min(3, channels);
+  if (!Number.isInteger(srgbChannels) || srgbChannels < 0 || srgbChannels > channels)
+    throw new RangeError('srgbChannels must be an integer from 0 to the channel count');
+  if (!Number.isInteger(outWidth) || !Number.isInteger(outHeight) || outWidth < 1 || outHeight < 1)
+    throw new RangeError('area resampling output must have positive integer dimensions');
+  const stepX = options.step ?? width / outWidth;
+  const stepY = options.step ?? height / outHeight;
+  if (!(stepX >= 1) || !(stepY >= 1) || !Number.isFinite(stepX) || !Number.isFinite(stepY))
+    throw new RangeError('area resampling only reduces: step must be at least 1 source pixel per output pixel');
+  // Every output pixel must cover some source: the last one starts inside the image.
+  if ((outWidth - 1) * stepX >= width || (outHeight - 1) * stepY >= height)
+    throw new RangeError(`area resampling output ${outWidth}x${outHeight} extends past the ${width}x${height} source`);
+  const out = new Uint8Array(outWidth * outHeight * channels);
+  const sum = new Float64Array(channels);
+  // Horizontal spans and weights are the same for every row.
+  const first = new Int32Array(outWidth);
+  const count = new Int32Array(outWidth);
+  const spanX = new Float64Array(outWidth);
+  const weightsX: Float64Array[] = [];
+  for (let x = 0; x < outWidth; x++) {
+    const left = x * stepX;
+    const right = (x + 1) * stepX;
+    first[x] = Math.floor(left);
+    count[x] = Math.min(width, Math.ceil(right)) - first[x]!;
+    const weights = new Float64Array(count[x]!);
+    for (let k = 0; k < count[x]!; k++) {
+      const sx = first[x]! + k;
+      weights[k] = Math.min(right, sx + 1) - Math.max(left, sx);
+    }
+    weightsX.push(weights);
+    spanX[x] = Math.min(right, width) - left;
+  }
+  for (let y = 0; y < outHeight; y++) {
+    const top = y * stepY;
+    const bottom = (y + 1) * stepY;
+    const spanY = Math.min(bottom, height) - top;
+    const yEnd = Math.min(height, Math.ceil(bottom));
+    for (let x = 0; x < outWidth; x++) {
+      sum.fill(0);
+      const weights = weightsX[x]!;
+      const x0 = first[x]!;
+      const n = count[x]!;
+      for (let sy = Math.floor(top); sy < yEnd; sy++) {
+        const wy = Math.min(bottom, sy + 1) - Math.max(top, sy);
+        for (let k = 0; k < n; k++) {
+          const weight = wy * weights[k]!;
+          const i = (sy * width + x0 + k) * channels;
+          for (let c = 0; c < srgbChannels; c++) sum[c]! += SRGB_TO_LINEAR[data[i + c]!]! * weight;
+          for (let c = srgbChannels; c < channels; c++) sum[c]! += data[i + c]! * weight;
+        }
+      }
+      const area = spanY * spanX[x]!;
+      const o = (y * outWidth + x) * channels;
+      for (let c = 0; c < srgbChannels; c++) out[o + c] = linearToSrgb(sum[c]! / area);
+      for (let c = srgbChannels; c < channels; c++) out[o + c] = Math.max(0, Math.min(255, Math.round(sum[c]! / area)));
+    }
+  }
+  return { width: outWidth, height: outHeight, channels, data: out };
+}
+
+/**
+ * Pixel-centre bilinear interpolation with clamped edge samples, matching normalized linear texture sampling.
+ * Output pixel centre x + 0.5 samples source position (x + 0.5) / scale; `scale` (output per source pixel) defaults
+ * to the size ratio of each axis and must be given for a fitted composite, whose size is rounded up.
+ */
+export function resizeBilinear(image: PngImage, width: number, height: number, scale?: number): PngImage {
   checkImage(image.data, image.width, image.height, image.channels);
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1)
     throw new RangeError('bilinear output must have positive integer dimensions');
+  if (scale !== undefined && !(scale > 0 && Number.isFinite(scale)))
+    throw new RangeError('bilinear scale must be a positive number');
+  const sourceX = (x: number): number =>
+    scale === undefined ? ((x + 0.5) * image.width) / width - 0.5 : (x + 0.5) / scale - 0.5;
+  const sourceY = (y: number): number =>
+    scale === undefined ? ((y + 0.5) * image.height) / height - 0.5 : (y + 0.5) / scale - 0.5;
   const { data: source, channels } = image;
   const data = new Uint8Array(width * height * channels);
   const left = new Int32Array(width);
   const right = new Int32Array(width);
   const fraction = new Float64Array(width);
   for (let x = 0; x < width; x++) {
-    const sx = Math.max(0, Math.min(image.width - 1, ((x + 0.5) * image.width) / width - 0.5));
+    const sx = Math.max(0, Math.min(image.width - 1, sourceX(x)));
     left[x] = Math.floor(sx);
     right[x] = Math.min(image.width - 1, left[x]! + 1);
     fraction[x] = sx - left[x]!;
   }
   for (let y = 0; y < height; y++) {
-    const sy = Math.max(0, Math.min(image.height - 1, ((y + 0.5) * image.height) / height - 0.5));
+    const sy = Math.max(0, Math.min(image.height - 1, sourceY(y)));
     const top = Math.floor(sy);
     const bottom = Math.min(image.height - 1, top + 1);
     const fy = sy - top;
@@ -213,14 +305,17 @@ export async function runBinary(bin: string, args: string[]): Promise<void> {
 
 function comparison(original: PngImage, output: PngImage, scale: number, crop: readonly number[]): PngImage {
   const [x, y, w, h] = crop as readonly [number, number, number, number];
-  const sideWidth = w * scale;
+  // Integer scales are exact; a fitted scale shows the crop's whole output pixels starting at its first one.
+  const sideWidth = Math.floor(w * scale);
   const width = sideWidth * 2;
-  const height = h * scale;
+  const height = Math.floor(h * scale);
+  const outX = Math.floor(x * scale);
+  const outY = Math.floor(y * scale);
   const data = new Uint8Array(width * height * 4);
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < sideWidth; px++) {
       const a = ((y + Math.floor(py / scale)) * original.width + x + Math.floor(px / scale)) * 4;
-      const b = ((y * scale + py) * output.width + x * scale + px) * 4;
+      const b = ((outY + py) * output.width + outX + px) * 4;
       data.set(original.data.subarray(a, a + 4), (py * width + px) * 4);
       data.set(output.data.subarray(b, b + 4), (py * width + sideWidth + px) * 4);
     }
@@ -229,8 +324,11 @@ function comparison(original: PngImage, output: PngImage, scale: number, crop: r
 }
 
 export async function upscaleTerrainMap(opts: UpscaleOptions): Promise<UpscaleResult> {
-  const scale = opts.scale ?? 2;
-  if (!Number.isInteger(scale) || scale < 1 || scale > 4) throw new RangeError('scale must be an integer from 1 to 4');
+  const requested = opts.scale ?? 2;
+  if (!Number.isInteger(requested) || requested < 1 || requested > 4)
+    throw new RangeError('scale must be an integer from 1 to 4');
+  const maxSide = opts.maxSide ?? TERRAIN_MAX_SIDE;
+  if (!Number.isSafeInteger(maxSide) || maxSide < 1) throw new RangeError('maxSide must be a positive integer');
   const tile = opts.tile ?? 256;
   if (!Number.isInteger(tile) || tile < 0) throw new RangeError('tile size must be a non-negative integer');
   const model = opts.model ?? 'realesrgan-x4plus';
@@ -239,12 +337,12 @@ export async function upscaleTerrainMap(opts: UpscaleOptions): Promise<UpscaleRe
     throw new Error(
       `Unsupported model ${model}; use realesrgan-x4plus, realesrgan-x4plus-anime or realesr-animevideov3`,
     );
-  if (anime && scale === 1)
+  if (anime && requested === 1)
     throw new Error('realesr-animevideov3 has native models for scales 2, 3 and 4; use realesrgan-x4plus for scale 1');
   const modelScale = anime ? /-x([234])$/.exec(model)?.[1] : undefined;
-  if (modelScale && Number(modelScale) !== scale)
+  if (modelScale && Number(modelScale) !== requested)
     throw new Error(
-      `Model ${model} requires scale ${modelScale}; use the unsuffixed realesr-animevideov3 to select scale ${scale}`,
+      `Model ${model} requires scale ${modelScale}; use the unsuffixed realesr-animevideov3 to select scale ${requested}`,
     );
   const dir = resolve(opts.cacheDir);
   const originalFile = join(dir, 'terrain-map.png');
@@ -275,15 +373,19 @@ export async function upscaleTerrainMap(opts: UpscaleOptions): Promise<UpscaleRe
     )
       throw new RangeError('compare must be x,y,width,height integers inside the scale-1 image');
   }
-  const width = original.width * scale;
-  const height = original.height * scale;
+  const fit = fitTerrainScale(original.width, original.height, requested, maxSide);
+  const { scale, width, height } = fit;
+  if (fit.fitted)
+    console.warn(
+      `Fitted ${original.width}x${original.height} at ${scale}x (${width}x${height}) instead of ${requested}x to stay within ${maxSide} px per side.`,
+    );
   if (width > 8192 || height > 8192)
     console.warn(
-      `Warning: output ${width}x${height} exceeds the 8192 px WebGPU default texture limit; use a lower scale.`,
+      `Output ${width}x${height} exceeds the 8192 px WebGPU default; the renderer requests the adapter maximum (up to 16384).`,
     );
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
   const bin = resolve(opts.bin ?? join(repoRoot, 'gameres/tools/realesrgan/realesrgan-ncnn-vulkan'));
-  const nativeScale = anime ? scale : 4;
+  const nativeScale = anime ? requested : 4;
   const temp = mkdtempSync(join(tmpdir(), 'ra2-upscale-'));
   try {
     const input = join(temp, 'input.png');
@@ -327,13 +429,21 @@ export async function upscaleTerrainMap(opts: UpscaleOptions): Promise<UpscaleRe
       for (let i = 0; i < inferred.width * inferred.height; i++)
         for (let c = 0; c < 3; c++) rgb[i * 3 + c] = inferred.data[i * 4 + c]!;
     }
-    if (nativeScale !== scale) rgb = downsampleLinearRgb(rgb, inferred.width, inferred.height, width, height);
+    // Integer scales keep the original box filter and bilinear sampling byte for byte; a fitted scale uses the
+    // exact area filter and bilinear sampling at the manifest scale (its image size is rounded up).
+    const exact = fit.fitted ? scale : undefined;
+    if (fit.fitted)
+      rgb = resampleArea({ width: inferred.width, height: inferred.height, channels: 3, data: rgb }, width, height, {
+        step: nativeScale / scale,
+      }).data;
+    else if (nativeScale !== scale) rgb = downsampleLinearRgb(rgb, inferred.width, inferred.height, width, height);
     const alpha = new Uint8Array(original.width * original.height);
     for (let i = 0; i < alpha.length; i++) alpha[i] = original.data[i * 4 + 3]!;
     const resizedAlpha = resizeBilinear(
       { width: original.width, height: original.height, channels: 1, data: alpha },
       width,
       height,
+      exact,
     ).data;
     const rgba = new Uint8Array(width * height * 4);
     for (let i = 0; i < width * height; i++) {
@@ -341,10 +451,9 @@ export async function upscaleTerrainMap(opts: UpscaleOptions): Promise<UpscaleRe
       rgba[i * 4 + 3] = resizedAlpha[i]!;
     }
     const terrain: PngImage = { width, height, channels: 4, data: rgba };
-    const file = `terrain-map@${scale}x.png`;
-    const waterMask = `terrain-water@${scale}x.png`;
+    const { file, waterMask } = terrainMapNames(fit, requested);
     writeFileSync(join(dir, file), encodePng(terrain));
-    writeFileSync(join(dir, waterMask), encodePng(resizeBilinear(mask, width, height)));
+    writeFileSync(join(dir, waterMask), encodePng(resizeBilinear(mask, width, height, exact)));
     let compare: string | undefined;
     if (opts.compare) {
       compare = join(dir, 'upscale-compare.png');

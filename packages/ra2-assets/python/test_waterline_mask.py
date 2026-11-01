@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+import terrain_scale
 import waterline_mask as wm
 
 WATER = [(24, 64, 105), (12, 56, 97), (20, 72, 113)]
@@ -176,6 +177,42 @@ class PaintedWaterTests(unittest.TestCase):
         self.assertGreater(report["max"], 15)
         with self.assertRaises(ValueError):
             wm.compose(base, base1, added, 1)
+
+
+    def test_fitted_fractional_scale_mask_is_built_with_exact_registration(self):
+        """A map fitted under the texture limit (terrain_scale.py): its mask is no integer multiple of the 1x art."""
+        scale = 451 / 256
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "Wide"
+            write_map(directory)
+            rgba = np.asarray(Image.open(directory / "terrain-map.png"))
+            height, width = rgba.shape[:2]
+            size = terrain_scale.scaled_size(width, height, scale)
+            self.assertNotEqual(size[0] / width, scale)  # Rounded up: the size ratio is not the scale.
+            mask1 = np.asarray(Image.open(directory / "terrain-water.png"))
+            fitted = terrain_scale.upsample(mask1, scale, size, cv2.INTER_LINEAR)
+            Image.fromarray(fitted, "L").save(directory / "terrain-water@2x-fit.png")
+            manifest = json.loads((directory / "manifest.json").read_text())
+            manifest["terrainMap"].update(waterMask="terrain-water@2x-fit.png", scale=scale, width=size[0],
+                                          height=size[1])
+            (directory / "manifest.json").write_text(json.dumps(manifest))
+            result = wm.analyse(directory)
+            self.assertEqual(result["status"], "built")
+            self.assertEqual(result["scale"], scale)
+            out = result["mask"]
+            self.assertEqual(out.shape, fitted.shape)
+            self.assertTrue((out >= fitted).all())
+            # The published waterline sits where the painted one is, in original pixels, all the way to the far edge.
+            _, line = scene()
+            columns = range(4, len(line) - 4)
+            top = np.array([np.argmax(out[:, int((x + 0.5) * scale)] >= 107) for x in columns]) / scale
+            self.assertLessEqual(float(np.abs(top - line[4:-4]).max()), 1.5)
+            self.assertLessEqual(float(np.abs(top - line[4:-4]).mean()), 0.8)
+            # A mask that is neither a multiple nor the fitted size is refused with a reason.
+            Image.fromarray(fitted[:, :-1], "L").save(directory / "terrain-water@2x-fit.png")
+            refused = wm.analyse(directory)
+            self.assertEqual(refused["status"], "skipped")
+            self.assertIn("fitted size", refused["reason"])
 
 
 def write_map(directory: Path, *, materials: dict | None = None, water=True) -> None:

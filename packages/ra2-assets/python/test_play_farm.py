@@ -23,6 +23,9 @@ def png(width: int, height: int) -> bytes:
             + chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
 
 
+FITTED = 451 / 256
+
+
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding='utf-8')
@@ -68,6 +71,12 @@ def write_map(directory: Path, *, theatre='temperate', scale=2, hd_sprites=True,
         (directory / 'terrain-water@2x.png').write_bytes(png(240, 120))
         manifest['terrainMap'] = {'file': 'terrain-map@2x.png', 'waterMask': 'terrain-water@2x.png', 'scale': 2,
                                   'originX': -60, 'originY': 0, 'width': 240, 'height': 120}
+    if scale == 'fit':
+        # 2x fitted under a (synthetic) limit at 451/256: ceil(120 * 1.76171875) x ceil(60 * 1.76171875).
+        (directory / 'terrain-map@2x-fit.png').write_bytes(png(212, 106))
+        (directory / 'terrain-water@2x-fit.png').write_bytes(png(212, 106))
+        manifest['terrainMap'] = {'file': 'terrain-map@2x-fit.png', 'waterMask': 'terrain-water@2x-fit.png',
+                                  'scale': FITTED, 'originX': -60, 'originY': 0, 'width': 212, 'height': 106}
     if hd_sprites:
         (directory / 'sprites@2x.png').write_bytes(png(64, 32))
         (directory / 'sprites@2x-remap.png').write_bytes(png(64, 32))
@@ -212,6 +221,40 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(play_farm.verify(self.farm, only=['Lit'])['failed'], [])
         # A later build leaves the realised directory alone.
         self.assertEqual(play_farm.build(self.base, self.maps, self.farm)['kept'][-1]['map'], 'Lit')
+
+    def test_curated_map_with_scale_1_terrain_takes_a_prepared_fitted_terrain(self):
+        base_map = self.base / 'Wide'
+        write_map(base_map, scale=1)
+        write_json(base_map / 'lights.json', {'lights': []})
+        write_map(self.maps / 'Wide', scale='fit')
+        inventory = json.loads((self.maps / 'INVENTORY.json').read_text())
+        inventory['maps'].append({'id': 'Wide', 'status': 'done'})
+        write_json(self.maps / 'INVENTORY.json', inventory)
+
+        report = play_farm.build(self.base, self.maps, self.farm)
+        self.assertEqual(report['terrain_upgraded'],
+                         [{'map': 'Wide', 'files': ['terrain-map@2x-fit.png', 'terrain-water@2x-fit.png']}])
+        patched = json.loads((self.farm / 'Wide' / 'manifest.json').read_text())
+        self.assertEqual(patched['terrainMap']['scale'], FITTED)
+        verified = play_farm.verify(self.farm, only=['Wide'])
+        self.assertEqual(verified['failed'], [])
+        self.assertEqual(verified['fittedTerrain'], {'Wide': '1.76172'})
+        self.assertEqual(verified['scale1Terrain'], [])
+        self.assertFalse([w for w in verified['results'][0]['warnings'] if 'terrain composite' in w])
+
+    def test_fitted_terrain_must_cover_the_same_cells(self):
+        base_map = self.base / 'Shifted'
+        write_map(base_map, scale=1)
+        write_json(base_map / 'lights.json', {'lights': []})
+        prepared = write_map(self.maps / 'Shifted', scale='fit')
+        prepared['terrainMap']['width'] = 211  # Not ceil(120 * scale): another composite.
+        write_json(self.maps / 'Shifted' / 'manifest.json', prepared)
+        inventory = json.loads((self.maps / 'INVENTORY.json').read_text())
+        inventory['maps'].append({'id': 'Shifted', 'status': 'done'})
+        write_json(self.maps / 'INVENTORY.json', inventory)
+        report = play_farm.build(self.base, self.maps, self.farm)
+        self.assertEqual(report['terrain_upgraded'], [])
+        self.assertIn({'map': 'Shifted', 'reason': 'curated base map'}, report['kept'])
 
     def test_farm_must_be_separate_from_base_and_batch(self):
         for farm in (self.base, self.base / 'farm', self.maps.parent, self.maps / 'farm'):

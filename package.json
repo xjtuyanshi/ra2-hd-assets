@@ -31,6 +31,7 @@
     "hd:terrain-depth": "pnpm --filter ra2-assets terrain-depth",
     "hd:terrain-patch": "pnpm --filter ra2-assets terrain-patch",
     "hd:upscale": "pnpm --filter ra2-assets upscale",
+    "hd:fit-terrain": "pnpm --filter ra2-assets fit-terrain",
     "hd:sprites": "pnpm --filter ra2-assets sprites",
     "hd:library": "pnpm --filter ra2-assets library",
     "hd:lights": "pnpm --filter ra2-assets lights",

@@ -12,8 +12,9 @@ manifest.json counts as prepared.
 * a map the base has without any HD work of its own (no 2x terrain, no HD sprite atlas, no sidecar) is superseded by
   the prepared directory;
 * a curated base map (HD sprites, sidecars, AI terrain) is kept. When its terrain composite is still scale 1 while the
-  prepared one is scale 2 over the same cell grid, the farm directory is realised and only the prepared 2x terrain and
-  water mask are linked in, with ``manifest.terrainMap`` patched in the farm's own manifest copy.
+  prepared one is HD (2x, or a fractional scale fitted under the texture limit) over the same cell grid, the farm
+  directory is realised and only the prepared HD terrain and water mask are linked in, with ``manifest.terrainMap``
+  patched in the farm's own manifest copy.
 
 ``verify`` is the headless integrity check of every map directory of a farm: the manifest parses, each file it and the
 optional sidecars name exists and is a complete PNG/JSON of the recorded size, every image fits the texture limit, cell
@@ -32,6 +33,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import struct
 import sys
@@ -66,8 +68,13 @@ def _entry(directory: Path, name: str) -> Path | None:
     return None
 
 
-def _terrain_scale(manifest: dict) -> int:
-    return int((manifest.get('terrainMap') or {}).get('scale') or 0)
+def _terrain_scale(manifest: dict) -> float:
+    """terrainMap.scale; fractional for a composite fitted under the texture limit (see terrain_scale.py)."""
+    return float((manifest.get('terrainMap') or {}).get('scale') or 0)
+
+
+def _scale_text(scale: float) -> str:
+    return str(int(scale)) if float(scale).is_integer() else f'{scale:g}'
 
 
 def _curated(directory: Path, manifest: dict) -> bool:
@@ -76,7 +83,9 @@ def _curated(directory: Path, manifest: dict) -> bool:
 
 
 def _same_terrain_registration(base: dict, prepared: dict) -> bool:
-    """Whether the prepared scale-2 composite shows exactly the base manifest's cells at the same screen origin."""
+    """Whether the prepared HD composite shows exactly the base manifest's cells at the same screen origin.
+
+    A fitted composite (fractional scale) is ceil(side * scale) per side of the scale-1 image (terrain_scale.py)."""
     if base.get('grid') != prepared.get('grid') or base.get('cells') != prepared.get('cells'):
         return False
     if base.get('tiles') != prepared.get('tiles'):
@@ -84,9 +93,14 @@ def _same_terrain_registration(base: dict, prepared: dict) -> bool:
     old, new = base.get('terrainMap'), prepared['terrainMap']
     if not old:
         return True
+    if old['originX'] != new['originX'] or old['originY'] != new['originY']:
+        return False
+    base_width, base_height = old['width'] / old['scale'], old['height'] / old['scale']
+    if base_width.is_integer() and base_height.is_integer():
+        return (math.ceil(base_width * new['scale']), math.ceil(base_height * new['scale'])) == (new['width'],
+                                                                                              new['height'])
     scale = new['scale'] / old['scale']
-    return (old['originX'] == new['originX'] and old['originY'] == new['originY']
-            and old['width'] * scale == new['width'] and old['height'] * scale == new['height'])
+    return old['width'] * scale == new['width'] and old['height'] * scale == new['height']
 
 
 def prepared_maps(maps: Path, inventory: Path | None = None) -> tuple[list[Path], list[dict]]:
@@ -158,12 +172,12 @@ def build(base: Path, maps: Path, farm: Path, inventory: Path | None = None) -> 
                 cache_farm.install_symlink(farm, existing.name, prepared)
                 report['superseded'].append({'map': existing.name, 'reason': 'base map has no HD terrain, sprites '
                                              'or sidecars'})
-            elif (_terrain_scale(old) < 2 <= _terrain_scale(new) and not (existing / 'materials.json').exists()
+            elif (_terrain_scale(old) <= 1 < _terrain_scale(new) and not (existing / 'materials.json').exists()
                   and _same_terrain_registration(old, new)):
                 ref = new['terrainMap']
                 files = [ref['file']] + ([ref['waterMask']] if ref.get('waterMask') else [])
                 if any(os.path.lexists(existing / file) for file in files):
-                    report['kept'].append({'map': existing.name, 'reason': 'curated; 2x terrain name already taken'})
+                    report['kept'].append({'map': existing.name, 'reason': 'curated; HD terrain name already taken'})
                     continue
                 for file in files:
                     cache_farm.install_symlink(farm, f'{existing.name}/{file}', prepared / file)
@@ -406,7 +420,7 @@ def verify_map(farm: Path, name: str, limit: int, libraries: dict) -> dict:
                 for field in ('shoreIgnore', 'waterDetail', 'waterSurface'):
                     if isinstance(materials.get(field), str):
                         check.png(materials[field], f'materials {field}')
-            if terrain['scale'] < 2:
+            if terrain['scale'] <= 1:
                 doubled = max(size) * 2 // terrain['scale']
                 check.warnings.append(
                     'terrain composite is scale 1' + (f' (2x would be {doubled} px, above the upscaler limit)'
@@ -457,6 +471,9 @@ def verify(farm: Path, limit: int = 16384, only: list[str] | None = None) -> dic
         'brokenTopLevelLinks': broken,
         'theatres': theatres,
         'scale1Terrain': [row['map'] for row in maps if row.get('terrainScale') == 1],
+        # Composites fitted under the texture limit at a fractional scale, e.g. {'XMP22S8': '1.76172'}.
+        'fittedTerrain': {row['map']: _scale_text(row['terrainScale']) for row in maps
+                          if not float(row.get('terrainScale') or 0).is_integer()},
         'aboveGuaranteedLimit': [row['map'] for row in maps if row.get('maxDimension', 0) > DEFAULT_TEXTURE_LIMIT],
         'results': maps,
     }
@@ -485,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         report = verify(args.farm, args.max_texture, args.only)
         summary = {key: report[key] for key in ('maps', 'ok', 'failed', 'brokenTopLevelLinks', 'theatres',
-                                                'scale1Terrain')}
+                                                'scale1Terrain', 'fittedTerrain')}
         summary['warnings'] = sum(len(row['warnings']) for row in report['results'])
         failed = bool(report['failed'] or report['brokenTopLevelLinks'])
     if args.report:

@@ -14,7 +14,7 @@ colours): a colour that is also common on land far from any water only counts wh
 share with land are dense around it (DISTINCT, TEXTURE), so a road that ends at a quay is not flooded.
 Single-pixel dither is settled with a 3 x 3 majority, enclosed specks of at most SPECK pixels are filled, and the
 result is unioned with the existing mask, blurred by EDGE_SIGMA original pixels and resampled to the resolution of
-the map's HD terrain. Only real gaps are filled (water farther than GAP from the existing mask, and the added water
+the map's HD terrain (an integer multiple of the 1x composite, or a fitted fractional scale: terrain_scale.py). Only real gaps are filled (water farther than GAP from the existing mask, and the added water
 within GAP_REACH of it): a beach whose mask is within GAP of the painted water keeps it exactly, and where the
 extractor's colour test left holes or stopped short of the painted water the beach follows it too. Mask bytes
 farther than TOUCH original pixels from added water are the existing mask's.
@@ -54,6 +54,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cache_farm  # noqa: E402
+import terrain_scale  # noqa: E402
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -177,26 +178,34 @@ def painted_water(rgb: np.ndarray, opaque: np.ndarray, mask: np.ndarray) -> tupl
     return added, colours
 
 
-def compose(base: np.ndarray, base1: np.ndarray, added: np.ndarray, scale: int) -> np.ndarray:
+def compose(base: np.ndarray, base1: np.ndarray, added: np.ndarray, scale: float) -> np.ndarray:
     """The published mask at the HD terrain's resolution: `base` (uint8, scale x) with the added water joined in.
 
     `base1` is `base` at 1x. The union's edge is soft (EDGE_SIGMA); bytes farther than TOUCH original pixels from added
-    water are exactly `base`'s.
+    water are exactly `base`'s. A fractional (fitted) scale resamples with exact pixel-centre registration.
     """
     height, width = added.shape
-    if base.shape != (height * scale, width * scale) or base1.shape != added.shape:
+    integer = terrain_scale.is_integer_scale(scale)
+    size = (width * int(scale), height * int(scale)) if integer else terrain_scale.scaled_size(width, height, scale)
+    if base.shape != size[::-1] or base1.shape != added.shape:
         raise ValueError("mask sizes do not match the composite and scale")
     if not added.any():
         return base.copy()
+
+    def resample(image: np.ndarray, interpolation: int) -> np.ndarray:
+        if integer:
+            return cv2.resize(image, size, interpolation=interpolation)
+        return terrain_scale.upsample(image, scale, size, interpolation)
+
     union = ((base1 >= 128) | added).astype(np.float32)
     soft = cv2.GaussianBlur(union, (0, 0), EDGE_SIGMA)
     if scale != 1:
-        soft = cv2.resize(soft, (width * scale, height * scale), interpolation=cv2.INTER_CUBIC)
+        soft = resample(soft, cv2.INTER_CUBIC)
     soft8 = np.clip(np.rint(soft * 255), 0, 255).astype(np.uint8)
     reach = 2 * TOUCH + 1
     touched = cv2.dilate(added.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach)))
     if scale != 1:
-        touched = cv2.resize(touched, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
+        touched = resample(touched, cv2.INTER_NEAREST)
     return np.where(touched > 0, np.maximum(base, soft8), base)
 
 
@@ -278,11 +287,26 @@ def analyse(directory: Path) -> dict:
     base = np.asarray(Image.open(directory / base_name).convert("L"))
     height, width = rgba.shape[:2]
     scale = base.shape[1] // width
+    fitted = None
     if scale < 1 or base.shape != (height * scale, width * scale):
-        return {"status": "skipped", "reason": f"mask {base.shape[1]}x{base.shape[0]} is not a multiple of terrain-map.png"}
+        # A fitted composite (terrain_scale.py) is no integer multiple: its manifest scale says how it was made.
+        manifest_scale = ref.get("scale")
+        try:
+            fits = (isinstance(manifest_scale, (int, float)) and not terrain_scale.is_integer_scale(manifest_scale)
+                    and terrain_scale.scaled_size(width, height, manifest_scale) == (base.shape[1], base.shape[0]))
+        except ValueError:
+            fits = False
+        if not fits:
+            return {"status": "skipped", "reason": f"mask {base.shape[1]}x{base.shape[0]} is neither a multiple of "
+                    "terrain-map.png nor its fitted size at manifest.terrainMap.scale"}
+        fitted = float(manifest_scale)
     if (base.shape[1], base.shape[0]) != (ref["width"], ref["height"]):
         return {"status": "skipped", "reason": "mask size differs from manifest.terrainMap"}
-    base1 = base if scale == 1 else cv2.resize(base, (width, height), interpolation=cv2.INTER_AREA)
+    if fitted is not None:
+        scale = fitted
+        base1 = np.clip(np.rint(terrain_scale.area_down(base, scale, (width, height))), 0, 255).astype(np.uint8)
+    else:
+        base1 = base if scale == 1 else cv2.resize(base, (width, height), interpolation=cv2.INTER_AREA)
     if not (base1 >= 128).any():
         return {"status": "skipped", "reason": "no water"}
     added, colours = painted_water(rgba[..., :3], rgba[..., 3] >= 128, base1)

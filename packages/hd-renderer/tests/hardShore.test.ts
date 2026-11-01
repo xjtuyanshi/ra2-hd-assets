@@ -141,6 +141,23 @@ describe('hard shores from tiles and the painted-waterline mask', () => {
         half.data[y * half.width + x] = drawn.data[Math.min(raised.height - 1, y * 2) * raised.width + x * 2]!;
     expect(node(hardShoreField(width, height, SUB, high, half, raised), width, 11, 3)).toBe(1);
   });
+
+  it('reads a fitted terrain mask (fractional scale, size rounded up) at the same places', () => {
+    // A map too wide for 2x is fitted at a multiple of 1/256 (ra2-assets terrainScale.ts): 451/256 for a 9300 px one.
+    const scale = 451 / 256;
+    const fitted = { ...ref, scale, width: Math.ceil(ref.width * scale), height: Math.ceil(ref.height * scale) };
+    expect(fitted.width).not.toBe(ref.width * scale);
+    const data = new Uint8Array(fitted.width * fitted.height);
+    for (let y = 0; y < fitted.height; y++)
+      for (let x = 0; x < fitted.width; x++) {
+        // Fitted pixel x covers original [x / scale, (x + 1) / scale): take the original pixel under its centre.
+        const sx = Math.min(ref.width - 1, Math.floor((x + 0.5) / scale));
+        const sy = Math.min(ref.height - 1, Math.floor((y + 0.5) / scale));
+        data[y * fitted.width + x] = mask.data[sy * ref.width + sx]!;
+      }
+    const fittedMask = { data, width: fitted.width, height: fitted.height };
+    expect(Array.from(hardShoreField(width, height, SUB, cell, fittedMask, fitted))).toEqual(Array.from(field));
+  });
 });
 
 describe('the look at a hard shore', () => {

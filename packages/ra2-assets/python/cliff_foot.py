@@ -3,7 +3,8 @@
 
 The cache manifest supplies cell existence, uint8 levels, little-endian uint16
 tile indices, ramp types, and terrainMap scale/origin in engine pixels. Cell
-projection is ((x-y)*30, (x+y-level)*15) engine px, multiplied by composite scale.
+projection is ((x-y)*30, (x+y-level)*15) engine px, multiplied by composite scale
+(an integer, or a fractional scale for a composite fitted under the texture limit).
 Ramps rise at most one level at shared corners; cell tops are painted in x+y,
 height, x, y order, with quarter-composite-pixel triangle coordinates. A plateau
 >= nearest water level + 2 and uncovered walls inside the map enter shoreIgnore.

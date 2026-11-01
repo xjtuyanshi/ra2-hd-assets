@@ -331,6 +331,42 @@ describe('prepare-map execution', () => {
     expect(options.warn.mock.calls.map(([message]) => message).join('\n')).toMatch(/8192/);
   });
 
+  it('fits a terrain too wide for the requested scale at a fractional scale and skips it once current', async () => {
+    const { options, mapDir } = fixture();
+    png(join(mapDir, 'terrain-map.png'), 9300, 2);
+    png(join(mapDir, 'terrain-water.png'), 9300, 2);
+    const scale = 451 / 256;
+    expect(planPrepareMap({ ...options, steps: ['upscale'] })[0]).toMatchObject({
+      action: 'run',
+      scale,
+      reason: `upscale terrain 9300x2 at ${scale}x (16384x4), fitted from 2x to 16384 px per side`,
+    });
+    const runner = vi.fn<PrepareRunners['upscale']>((context) => {
+      const ref: TerrainMapRef = {
+        file: 'terrain-map@2x-fit.png',
+        waterMask: 'terrain-water@2x-fit.png',
+        scale,
+        originX: 0,
+        originY: 0,
+        width: 16384,
+        height: 4,
+      };
+      png(join(context.mapDir, ref.file), 1, 1, outputTime);
+      png(join(context.mapDir, ref.waterMask!), 1, 1, outputTime);
+      const file = join(context.mapDir, 'manifest.json');
+      writeJson(file, { ...readJson<HdCacheManifest>(file), terrainMap: ref });
+    });
+    await prepareMap({ ...options, steps: ['upscale'] }, { upscale: runner });
+    expect(runner.mock.calls[0]?.[1]).toMatchObject({ scale });
+    expect(options.warn.mock.calls.map(([message]) => message).join('\n')).toContain(
+      `Reduced scale from 2 to ${scale} (16384x4) to stay within 16384 px per side.`,
+    );
+    expect(planPrepareMap({ ...options, steps: ['upscale'] })[0]).toMatchObject({
+      action: 'skip',
+      reason: 'upscaled terrain and mask are current',
+    });
+  });
+
   it('merges valid HD references and unknown fields back after extraction, keeping freshly extracted fields authoritative', async () => {
     const { options, mapDir, manifestFile } = fixture();
     const previous = readJson<HdCacheManifest>(manifestFile);
@@ -583,14 +619,19 @@ describe('local rematerialization command', () => {
 describe('terrain scale selection', () => {
   it.each([
     [4096, 4096, 4, 4],
-    [5000, 1000, 4, 3],
+    [5000, 1000, 4, 838 / 256],
+    [5461, 1000, 4, 3],
     [8192, 5000, 2, 2],
-    [8193, 1000, 2, 1],
+    [8193, 1000, 2, 511 / 256],
+    [9300, 2505, 2, 451 / 256],
     [1000, 16384, 4, 1],
     [100, 100, 2, 2],
-  ])('chooses the largest supported scale for %ix%i requested at %ix', (width, height, requested, expected) => {
-    expect(chooseScale(width, height, requested)).toBe(expected);
-  });
+  ])(
+    'chooses the requested scale or the largest fitting one for %ix%i requested at %ix',
+    (width, height, requested, expected) => {
+      expect(chooseScale(width, height, requested)).toBe(expected);
+    },
+  );
 
   it.each([
     [16385, 1, 2],

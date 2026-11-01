@@ -24,6 +24,7 @@
     "terrain-depth": "tsx src/cli/terrainDepth.mts",
     "terrain-patch": "tsx src/cli/terrainPatch.mts",
     "upscale": "tsx src/cli/upscale.mts",
+    "fit-terrain": "tsx src/cli/fitTerrain.mts",
     "sprites": "tsx src/cli/sprites.mts",
     "library": "tsx src/cli/library.mts",
     "zshape": "tsx src/cli/zshape.mts",

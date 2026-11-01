@@ -46,6 +46,8 @@ pnpm hd:effects -- [--game <install dir>] [--theater urban ...] [--out <dir>] [-
 # Upscale the scale-1 composite with a separately installed Real-ESRGAN ncnn-vulkan executable
 pnpm hd:upscale -- --map RiverRam [--cache <dir>] [--scale 2] [--model realesrgan-x4plus] [--tile 256]
 pnpm hd:upscale -- --map RiverRam --bin <binary-path> --compare 1200,700,160,100
+# Fit an existing integer-scale composite (e.g. a 2x re-detail) of a map too wide for it under 16384 px per side
+pnpm hd:fit-terrain -- --dir <cache>/<mapId> --input <terrain@2x.png> [--mask <water@2x.png>] [--write-manifest]
 
 # Give a cache extracted before the tile-depth atlas existed its terrain-depth.png (from the install), then rebuild
 # the composite; repair existing upscaled or redrawn terrain images only where the composite changed
@@ -216,10 +218,11 @@ missing, including under `--force`. Library sprite processing selects only incom
 completed pages. Incremental checks compare input/output existence and modification times, plus recorded input
 metadata signatures. Changes to generated manifest references alone do not invalidate unrelated steps.
 
-`--scale` defaults to 2 and accepts integers 1 through 4, matching the existing x4plus wrapper. The planner chooses
-the largest scale no greater than the request that fits within 16384 pixels on both axes; it fails if 1x cannot fit.
-Outputs above 8192 pixels produce a warning because that is WebGPU's default limit; the renderer requests the
-adapter maximum. Sprite output remains 2x regardless of terrain scale.
+`--scale` defaults to 2 and accepts integers 1 through 4, matching the existing x4plus wrapper. A request that fits
+within 16384 pixels on both axes is used as it is; otherwise the planner fits the terrain at the largest fractional
+scale that fits (see [Fitted terrain](#fitted-terrain-for-maps-too-wide-for-the-requested-scale)) and warns; it fails
+if 1x cannot fit. Outputs above 8192 pixels produce a warning because that is WebGPU's default limit; the renderer
+requests the adapter maximum. Sprite output remains 2x regardless of terrain scale.
 
 Each step prints its action, reason, and elapsed time. `<cache>/<mapId>/prepare.json` records the latest invocation,
 step results (including failures), timings, Node/package/cache format versions, and reusable input signatures.
@@ -297,10 +300,54 @@ the water mask are resized separately with pixel-centre bilinear sampling.
 
 The upscaler writes `terrain-map@<scale>x.png` and `terrain-water@<scale>x.png`, updating only `manifest.terrainMap`
 after successful processing. The original scale-1 files remain the source for subsequent runs. Binary progress is
-streamed to stderr, and temporary inference files are removed on success or failure. Outputs exceeding 8192 pixels
-on either axis produce a WebGPU texture-limit warning. `--compare x,y,w,h` selects a crop in scale-1 image pixels
-(relative to the image's top-left) and writes `upscale-compare.png`: nearest-neighbour original on the left,
-upscaled terrain on the right, both at the requested output scale.
+streamed to stderr, and temporary inference files are removed on success or failure. A request that would exceed
+`--max-side` (default 16384) on either axis is fitted instead (next section) and written as
+`terrain-map@<scale>x-fit.png`/`terrain-water@<scale>x-fit.png`. Outputs above 8192 pixels on either axis produce a
+warning, since that is WebGPU's default; the renderer requests the adapter maximum (up to 16384).
+`--compare x,y,w,h` selects a crop in scale-1 image pixels (relative to the image's top-left) and writes
+`upscale-compare.png`: nearest-neighbour original on the left, upscaled terrain on the right, both at the output
+scale.
+
+### Fitted terrain for maps too wide for the requested scale
+
+The renderer maps engine screen position `p` to composite pixel `(p - origin) * terrainMap.scale` and normalizes by
+the image's own size, so the scale need not be an integer. When the requested integer scale would exceed the limit on
+either axis (a 9300 x 2505 composite at 2x is 18600 px wide), `src/terrainScale.ts` chooses the largest multiple of
+1/256 that fits (`floor(16384 * 256 / longest side) / 256`; 451/256 = 1.76171875 for that map) and makes each side
+`ceil(side * scale)` (16384 x 4414). Output pixel `x` covers exactly `[x / scale, (x + 1) / scale)` original pixels;
+the last column and row may extend past the original edge and hold the mean of the part they cover, so the manifest
+scale registers the image exactly everywhere. A dyadic scale keeps `side * scale` exact in JSON, JavaScript and NumPy.
+A fit that lands on an integer is that integer scale with the usual names; integer requests that fit are processed
+byte for byte as before.
+
+A fitted composite reduces the model's 4x output with `resampleArea` (`src/node/upscale.ts`): the exact
+linear-light area filter for any reduction factor, weighting partly covered source pixels by their covered area; at
+integer factors it equals the integer box filter byte for byte. Alpha and the water mask use the same pixel-centre
+bilinear rule as integer scales, sampled at the manifest scale (`(x + 0.5) / scale - 0.5`) instead of the size
+ratio. The manifest records the fractional scale; the file names keep the requested integer with a `-fit` suffix.
+
+`hd:fit-terrain` fits an already produced integer-scale composite of such a map, for example a 2x
+`redetail_terrain.py` result, to the same scale and size the upscaler chooses for that map. `--dir` is the map cache
+with `manifest.json` (for the origin) and the scale-1 `terrain-map.png`; `--input` must be an exact integer multiple of
+it. Colour is area-filtered in linear light. Alpha is rebuilt from `terrain-map.png` by the bilinear rule, so it is
+byte-identical to the upscaler's fitted composite; `--alpha input` area-averages the input's alpha instead. `--mask`
+fits a water mask of the input's size with the plain-value area filter. Outputs default to `<input stem>-fit.png`
+and `<mask stem>-fit.png` in `--dir`; nothing else is written unless `--write-manifest` points `terrainMap` at the
+fitted pair (its mask is then made from `terrain-water.png` when `--mask` is absent). The fitted reference is printed
+as JSON. To install a fitted re-detail, prepare the map's fitted ESRGAN composite first (it sets the manifest scale
+and size), then fit the re-detail and name it in `materials.json` `terrainMap`, whose image must match that size:
+
+```bash
+pnpm hd:prepare -- --map XMP22S8 --cache "$SCRATCH_CACHE" --steps upscale       # terrain-map@2x-fit.png, scale 1.76171875
+pnpm hd:fit-terrain -- --dir "$SCRATCH_CACHE/XMP22S8" --input "$ART/terrain-map@2x-rd.png"
+```
+
+Python tools follow the same rule through `python/terrain_scale.py` (`scaled_size`, exact-registration `upsample`,
+exact `area_down`). `play_farm.py`, `waterline_mask.py`, `cliff_foot.py` and `rematerialize.py` accept a fractional
+scale; `redetail_terrain.py` refuses a fitted base with a message that names this route (it needs an integer multiple
+of the source), and `lake_shore.py` reads no scale (its pixel constants assume 2x), so run both on 2x inputs and fit
+their outputs. `hd:materials --terrain` colour matching likewise refuses a composite that is not an integer multiple
+of `terrain-map.png`; colour-match the 2x image, then fit it.
 
 ## Offline HD sprite atlases
 
@@ -941,7 +988,8 @@ in any cache: `<farm>/<map id>/manifest.json`, with the id compared without rega
 `theater` selecting `_library/<theatre>/`. A base map with HD work of its own (2x terrain, an HD sprite atlas or a
 `materials.json`, `lights.json`, `windows.json`, `normals.json` or `sprite-frame-patches.json` sidecar) is kept; a
 base map without any is superseded by the prepared one. A kept map whose terrain composite is still scale 1 takes
-only the prepared 2x composite and water mask when both manifests describe the same cells at the same origin: its
+only the prepared HD composite and water mask (2x, or fitted at a fractional scale with each side `ceil(side * scale)`)
+when both manifests describe the same cells at the same origin: its
 directory is realised in the farm through `cache_farm` and `terrainMap` is patched in the farm's manifest copy. The
 batch's `INVENTORY.json` (or `--inventory`) restricts the batch to rows with status `done` that are not
 `"active": false`. Running `build` again, also with another batch, leaves installed maps alone; the first batch to
@@ -953,8 +1001,8 @@ named by the optional sidecars exist, are complete PNG/JSON (a truncated PNG has
 size; no image exceeds `--max-texture` (default 16384, the upscaler's own cap; WebGPU guarantees only 8192, the
 report lists maps above that as `aboveGuaranteedLimit`); cell arrays match the grid; tile and sprite rectangles lie
 inside their atlases; objects name existing sprites, frames and voxels; no path leaves the farm; and the map's
-theatre library has every page, HD page and palette. Documented fallbacks are warnings, not errors: a scale-1
-composite, a map without an HD sprite atlas, a library page without an HD page, map-start objects whose type the
+theatre library has every page, HD page and palette. The report lists fitted composites with their scale as
+`fittedTerrain`. Documented fallbacks are warnings, not errors: a scale-1 composite, a map without an HD sprite atlas, a library page without an HD page, map-start objects whose type the
 theatre library lacks, and a `lights.json` written for another manifest. Exit status 1 on any error or broken
 top-level link. It does not decode pixels and is not a visual check. Test: `python3 -m unittest test_play_farm`.
 
