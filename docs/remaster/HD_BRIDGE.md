@@ -466,12 +466,16 @@ Limits:
 ## Frame rate
 
 The shown view is held to at most 60 drawn frames a second, also on a faster display, and to fewer while the game
-is behind its speed setting (see "Frame pacing" below). Its frame intervals feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): every half
-second it judges the last second of frames (their mean interval without the longest twentieth); over budget the
-renderer gives up its least visible work one tier down (`HdRenderer.setQualityTier`: first what reads a copy of the
-frame, the heat shimmer and the display-space colour mix of translucent engine effects, then the soft edge of unit
-shadows), far over budget it goes straight to the last tier, and after a calm stretch it tries one tier up again,
-waiting twice as long after a trial that fails. No tier changes a resolution or the outline pass: sprites and
+is behind its speed setting (see "Frame pacing" below). Its frame intervals, taken between display-frame timestamps
+as the pacer takes them, feed a `QualityGovernor` (`packages/hd-renderer/src/qualityGovernor.ts`): every half
+second it judges the last second of frames (their mean interval without the longest twentieth). After four seconds of
+verdicts over budget without a break the renderer gives up its least visible work one tier down
+(`HdRenderer.setQualityTier`: first what reads a copy of the frame, the heat shimmer and the display-space colour mix
+of translucent engine effects, then the soft edge of unit shadows), far over budget straight to the last tier. The
+step is kept only when the frames of the cheaper tier are within budget or at least 6 % shorter; otherwise it is taken
+back and steps down wait 30 seconds (doubling up to two minutes). After ten seconds within budget it tries one tier
+up again (also after thirty seconds at a tier still over budget), waiting twice as long after a trial that fails. No
+tier changes a resolution or the outline pass: sprites and
 terrain stay texel-exact and outlines smooth. Every tier draws the same passes: a change of tier builds, compiles and
 allocates nothing. The play toolbar's HD button reads `画面：高清 · 减负 n/2` while a tier above 0 is in use
 (`RuntimeToolbar.setHdQuality`); `?hd-governor=0` keeps every pass whatever the frame rate.
@@ -492,6 +496,21 @@ machine, no other session on it): with every pass (tier 0, governor off) 54 to 5
 seconds after the battle is revealed (about 300 objects, 140 engine animations and 720 to 750 draws; 1 % low 42 to 45) and 60 from then on (1 % low 47 to 55); with the governor 55 to 58 in the first twelve seconds and 60 from then
 on. The opening seconds are bound by the main thread, not by a pass a tier can give up: the view's own work is 9 to
 11 ms a frame there, 6.5 to 9 afterwards.
+
+Why the safeguard waits for sustained, relievable load (owner match of 2026-10-16 on build 11: Lost Lake, four
+players, 2056x1290 game frame at 1.5 device pixels per CSS pixel, 120 Hz display; the rows are in
+`packages/hd-renderer/tests/fixtures/ownerSessionFrames.json`): the earlier governor (one second over budget was a
+step, a step went straight to the last tier at one and a half times the budget, any second over budget restarted the
+twenty-second wait for a try up and a failed try doubled it up to five minutes) kept the view at its last tier for 143
+of the 221 five-second rows. In 62 of them the view drew 57 to 60 frames a second: short dips came at every tier,
+the last one included (03:32 to 03:34 in the rows), so each one either took a tier or failed the try to take it back.
+In the other 81 the view drew 46 to 57 frames a second at the last tier: animation-frame callbacks fell to 66 to 100
+a second without long tasks and the median frame interval was 19 to 21 ms instead of a whole number of refreshes, so
+the page was not even offered its frames on time; the tier the governor held did not bring them back to 60.
+Nothing in that telemetry shows a frame the GPU could not finish. Replayed with the frames as recorded at every tier,
+the current governor keeps full quality for 95 % of the frame time; replayed with the slow minutes made 15 % dearer
+at full quality and 7 % at tier 1 (as if the GPU had been the limit) it holds the last tier for two thirds of those
+minutes and returns to full quality after them.
 
 ### Frame pacing: the game's speed comes first
 

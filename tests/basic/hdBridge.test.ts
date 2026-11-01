@@ -2771,34 +2771,45 @@ describe('live original to HD transition', () => {
 });
 
 describe('HD bridge frame-time safeguard', () => {
-  it('steps the shown view down while frames stay over budget, says so, and starts the next match with everything', async () => {
+  it('steps the shown view down while frames stay over budget and that helps, says so, and starts the next match with everything', async () => {
     const harness = setup();
     const view = await goLive(harness);
     harness.setState(battle(3));
     await advance(16, 4);
     expect(harness.hdCanvas.style.display).toBe('block');
+    /** Display frames whose interval depends on the tier the view draws with (a scene the tiers relieve, or not). */
+    const frames = async (interval: (tier: number) => number, count: number) => {
+      for (let i = 0; i < count; i++) await advance(interval(view.hd.quality));
+    };
     // On budget: the view draws with everything, and the host knows.
     await advance(16, 300);
     expect(view.hd.quality).toBe(0);
     expect(harness.quality).toHaveBeenLastCalledWith(0, 4);
-    // A steady 18.2 ms (55 frames a second) is over budget (see FRAME_BUDGET_MARGIN): one tier down after about a
-    // second of frames, the next one after another second.
-    await advance(18.2, 60);
+    // Two seconds of slow frames (new art, a burst of engine work) are not a reason to give anything up.
+    await advance(30, 60);
+    await advance(16, 300);
+    expect(harness.quality.mock.calls.some(([tier]) => tier !== null && tier > 0)).toBe(false);
+    // A steady 18.2 ms (55 frames a second) with everything is over budget (see FRAME_BUDGET_MARGIN); tier 1 holds the
+    // budget: one tier down after about four seconds of verdicts over budget, and it stays.
+    await frames((tier) => (tier === 0 ? 18.2 : 16), 300);
     expect(view.hd.quality).toBe(1);
     expect(harness.quality).toHaveBeenLastCalledWith(1, 4);
-    await advance(18.2, 60);
-    expect(view.hd.quality).toBe(2);
-    expect(harness.quality).toHaveBeenLastCalledWith(2, 4);
-    // A pause of the page (a dialog, another tab) is not load: the frames before it are forgotten.
-    await advance(18.2, 20);
+    await frames((tier) => (tier === 0 ? 18.2 : 16), 300);
+    expect(view.hd.quality).toBe(1);
+    // Frames as slow at every tier: the next step buys nothing and is taken back.
+    await advance(18.2, 520);
+    expect(harness.quality).toHaveBeenCalledWith(2, 4);
+    expect(view.hd.quality).toBe(1);
+    expect(harness.quality).toHaveBeenLastCalledWith(1, 4);
+    // A pause of the page (a dialog, another tab) is not load: the slow frames before it are forgotten.
+    await advance(30, 100);
     await advance(4000);
-    await advance(18.2, 40);
-    expect(view.hd.quality).toBe(2);
-    // 30 ms frames, far over budget: down again within about a second.
-    await advance(30, 40);
+    await advance(30, 100);
+    expect(view.hd.quality).toBe(1);
+    // 30 ms frames, far over budget, on budget only at the last tier: straight there, and it stays.
+    await frames((tier) => (tier < 3 ? 30 : 16), 200);
     expect(view.hd.quality).toBe(3);
-    await advance(4000);
-    await advance(30, 80);
+    await frames((tier) => (tier < 3 ? 30 : 16), 300);
     expect(view.hd.quality).toBe(3);
     // Another match on the map: out of sight again, at full quality, and the host hears that no HD view is shown
     // until this one is.

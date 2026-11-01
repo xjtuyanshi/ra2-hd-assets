@@ -244,10 +244,18 @@ Every tier draws the same passes with the same post graph: a step builds, compil
 (Multisampling used to be a tier of its own. It smoothed only the outlines of voxel units and cost as much as the
 rest of the scene pass together: 13 ms of a 30 ms frame in the staged battle below.) `src/qualityGovernor.ts`
 (`QualityGovernor`) chooses the tier from the intervals between presented frames. Every half second it judges the
-last second of frames by their mean interval without the longest twentieth: over budget is one tier down, far over
-budget (one and a half times) straight to the last tier; after a calm stretch it tries one tier up, returns at the
-first verdict over budget and then waits twice as long. A view that misses every tenth refresh is over budget
-although its median frame is on time, which is why the verdict is a trimmed mean.
+last second of frames by their mean interval without the longest twentieth. A view that misses every tenth refresh is
+over budget although its median frame is on time, which is why the verdict is a trimmed mean. Only four seconds of
+verdicts over budget without a break take a tier away (one down; straight to the last tier when the frames are one
+and a half times the budget): seconds of slow frames show at every tier alike. The frames of the cheaper tier are then
+judged for three seconds; unless they are within budget or at least 6 % shorter, the step bought nothing (the main
+thread, the compositor or another process held the frames back) and is taken back, and no step down follows for 30
+seconds (doubling up to two minutes). After ten seconds within budget it tries one tier up, after thirty seconds at a
+tier still over budget as well; a try whose frames stay over budget and slower than at the tier below is given up and
+the wait doubles. Replayed on the telemetry of an owner match (2026-10-16, Lost Lake, four players) in which the
+earlier governor (one second over budget was a step, any second over budget restarted the wait for a try up) spent
+two thirds of the match at its last tier, it keeps full quality for 95 % of the frames
+(`tests/qualityGovernor.test.ts`).
 
 **Post graph forms (`HdRenderer.switchPipeline`).** The post graph has two forms in a match, with the mist pass and
 without it. Each is built once and parked while the other draws (only the scene and top pass give up their render

@@ -95,8 +95,9 @@ export interface HdBridgeHost {
 
 /**
  * The frame time the shown view is held to (60 presented frames a second, also on a faster display): when frames stay
- * above it the view gives up its least visible passes tier by tier, and takes them back after a calm stretch
- * (QualityGovernor). `?hd-governor=0` keeps every pass whatever the frame rate.
+ * above it for seconds and giving up passes makes them shorter, the view gives up its least visible passes tier by
+ * tier, and takes them back after a calm stretch (QualityGovernor). `?hd-governor=0` keeps every pass whatever the
+ * frame rate.
  */
 const FRAME_BUDGET_MS = 1000 / 60;
 /**
@@ -1617,11 +1618,14 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (fallback && now >= fallback.until) publish(null);
     if (live && (hole || keyRect)) {
       // The display frame's own time is steady from frame to frame; the clock read inside the callback is not.
-      if (!pacer || pacer.due(typeof frameTime === 'number' ? frameTime : now)) {
+      const displayTime = typeof frameTime === 'number' ? frameTime : now;
+      if (!pacer || pacer.due(displayTime)) {
         layout();
-        // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees.
-        if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(judgedInterval(now - shownAt)));
-        shownAt = now;
+        // Frames of the shown view feed the safeguard: the interval between two of them is what the player sees. It
+        // is taken between display frames, as the pacer takes it: a callback that runs a few ms late because the
+        // main thread was busy is not a frame that reached the screen late.
+        if (governor && shownAt !== null) live.hd.setQualityTier(governor.frame(judgedInterval(displayTime - shownAt)));
+        shownAt = displayTime;
         if (native && enabled && revealed && fadeFinished && hole) {
           const next = nativeDrawQueue.shift();
           if (next) {
