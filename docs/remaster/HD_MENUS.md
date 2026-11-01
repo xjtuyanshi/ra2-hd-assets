@@ -67,6 +67,16 @@ remain visible through exact control-sized apertures; their imagery is not claim
 Other verified families: `BKGDSM` 472x448, `BKGDMD` 632x568, Yuri variants and `PUDLGBG` popups.
 Render labels/list entries/numbers as sharp page text at output DPR using original text rectangles.
 An optional `fontMetrics` JSON asset supplies the installed font's UTF-16 advances and ink boxes.
+Its optional `inkArea` map gives each visible glyph's lit source-bitmap pixel count (style B, the owner's choice).
+`scripts/remaster/native/menu-font-ink.mjs` derives it from the installed `game.fnt`, recomputing and
+rejecting any ink box that disagrees with the reviewed metrics; the output remains a private asset.
+With `inkArea` and no outlines, `src/graphics/text/coverageGlyphFit.ts` fits a smooth host glyph to each
+source ink box and measures its rendered ink at the actual device scale: it picks the heaviest supplied face
+that is not heavier than the source (within 8%), then adds a round-joined stroke until ink matches within 2%.
+`src/games/yr/menuTypography.ts` supplies the YR policy: a PingFang SC 100–600 ladder for Chinese with a
+bounded 1.5 stretch for one-stroke glyphs, and Arial 400/700 and Arial Black 900 for small bold Latin/digits.
+Every glyph a screen can show, including unscrolled list rows, is fitted (8 ms per frame) before the layer
+covers the original; a source glyph that no host face draws keeps the whole original screen.
 Its optional `outlines` map contains prebuilt closed SVG paths in each glyph's ink-local coordinates.
 Source contours are traced and smoothed once when producing the private asset, then cached as page paths;
 the frame renderer does no tracing or bitmap enlargement. An outlines-equipped font with a missing visible glyph
@@ -75,6 +85,10 @@ for each produced glyph; device-resolution browser crops remain necessary to est
 Latin letters and digits use their small bold ink; CJK text uses its full-height ink, in the same line box.
 Punctuation keeps its measured advance rather than acquiring a host font's full-width cell.
 An unknown glyph rejects the complete screen; verified missing glyphs are distinct from unknown entries.
+Ink matching is a measured contract, not a stem-width guess: at the owner's menu scale (4.3 device pixels per
+game pixel) PingFang SC Regular renders 1.2–1.6 times the source ink, so fitted Chinese uses lighter faces
+plus stroke, while Latin and digits need Arial Bold, Arial Black or stroke. Punctuation and one-pixel bars
+whose source box is fully lit cannot reach 1.0 with antialiased edges; they stay up to 1.7 times heavier.
 The optional `toneRegions` manifest entries apply measured RGB gains to asset-pixel rectangles once at load.
 Compare each calibrated region against its source, including hue and clipping; the mean brightness must stay within 1%.
 Retained source shell pieces and previews remain original elements and are not claimed as redrawn art.

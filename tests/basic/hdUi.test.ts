@@ -87,6 +87,24 @@ describe('source-bound HD menu typography', () => {
     expect(layoutYrMenuText('AB', font)).toBeNull();
   });
 
+  it('carries source ink areas and weight ladders, and never mixes in an unweighted glyph', () => {
+    const font = parseYrMenuFont({ ...metrics(), inkArea: { '65': 40, '66': 35, '20013': 60 } })!;
+    const [line] = layoutYrMenuText('A 中', font)!;
+    expect(line!.glyphs.map(({ inkArea, maxAnisotropy }) => [inkArea, maxAnisotropy])).toEqual([
+      [40, 4],
+      [undefined, 4],
+      [60, 1.5],
+    ]);
+    expect(line!.glyphs[0]!.faces.map(({ weight }) => weight)).toEqual([400, 700, 900]);
+    expect(line!.glyphs[2]!.faces.at(-1)!.family).toContain('PingFang SC');
+    expect(line!.glyphs[2]!.faces.map(({ weight }) => weight)).toEqual([100, 200, 300, 400, 500, 600]);
+    const partial = parseYrMenuFont({ ...metrics(), inkArea: { '65': 40 } })!;
+    expect(layoutYrMenuText('A ', partial)).not.toBeNull();
+    expect(layoutYrMenuText('AB', partial)).toBeNull();
+    for (const inkArea of [{ '65': 64 }, { '65': 0 }, { '65': 1.5 }, { '67': 4 }, { '32': 1 }, { toString: 1 }, [1]])
+      expect(parseYrMenuFont({ ...metrics(), inkArea })).toBeNull();
+  });
+
   it('rejects unclosed, out-of-box and malformed outlines before covering original text', () => {
     for (const path of [
       'M0 0L7 9',
@@ -2218,6 +2236,161 @@ describe('HD setup complete geometry and popup fallback', () => {
       expect(canvas.style.display).toBe('none');
       expect(canvas.dataset.fallback).toBe('control-geometry');
       expect(calls).toEqual([]);
+    } finally {
+      menus?.dispose();
+    }
+  });
+  it('fits ink-weighted glyphs before covering the screen and keeps it original until all are fitted', async () => {
+    const snapshot = setup();
+    for (const control of snapshot.controls) {
+      control.text = 'AB';
+      if (control.items) control.items = [control.className === 'ListBox' ? '中' : 'B'];
+      if (control.slider) control.slider.valueText = 'A';
+    }
+    snapshot.controls.find(({ id }) => id === 1696)!.edit = {
+      caret: 0,
+      firstVisible: 0,
+      caretVisible: false,
+      caretColor: 0xffff00,
+    };
+    const buttons = { normal: 'plate.png', hover: 'plate.png', pressed: 'plate.png', disabled: 'plate.png' };
+    vi.stubGlobal('fetch', async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith('menus.json')
+          ? {
+              version: 1,
+              strings: 'strings.json',
+              fontMetrics: 'font.json',
+              controlSkin: 'vector-v1',
+              main: { shell: 'shell.png', buttons },
+              setup: { background: 'setup.png', buttons },
+              themes: {},
+            }
+          : url.endsWith('font.json')
+            ? {
+                version: 1,
+                lineHeight: 17,
+                spacing: 1,
+                glyphs: { 65: [7, 0, 4, 7, 9], 66: [7, 0, 4, 7, 9], 153: [9, 0, 4, 9, 5], 20013: [15, 1, 1, 13, 15] },
+                inkArea: { 65: 30, 66: 34, 153: 25, 20013: 60 },
+              }
+            : {},
+      blob: async () => new Blob(),
+    }));
+    vi.stubGlobal('createImageBitmap', async () => ({ close: vi.fn() }));
+    // The measuring surface: every face fills a quarter of its box.
+    const measured: string[] = [];
+    const surface = recording();
+    let measuredInk = 0;
+    const measuring = new Proxy(surface.ctx as unknown as Record<string, unknown>, {
+      get(target, name: string) {
+        if (name === 'fillText')
+          return (text: string) => {
+            measured.push(text);
+            measuredInk = 0.25;
+          };
+        if (name === 'measureText')
+          return (text: string) =>
+            text === '\x99'
+              ? {
+                  actualBoundingBoxLeft: 0,
+                  actualBoundingBoxRight: 0,
+                  actualBoundingBoxAscent: 0,
+                  actualBoundingBoxDescent: 0,
+                }
+              : (target.measureText as (text: string) => TextMetrics)(text);
+        if (name === 'getImageData')
+          return (_x: number, _y: number, width: number, height: number) => ({
+            data: new Uint8ClampedArray(width * height * 4).fill(Math.round(255 * measuredInk)),
+          });
+        return target[name];
+      },
+    });
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        width = 1;
+        height = 1;
+        getContext() {
+          return measuring;
+        }
+      },
+    );
+    let clock = 0;
+    vi.stubGlobal('performance', { now: () => (clock += 5) });
+    const { ctx, calls } = recording();
+    const canvas = {
+      style: {} as Record<string, string>,
+      dataset: {} as Record<string, string>,
+      width: 0,
+      height: 0,
+      setAttribute: vi.fn(),
+      getContext: () => ctx,
+      remove: vi.fn(),
+    };
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('document', { createElement: () => canvas, pointerLockElement: null });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const polls: (() => void)[] = [];
+    vi.stubGlobal(
+      'window',
+      Object.assign(new EventTarget(), {
+        devicePixelRatio: 1.5,
+        setTimeout: (callback: () => void) => polls.push(callback),
+      }),
+    );
+    const screen = Object.assign(new EventTarget(), {
+      offsetLeft: 0,
+      offsetTop: 0,
+      clientWidth: 800,
+      clientHeight: 600,
+      parentElement: { appendChild: vi.fn() },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+    });
+    const menus = await startHdMenus({
+      screen: screen as unknown as HTMLCanvasElement,
+      vm: { getMenuSnapshot: async () => structuredClone(snapshot) } as unknown as Parameters<
+        typeof startHdMenus
+      >[0]['vm'],
+      side: () => 0,
+      pageCursorAvailable: () => true,
+      frameSize: () => ({ width: 800, height: 600 }),
+      pictureGeneration: () => 1,
+    });
+    try {
+      await settle();
+      frames.shift()!(0);
+      // One glyph per budget: the screen stays original while fitting.
+      expect(canvas.style.display).toBe('none');
+      expect(canvas.dataset.fallback).toBe('font-fitting');
+      expect(calls.some(({ name }) => name === 'fillText')).toBe(false);
+      expect(frames).toHaveLength(1);
+      while (frames.length) frames.shift()!(0);
+      expect(canvas.style.display).toBe('block');
+      // Every distinct glyph, including unscrolled list rows, was measured.
+      expect(new Set(measured)).toEqual(new Set(['A', 'B', '中']));
+      const drawn = calls.filter(({ name }) => name === 'fillText' || name === 'strokeText');
+      expect(drawn.length).toBeGreaterThan(0);
+      for (const { args, style } of drawn) {
+        expect(String(style.font)).toMatch(/^\d00 64px /);
+        expect(style.font).toContain(args[0] === '中' ? 'PingFang SC' : 'Arial');
+      }
+      // A source glyph no host face can draw keeps the complete original.
+      snapshot.controls.find(({ id }) => id === 1559)!.text = 'A\x99';
+      polls.shift()!();
+      await settle();
+      while (frames.length) frames.shift()!(0);
+      expect(canvas.style.display).toBe('none');
+      expect(canvas.dataset.fallback).toBe('unknown-font-glyph');
     } finally {
       menus?.dispose();
     }

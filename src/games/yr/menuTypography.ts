@@ -1,3 +1,5 @@
+import type { GlyphFace } from '../../graphics/text/coverageGlyphFit';
+
 /** Source font measurements are private assets, just like the menu artwork. */
 export interface YrMenuFont {
   version: 1;
@@ -9,6 +11,11 @@ export interface YrMenuFont {
   aliases?: Readonly<Record<string, string>>;
   /** Prebuilt smooth source contours in ink-local coordinates, filled even-odd. */
   outlines?: Readonly<Record<string, string>>;
+  /**
+   * Lit source-bitmap pixels per visible glyph. When present (and without
+   * outlines), smooth host-font glyphs are fitted to this ink weight.
+   */
+  inkArea?: Readonly<Record<string, number>>;
 }
 
 export interface YrMenuTextGlyph {
@@ -18,7 +25,27 @@ export interface YrMenuTextGlyph {
   ink: { x: number; y: number; width: number; height: number };
   font: string;
   path?: string;
+  /** Candidate host faces, lightest first, for ink-weight fitting. */
+  faces: readonly GlyphFace[];
+  /** Source ink area in square source pixels when the font supplies it. */
+  inkArea?: number;
+  /** Largest axis stretch allowed when fitting the host glyph to its box. */
+  maxAnisotropy: number;
 }
+
+// The game's small Latin glyphs have bold stems; Chinese glyphs have
+// full-height one-pixel strokes. Weight ladders span both so the fitter can
+// reach the measured source ink without relying on one host weight.
+const LATIN_FACES: readonly GlyphFace[] = [
+  { weight: 400, family: 'Arial, Helvetica, sans-serif' },
+  { weight: 700, family: 'Arial, Helvetica, sans-serif' },
+  { weight: 900, family: '"Arial Black", Arial, sans-serif' },
+];
+const CJK_FAMILY = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+const CJK_FACES: readonly GlyphFace[] = [100, 200, 300, 400, 500, 600].map((weight) => ({
+  weight,
+  family: CJK_FAMILY,
+}));
 
 export interface YrMenuTextLine {
   glyphs: YrMenuTextGlyph[];
@@ -101,6 +128,13 @@ export function parseYrMenuFont(value: unknown): YrMenuFont | null {
       if (!glyph || !target || glyph.some((part, index) => part !== target[index])) return null;
     }
   }
+  if (font.inkArea !== undefined) {
+    if (!font.inkArea || typeof font.inkArea !== 'object' || Array.isArray(font.inkArea)) return null;
+    for (const [code, area] of Object.entries(font.inkArea)) {
+      const metric = Object.hasOwn(font.glyphs, code) ? font.glyphs[code] : undefined;
+      if (!metric || !Number.isInteger(area) || area < 1 || area > metric[3] * metric[4]) return null;
+    }
+  }
   if (font.outlines !== undefined) {
     if (!font.outlines || typeof font.outlines !== 'object' || Array.isArray(font.outlines)) return null;
     for (const [code, path] of Object.entries(font.outlines)) {
@@ -135,21 +169,26 @@ export function layoutYrMenuText(text: string, font: YrMenuFont): YrMenuTextLine
     // Once a traced font is selected, a missing contour must keep the complete
     // screen original instead of mixing source outlines with host-face glyphs.
     if (font.outlines && width > 0 && path === undefined) return null;
+    const inkArea = font.inkArea?.[String(code)];
+    // Likewise a weight-fitted font never mixes in an unfitted glyph.
+    if (font.inkArea && width > 0 && inkArea === undefined) return null;
     const line = lines[lines.length - 1]!;
     const glyph = font.aliases?.[String(code)] ?? text[i]!;
-    // The game's small Latin glyphs have bold stems; Chinese glyphs retain
-    // their full-height regular strokes. Output ink is fitted to the supplied
-    // source box, so the host font cannot widen a narrow combo or list row.
+    // Output ink is fitted to the supplied source box, so the host font cannot
+    // widen a narrow combo or list row.
+    const latin = glyph.charCodeAt(0) < 256;
     line.glyphs.push({
       text: glyph,
       x: line.width,
       advance: advance + font.spacing,
       ink: { x, y, width, height },
-      font:
-        glyph.charCodeAt(0) < 256
-          ? '900 16px "Arial Black", Arial, sans-serif'
-          : '16px "PingFang SC", "Microsoft YaHei", sans-serif',
+      font: latin ? '900 16px "Arial Black", Arial, sans-serif' : '16px "PingFang SC", "Microsoft YaHei", sans-serif',
       ...(path === undefined ? {} : { path }),
+      faces: latin ? LATIN_FACES : CJK_FACES,
+      ...(inkArea === undefined ? {} : { inkArea }),
+      // Narrow Latin glyphs (j, f, slashes) need tall boxes; Chinese
+      // one-stroke glyphs must not stretch a thin bar to a 2-pixel box.
+      maxAnisotropy: latin ? 4 : 1.5,
     });
     line.width += advance + font.spacing;
   }

@@ -9,7 +9,19 @@ import {
   YR_HD_DIALOG_ART_SIZE,
 } from '../../../games/yr/hdMenus';
 import { devicePixelBox } from './devicePixelBox';
-import { layoutYrMenuText, parseYrMenuFont, type YrMenuFont } from '../../../games/yr/menuTypography';
+import {
+  layoutYrMenuText,
+  parseYrMenuFont,
+  type YrMenuFont,
+  type YrMenuTextGlyph,
+} from '../../../games/yr/menuTypography';
+import {
+  createCanvasGlyphSurface,
+  createCoverageGlyphFitter,
+  drawFittedGlyph,
+  type CoverageGlyphFitter,
+  type CoverageGlyphTarget,
+} from '../../../graphics/text/coverageGlyphFit';
 
 interface ButtonArt {
   normal: string;
@@ -32,6 +44,23 @@ interface MenuArt {
 type Rect = MenuControlSnapshot['rect'];
 // The font is session-owned; cached paths become collectable with that font.
 const outlinePaths = new WeakMap<YrMenuFont, Map<string, Path2D>>();
+// Ink-weight fits for fonts that supply source ink areas, with the output
+// scale (device pixels per game pixel) of the frame being drawn.
+const glyphFits = new WeakMap<YrMenuFont, { fitter: CoverageGlyphFitter; scale: number }>();
+/** Per-frame fitting budget; unfinished screens stay original and retry next frame. */
+const GLYPH_FIT_BUDGET_MS = 8;
+
+function glyphTarget(glyph: YrMenuTextGlyph): CoverageGlyphTarget | null {
+  if (glyph.inkArea === undefined || !glyph.ink.width || !glyph.ink.height) return null;
+  return {
+    text: glyph.text,
+    faces: glyph.faces,
+    width: glyph.ink.width,
+    height: glyph.ink.height,
+    ink: glyph.inkArea,
+    maxAnisotropy: glyph.maxAnisotropy,
+  };
+}
 
 /** The original control geometry remains the only input target. */
 function drawRecess(ctx: CanvasRenderingContext2D, r: Rect, enabled: boolean, transparent = false): void {
@@ -209,6 +238,20 @@ function drawControlText(
       const left = align === 'center' ? r.x + (r.width - line.width * scale) / 2 : r.x + leftInset;
       for (const glyph of line.glyphs) {
         if (!glyph.ink.width || !glyph.ink.height) continue;
+        const target = glyphTarget(glyph);
+        const fits = target ? glyphFits.get(font) : undefined;
+        const fit = target && fits ? fits.fitter.get(target, fits.scale) : undefined;
+        if (fit) {
+          drawFittedGlyph(
+            ctx,
+            fit,
+            glyph.text,
+            left + (glyph.x + glyph.ink.x) * scale,
+            lineTop + index * font.lineHeight + glyph.ink.y,
+            scale,
+          );
+          continue;
+        }
         if (glyph.path !== undefined) {
           let paths = outlinePaths.get(font);
           if (!paths) outlinePaths.set(font, (paths = new Map()));
@@ -401,6 +444,11 @@ export async function startHdMenus(
       const parsed = fontResponse.ok ? parseYrMenuFont(await fontResponse.json()) : null;
       if (!parsed) throw new Error('Menu font measurements unavailable');
       font = parsed;
+      if (font.inkArea && !font.outlines) {
+        const surface = createCanvasGlyphSurface();
+        if (!surface) throw new Error('Menu glyph surface unavailable');
+        glyphFits.set(font, { fitter: createCoverageGlyphFitter(surface), scale: 0 });
+      }
     }
     const canvas = document.createElement('canvas');
     canvas.id = 'hd-menus';
@@ -488,16 +536,16 @@ export async function startHdMenus(
         hide('unknown-text');
         return;
       }
-      if (
-        font &&
-        [
-          ...texts,
-          ...controls.flatMap((control) => [
-            ...(control.items ?? []),
-            ...(control.slider?.valueText ? [control.slider.valueText] : []),
-          ]),
-        ].some((text) => text !== null && layoutYrMenuText(text, font!) === null)
-      ) {
+      const fontLayouts = font
+        ? [
+            ...texts,
+            ...controls.flatMap((control) => [
+              ...(control.items ?? []),
+              ...(control.slider?.valueText ? [control.slider.valueText] : []),
+            ]),
+          ].map((text) => (text === null ? [] : layoutYrMenuText(text, font!)))
+        : [];
+      if (fontLayouts.some((lines) => lines === null)) {
         hide('unknown-font-glyph');
         return;
       }
@@ -517,6 +565,26 @@ export async function startHdMenus(
       Object.assign(canvas.style, box.style);
       if (canvas.width !== box.width) canvas.width = box.width;
       if (canvas.height !== box.height) canvas.height = box.height;
+      const fits = font ? glyphFits.get(font) : undefined;
+      if (fits) {
+        // Fit every glyph the screen can show, including unscrolled list rows,
+        // before covering the original; a partial screen stays original.
+        fits.scale = Math.sqrt((canvas.width / size.width) * (canvas.height / size.height));
+        const targets = fontLayouts.flatMap((lines) =>
+          lines!.flatMap((line) => line.glyphs.flatMap((glyph) => glyphTarget(glyph) ?? [])),
+        );
+        if (!fits.fitter.prepare(targets, fits.scale, GLYPH_FIT_BUDGET_MS)) {
+          hide('font-fitting');
+          schedule();
+          return;
+        }
+        // A source glyph the host faces cannot draw (a C1 control code, say)
+        // would silently vanish; keep the complete original screen instead.
+        if (targets.some((target) => !fits.fitter.get(target, fits.scale))) {
+          hide('unknown-font-glyph');
+          return;
+        }
+      }
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingEnabled = true;
