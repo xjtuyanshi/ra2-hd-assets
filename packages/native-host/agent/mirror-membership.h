@@ -1,6 +1,30 @@
 #ifndef NATIVE_HOST_MIRROR_MEMBERSHIP_H
 #define NATIVE_HOST_MIRROR_MEMBERSHIP_H
 #include <stdint.h>
+#include <string.h>
+
+/* Page addresses have twenty significant bits. Two stable radix passes avoid
+ * a CRT comparator call for every ordering decision at each logic boundary.
+ * Scratch is owned by the mirror and allocated before capture; copying whole
+ * records preserves the requesting owner and pending dirty generation. */
+static void nh_sort_pages(struct nh_page *pages, struct nh_page *scratch, uint32_t count) {
+    uint32_t offsets[1024];
+    if (count < 2) return;
+    for (uint32_t shift = 12; shift <= 22; shift += 10) {
+        struct nh_page *source = shift == 12 ? pages : scratch;
+        struct nh_page *target = shift == 12 ? scratch : pages;
+        uint32_t total = 0;
+        memset(offsets, 0, sizeof(offsets));
+        for (uint32_t i = 0; i < count; ++i)
+            ++offsets[(source[i].address >> shift) & 1023u];
+        for (uint32_t i = 0; i < 1024; ++i) {
+            uint32_t size = offsets[i];
+            offsets[i] = total; total += size;
+        }
+        for (uint32_t i = 0; i < count; ++i)
+            target[offsets[(source[i].address >> shift) & 1023u]++] = source[i];
+    }
+}
 
 /* Both page lists are sorted and unique. Return removed membership separately
  * from new-page indices, so one short-lived allocation cannot force a full map

@@ -28,6 +28,9 @@ Every integration edit in C source is marked `Native-host bridge`.
   it as RGB565. A private GUI-thread credit refresh captures the current primary
   even when a static menu does not present again. Nonblocking renderer/surface
   locks protect the copy; a bounded GUI timer retries contention.
+  The helper brackets completed hidden painting with agent-owned menu state
+  capture and supplies the resulting generation with those exact pixels.
+  A failed or changing capture keeps the complete original picture unpaired.
 - `inc/ddsurface.h`: declare the private GUI-owner current-primary capture helper.
 - Hidden menu capture paints native controls into a private primary-baseline DIB:
   real game/control `WM_PAINT` handlers render their own resources. Scoped

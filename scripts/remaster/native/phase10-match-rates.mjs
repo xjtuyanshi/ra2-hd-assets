@@ -267,6 +267,8 @@ export async function startPhase10MatchRates({
           enabled: diagnostic.enabled,
           shown: diagnostic.shown,
           visibility: document.visibilityState,
+          discreteInput: window.__phase7InputProbe?.discrete ?? null,
+          inputLifecycle: window.__phase7InputProbe?.lifecycle ?? null,
           viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
           timeline: bridge.timeline,
         };

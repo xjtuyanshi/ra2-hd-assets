@@ -57,13 +57,18 @@ enum nh_type { NH_HELLO=1, NH_READ=2, NH_WRITE=3, NH_ALLOC=4, NH_FREE=5, NH_SUBS
  removedCount then sorted removed page addresses after all samples (complete non-reset only).
  Flag16 appends the applied subscription revision u32 after any removal list (complete only).
  Samples direct-read on game thread same frame.
- CREDIT count; PICTURE frame,width,height,rowCount; rows y,encodedBytes,segments;
+ CREDIT count (bit31 opts into advertised menuIdentity), optional options (bit0 opts into advertised drawJournal).
+ PICTURE frame,width,height,rowCount; rows y,encodedBytes,segments;
  segments u16: high bit key run, lower15 count; literal segments followed by RGB565 pixels.
+ Opted-in pictures append tag 0x314e454d,menuGeneration; zero retains the whole original.
+ Any requested draw journal follows that menu identity and keeps its own bounded length.
  INPUT kind,a,b,c (1 postMessage,2 key,3 cursor); HOOK enabled; INPUT_STATE reply JSON.
  ACK frame marks that exact publication acknowledged; only an acknowledged
  ordered prefix releases credit. Notification, no reply.
  Legacy subscriptions retain one in-flight mirror; opted-in subscriptions allow two.
- HELLO / DIAGNOSTICS UTF-8 JSON. Ordinary successful replies are empty unless stated.
+ HELLO / DIAGNOSTICS UTF-8 JSON. Empty DIAGNOSTICS retains the complete report;
+ advertised mirrorFaultSnapshot permits u32 flag 1 for only lastMirrorFault.
+ Ordinary successful replies are empty unless stated.
  */
 int nh_safe_read(uint32_t address, void *out, uint32_t length);
 struct nh_read_region_cursor;
@@ -93,8 +98,12 @@ void nh_allocation_pin(uint32_t address, uint32_t length);
 void nh_dispatch_mirror(uint16_t type, uint32_t id, const uint8_t *payload, uint32_t length);
 void nh_mirror_disconnect(void);
 void nh_mirror_diagnostics(char *out, uint32_t capacity);
+void nh_mirror_fault_diagnostics(char *out, uint32_t capacity);
 void nh_logic_tick(void);
 void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp);
+void nh_present_menu(const void *pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp, uint32_t generation);
+void nh_menu_prepare(void);
+uint32_t nh_menu_complete(void);
 void nh_dispatch_input(uint16_t type, uint32_t id, const uint8_t *payload, uint32_t length);
 void nh_input_disconnect(void);
 void nh_cursor_snapshot(uint32_t id, int x, int y);
@@ -148,6 +157,9 @@ int nh_picture_message(HWND window, UINT message, WPARAM wparam);
 #define nh_present(...) ((void)0)
 #define nh_draw_journal_surface_write(...) ((void)0)
 #define nh_draw_journal_surface_copy(...) 0
+#define nh_present_menu(...) ((void)0)
+#define nh_menu_prepare() ((void)0)
+#define nh_menu_complete() 0
 #define nh_input_active() 0
 #define nh_input_cursor(point) 0
 #define nh_input_set_cursor(x, y) 0

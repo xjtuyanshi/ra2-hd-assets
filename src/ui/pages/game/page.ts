@@ -191,6 +191,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   let nativeCursor: Awaited<ReturnType<(typeof import('./nativeCursor'))['createNativeCursor']>> = null;
   let hdMenus: import('./hdMenus').HdMenus | null = null;
   const menuAbort = new AbortController();
+  const menuFrameListeners = new Set<() => void>();
   let hdViewEnabled = true;
   /** Game frames presented since the page started this session (the telemetry takes differences). */
   let presentedFrames = 0;
@@ -257,6 +258,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     presented: () => {
       effects.publishStatus(frameRenderer.upscaleStatus);
       presentedFrames++;
+      for (const listener of menuFrameListeners) listener();
       toolbar.recordPresentedFrame();
       feelTelemetry?.frame('original', presenter.frameVersion);
       if (!nativeCursor) feelTelemetry?.pointerDrawn();
@@ -1113,6 +1115,11 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
             pageCursorAvailable: () => nativeCursor !== null,
             battleActive: () => hdCleanup?.battleActive?.() ?? false,
             signal: menuAbort.signal,
+            pictureGeneration: () => presenter.displayedFrame?.menuGeneration,
+            onFramePresented: (listener) => {
+              menuFrameListeners.add(listener);
+              return () => menuFrameListeners.delete(listener);
+            },
             pointerPosition: () => inputPointerPosition?.() ?? null,
             frameSize: () =>
               presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null,

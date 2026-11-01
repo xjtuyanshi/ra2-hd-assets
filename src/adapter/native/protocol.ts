@@ -1,4 +1,4 @@
-import type { MenuSnapshot } from '../../vm86/menuSnapshot';
+import type { MenuControlSnapshot, MenuSnapshot } from '../../vm86/menuSnapshot';
 import type { FrameOverlayJournal } from '../../graphics/frameOverlayData';
 
 /** Loopback native-host wire format. No executable-specific facts belong here. */
@@ -68,9 +68,11 @@ export interface NativeHello {
     maxBudgetUs?: number;
     subscribeRevision?: boolean;
     mirrorWindow?: 1 | 2;
+    mirrorFaultSnapshot?: boolean;
     cursorSnapshot?: boolean;
     menuSnapshot?: boolean;
     drawJournal?: boolean;
+    menuIdentity?: boolean;
   };
 }
 export interface NativeRange {
@@ -106,6 +108,7 @@ export interface NativeMirrorUpdate {
   subscriptionRevision?: number;
 }
 export interface NativePicture {
+  menuGeneration?: number;
   frame: number;
   width: number;
   height: number;
@@ -218,8 +221,12 @@ export function decodeMenuSnapshot(payload: Uint8Array): MenuSnapshot | null {
   const value = decodeJson(payload) as MenuSnapshot | null;
   if (value === null) return null;
   const integer = (item: unknown) => typeof item === 'number' && Number.isSafeInteger(item);
+  const rect = (item: MenuControlSnapshot['rect'] | undefined) =>
+    !!item && [item.x, item.y, item.width, item.height].every(integer) && item.width >= 0 && item.height >= 0;
   if (
     !value ||
+    (value.generation !== undefined &&
+      (!integer(value.generation) || value.generation <= 0 || value.generation > 0xffffffff)) ||
     !integer(value.width) ||
     !integer(value.height) ||
     value.width < 1 ||
@@ -264,7 +271,54 @@ export function decodeMenuSnapshot(payload: Uint8Array): MenuSnapshot | null {
           (Array.isArray(control.items) &&
             control.items.length <= 4096 &&
             control.items.every((item) => typeof item === 'string' && item.length <= 4096))) &&
-        (control.selection === undefined || control.selection === null || integer(control.selection)),
+        (control.selection === undefined || control.selection === null || integer(control.selection)) &&
+        (control.sourceText === undefined ||
+          (typeof control.sourceText === 'string' && control.sourceText.length <= 4096)) &&
+        (control.checked === undefined || (integer(control.checked) && control.checked >= 0 && control.checked <= 3)) &&
+        (control.itemsComplete === undefined || typeof control.itemsComplete === 'boolean') &&
+        (control.edit === undefined ||
+          (!!control.edit &&
+            [control.edit.caret, control.edit.firstVisible].every(
+              (item) => integer(item) && item >= 0 && item <= control.text.length,
+            ) &&
+            control.edit.firstVisible <= control.edit.caret &&
+            typeof control.edit.caretVisible === 'boolean' &&
+            integer(control.edit.caretColor) &&
+            control.edit.caretColor >= 0 &&
+            control.edit.caretColor <= 0xffffff)) &&
+        (control.itemData === undefined ||
+          (Array.isArray(control.itemData) &&
+            control.itemData.length <= 512 &&
+            control.itemData.every((item) => integer(item) && item >= 0 && item <= 0xffffffff))) &&
+        (control.itemColors === undefined ||
+          (Array.isArray(control.itemColors) &&
+            control.itemColors.length <= 512 &&
+            control.itemColors.every((item) => item === null || (integer(item) && item >= 0 && item <= 0xffffff)))) &&
+        [control.topIndex, control.itemHeight, control.visibleRows].every(
+          (item) => item === undefined || (integer(item) && item >= 0),
+        ) &&
+        (control.popupOwner === undefined || (integer(control.popupOwner) && control.popupOwner > 0)) &&
+        (control.popup === undefined ||
+          ([control.popup.hwnd, control.popup.scrollbarHwnd].every(
+            (item) => item === undefined || (integer(item) && item >= 0),
+          ) &&
+            (control.popup.selection === undefined ||
+              (integer(control.popup.selection) && control.popup.selection >= -1)) &&
+            typeof control.popup.dropped === 'boolean' &&
+            rect(control.popup.rect) &&
+            integer(control.popup.topIndex) &&
+            control.popup.topIndex >= 0)) &&
+        (control.slider === undefined ||
+          ([control.slider.min, control.slider.max, control.slider.value].every(integer) &&
+            (control.slider.thumb === undefined || rect(control.slider.thumb)) &&
+            (control.slider.groove === undefined || rect(control.slider.groove)) &&
+            (control.slider.valueText === undefined ||
+              (typeof control.slider.valueText === 'string' && control.slider.valueText.length <= 4096)))) &&
+        (control.scroll === undefined ||
+          ([control.scroll.min, control.scroll.max, control.scroll.page, control.scroll.pos].every(integer) &&
+            (control.scroll.arrowSize === undefined || integer(control.scroll.arrowSize)) &&
+            (control.scroll.thumb === undefined || rect(control.scroll.thumb)) &&
+            (control.scroll.groove === undefined || rect(control.scroll.groove)))),
     )
   )
     throw new NativeProtocolError('Invalid native menu snapshot');
@@ -319,8 +373,12 @@ export function decodeHello(payload: Uint8Array): NativeHello {
     throw new NativeProtocolError('Invalid native subscription-revision capability');
   if (hello.limits.mirrorWindow !== undefined && ![1, 2].includes(hello.limits.mirrorWindow))
     throw new NativeProtocolError('Invalid native mirror-window capability');
+  if (hello.limits.mirrorFaultSnapshot !== undefined && typeof hello.limits.mirrorFaultSnapshot !== 'boolean')
+    throw new NativeProtocolError('Invalid native mirror-fault-snapshot capability');
   if (hello.limits.cursorSnapshot !== undefined && typeof hello.limits.cursorSnapshot !== 'boolean')
     throw new NativeProtocolError('Invalid native cursor-snapshot capability');
+  if (hello.limits.menuIdentity !== undefined && typeof hello.limits.menuIdentity !== 'boolean')
+    throw new NativeProtocolError('Invalid native menu-identity capability');
   if (hello.limits.menuSnapshot !== undefined && typeof hello.limits.menuSnapshot !== 'boolean')
     throw new NativeProtocolError('Invalid native menu-snapshot capability');
   if (hello.limits.drawJournal !== undefined && typeof hello.limits.drawJournal !== 'boolean')
@@ -533,14 +591,28 @@ export class NativePictureDecoder {
     const matching = this.previous?.width === width && this.previous.height === height;
     if (!matching && rowCount !== height) throw new NativeProtocolError('First picture must contain every row');
     const pixels = matching ? this.previous!.pixels.slice() : new Uint16Array(width * height);
-    const offset = decodePictureRows(payload, 16, rowCount, width, height, pixels);
+    let offset = decodePictureRows(payload, 16, rowCount, width, height, pixels);
+    // Extensions are independently negotiated. Menu identity precedes the
+    // optional journal so its own length still covers only the journal bytes.
+    let menuGeneration: number | undefined;
+    if (offset + 8 <= payload.byteLength && source.getUint32(offset, true) === 0x314e454d) {
+      menuGeneration = source.getUint32(offset + 4, true);
+      offset += 8;
+    }
     // The original picture is the independent fallback. An optional journal must
     // never poison its row baseline or turn an unsupported overlay into an error.
     const overlayJournal =
       offset < payload.byteLength ? decodePictureJournal(payload.subarray(offset), width, height, pixels) : undefined;
     // Keep a private baseline: consumers may transfer or mutate the returned pixels.
     this.previous = { frame, width, height, pixels: pixels.slice() };
-    return { frame, width, height, pixels, ...(overlayJournal ? { overlayJournal } : {}) };
+    return {
+      frame,
+      width,
+      height,
+      pixels,
+      ...(overlayJournal ? { overlayJournal } : {}),
+      ...(menuGeneration !== undefined ? { menuGeneration } : {}),
+    };
   }
 }
 

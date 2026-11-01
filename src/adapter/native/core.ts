@@ -573,6 +573,7 @@ export class NativeCore {
     const frame: VmFrame = {
       width: picture.width,
       height: picture.height,
+      menuGeneration: picture.menuGeneration,
       pixels: new Uint8Array(),
       palette: new Uint8Array(),
       rgb565: picture.pixels,
@@ -665,7 +666,9 @@ export class NativeCore {
         if (this.closed || !this.running || this.menuInputPending() || inputRevision !== this.menuInputRevision)
           return null;
         const snapshot = decodeMenuSnapshot(bytes);
-        if (!snapshot || !this.policy?.readMenuTexts) return snapshot;
+        // Paired agents already captured actual game text on the GUI thread.
+        // Reading it again would substitute later text into an older picture.
+        if (!snapshot || snapshot.generation !== undefined || !this.policy?.readMenuTexts) return snapshot;
         const texts = await this.policy.readMenuTexts(
           async (address, length) => (await this.connection.read(address, length)).bytes,
           snapshot.controls.map((control) => control.hwnd),
@@ -926,7 +929,27 @@ export class NativeCore {
     nextMirror: () => this.nextMirror(),
   };
 
+  /** Reuse only a complete publication accepted after this retry's failed read. */
+  private readerRetryHost(owner: unknown, epoch: number): Pick<NativeTransactionHost, 'subscribe' | 'nextMirror'> {
+    let failedPublication: number | null = null;
+    return {
+      subscribe: async (ranges) => {
+        failedPublication = this.mirrorPublication;
+        await this.subscribe(ranges, owner);
+      },
+      nextMirror: () => {
+        if (!this.running || this.closed) return Promise.reject(new Error('Native host is closed'));
+        // The caller's existing epoch check cancels the old read without borrowing the new map's image.
+        if (epoch !== this.readerEpoch) return Promise.resolve();
+        // subscribe already waits for admission. A no-op without a newer complete publication still waits.
+        if (failedPublication !== null && this.mirrorPublication > failedPublication && this.hasCurrentMirror())
+          return Promise.resolve();
+        return this.nextMirror();
+      },
+    };
+  }
   private async expandPolicyRanges(epoch = this.readerEpoch): Promise<void> {
+    const retryHost = this.readerRetryHost('policy', epoch);
     for (let attempt = 0; attempt < 8; attempt++) {
       if (epoch !== this.readerEpoch) return;
       this.memory.beginOperation();
@@ -937,9 +960,9 @@ export class NativeCore {
         if (!(error instanceof NativeMemoryMiss)) throw error;
       }
       if (this.memory.operationMissed) {
-        await this.subscribe(this.memory.missingRanges, 'policy');
+        await retryHost.subscribe(this.memory.missingRanges);
         if (epoch !== this.readerEpoch) return;
-        await this.nextMirror();
+        await retryHost.nextMirror();
         continue;
       }
       const next = mergeRanges(additional ?? []);
@@ -960,7 +983,12 @@ export class NativeCore {
     this.checkingCaptureFault = true;
     const epoch = this.readerEpoch;
     try {
-      const diagnostics = decodeJson(await this.connection.request(NativeMessageType.Diagnostics)) as {
+      const diagnostics = decodeJson(
+        await this.connection.request(
+          NativeMessageType.Diagnostics,
+          this.hello?.limits.mirrorFaultSnapshot ? encodeU32(1) : undefined,
+        ),
+      ) as {
         lastMirrorFault?: { reason?: number; value?: number; limit?: number };
       };
       const fault = diagnostics?.lastMirrorFault;
@@ -1188,7 +1216,7 @@ export class NativeCore {
           }
         },
         slot.previous,
-        { ...this.host, subscribe: (ranges) => this.subscribe(ranges, slot) },
+        this.readerRetryHost(slot, epoch),
         () => {
           slot.reader = null;
           cold = true;
@@ -1369,7 +1397,8 @@ export class NativeCore {
   requestNextFrame(): void {
     if (!this.running || this.closed || this.creditOutstanding) return;
     this.creditOutstanding = true;
-    const credit = this.options.drawJournal && this.hello?.limits.drawJournal ? encodeU32(1, 1) : encodeU32(1);
+    const count = this.hello?.limits.menuIdentity ? 0x80000001 : 1;
+    const credit = this.options.drawJournal && this.hello?.limits.drawJournal ? encodeU32(count, 1) : encodeU32(count);
     void this.connection.request(NativeMessageType.Credit, credit).catch((error) => {
       this.creditOutstanding = false;
       this.fail(error instanceof Error ? error : new Error(String(error)));

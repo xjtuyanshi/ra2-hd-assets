@@ -15,22 +15,49 @@ import { ownerConnected } from './owner-open-boundary.mjs';
 const wt = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const base = outputDirectory();
 const phase = process.env.NATIVE_BROWSER_PHASE || 'phase9';
-const ownedChromePhase = phase === 'phase34' || phase === 'phase41' || phase === 'phase44' || phase === 'phase49';
+const menuSession = ['phase28', 'phase42', 'phase45'].includes(phase);
+const ownedChromePhase = [
+  'phase34',
+  'phase41',
+  'phase42',
+  'phase43',
+  'phase44',
+  'phase45',
+  'phase46',
+  'phase47',
+  'phase48',
+  'phase49',
+].includes(phase);
 const naturalWindowDimensions = process.env.NATIVE_BROWSER_USE_WINDOW_DIMENSIONS === '1';
 assert(/^phase[0-9]+$/.test(phase));
 const tag = process.argv[2] || 'hidden';
 const webRoute = tag.startsWith('web');
 const fullWindow = tag.startsWith('full') || tag.startsWith('webfull');
 const gameSpeed = process.argv[5] ?? '3';
-const feelSettings = ['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)
+const feelSettings = [
+  'phase26',
+  'phase32',
+  'phase33',
+  'phase34',
+  'phase41',
+  'phase42',
+  'phase43',
+  'phase44',
+  'phase45',
+  'phase46',
+  'phase47',
+  'phase48',
+  'phase49',
+].includes(phase)
   ? await readFile(join(base, phase, `${tag}-settings.json`), 'utf8')
       .then(JSON.parse)
       .catch(() => ({}))
   : {};
+if (feelSettings.gameSize) assert(/^[0-9]+x[0-9]+$/.test(feelSettings.gameSize), 'Use an explicit game size');
 const screenCourtesy = feelSettings.screenCourtesy === true;
 const viewChoice = process.argv[7] ?? feelSettings.view ?? null;
 assert(viewChoice === null || ['classic', 'moderate', 'wide'].includes(viewChoice), 'Use a player view choice');
-const stagedFarmPattern = /^(?:phase20\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
+const stagedFarmPattern = /^(?:phase(?:20|28)\/farm|phase24\/(?:[a-zA-Z0-9_-]+\/)*farm)$/;
 const stagedFarmName = process.argv[6] ?? null;
 assert(stagedFarmName === null || stagedFarmPattern.test(stagedFarmName), 'Use a private staged atlas farm');
 const stagedFarmRoot = stagedFarmName === null ? null : resolve(base, stagedFarmName);
@@ -128,6 +155,7 @@ let servedFarmRoot = null;
 let hdAtlasAlias = null;
 let peakRss = 0;
 let acceptanceRates = null;
+let nativeInputObserverActive = false;
 let humanPointer = { x: 0, y: 0 };
 let directMouseMove;
 let originalForegroundApp = null;
@@ -361,11 +389,14 @@ async function setInitialWindowBounds() {
 async function timedHumanMove(x, y, correction = false) {
   const start = { ...humanPointer };
   const distance = Math.hypot(x - start.x, y - start.y);
-  const duration = screenCourtesy
-    ? correction
-      ? Math.max(16, Math.min(80, (distance / 3500) * 1000))
-      : Math.max(240, Math.min(450, (distance / 3500) * 1000))
-    : (distance / 600) * 1000;
+  const duration =
+    phase === 'phase45'
+      ? Math.max(24, Math.min(200, (distance / 3500) * 1000))
+      : screenCourtesy
+        ? correction
+          ? Math.max(16, Math.min(80, (distance / 3500) * 1000))
+          : Math.max(240, Math.min(450, (distance / 3500) * 1000))
+        : (distance / 600) * 1000;
   const steps = Math.max(1, Math.ceil(duration / 8));
   const began = performance.now();
   for (let index = 1; index <= steps; index++) {
@@ -377,7 +408,23 @@ async function timedHumanMove(x, y, correction = false) {
   }
 }
 async function humanMove(x, y, options) {
-  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) {
+  if (
+    [
+      'phase26',
+      'phase32',
+      'phase33',
+      'phase34',
+      'phase41',
+      'phase42',
+      'phase43',
+      'phase44',
+      'phase45',
+      'phase46',
+      'phase47',
+      'phase48',
+      'phase49',
+    ].includes(phase)
+  ) {
     const readPointer = () =>
       page.evaluate(() => {
         const canvas = document.querySelector('#screen');
@@ -392,7 +439,21 @@ async function humanMove(x, y, options) {
       });
     let actual = await readPointer();
     if (!actual.locked || !actual.point || !actual.width || !actual.height) {
-      if (['phase26', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) return timedHumanMove(x, y);
+      if (
+        [
+          'phase26',
+          'phase34',
+          'phase41',
+          'phase43',
+          'phase44',
+          'phase45',
+          'phase46',
+          'phase47',
+          'phase48',
+          'phase49',
+        ].includes(phase)
+      )
+        return timedHumanMove(x, y);
       humanPointer = { x, y };
       return directMouseMove(x, y, options);
     }
@@ -421,7 +482,11 @@ async function humanMove(x, y, options) {
         x: humanPointer.x + dx + (edgeXMissing ? (edgeX === 0 ? -4 : 4) : 0),
         y: humanPointer.y + dy + (edgeYMissing ? (edgeY === 0 ? -4 : 4) : 0),
       };
-      if (['phase26', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase))
+      if (
+        ['phase26', 'phase34', 'phase41', 'phase43', 'phase44', 'phase46', 'phase47', 'phase48', 'phase49'].includes(
+          phase,
+        )
+      )
         await timedHumanMove(target.x, target.y, screenCourtesy && attempt > 0);
       else {
         humanPointer = target;
@@ -558,6 +623,18 @@ const state = () =>
 async function shot(label, simple = false) {
   assert(/^[a-zA-Z0-9_-]+$/.test(label));
   const path = join(out, label + '.png');
+  // A later control query can finish after a transition has already settled.
+  // Record the layer immediately before capture so it cannot certify earlier pixels.
+  const menuBefore = menuSession
+    ? await page.evaluate(() => {
+        const layer = document.querySelector('#hd-menus');
+        return {
+          at: performance.now(),
+          display: layer ? getComputedStyle(layer).display : null,
+          data: layer ? { ...layer.dataset } : null,
+        };
+      })
+    : undefined;
   const capture = await cdp.send('Page.captureScreenshot', {
     format: 'png',
     fromSurface: true,
@@ -571,7 +648,7 @@ async function shot(label, simple = false) {
     fullscreenElement: document.fullscreenElement?.id ?? null,
     pointerLockElement: document.pointerLockElement?.id ?? null,
   }));
-  await record('screenshot-focus', { label, path, ...focus });
+  await record('screenshot-focus', { label, path, ...focus, ...(menuBefore ? { menuBefore } : {}) });
   if (simple || screenCourtesy) {
     if (screenCourtesy) {
       const geometry = await page.evaluate(() => ({
@@ -938,7 +1015,20 @@ async function execute(c) {
         const after = await worker().evaluate(() => globalThis.__auditCore.getCommandState());
         const screenshot = await shot(`${c.label ?? 'drag'}-${edge}`);
         let originalScreenshot = null;
-        if (['phase26', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) {
+        if (
+          [
+            'phase26',
+            'phase33',
+            'phase34',
+            'phase41',
+            'phase43',
+            'phase44',
+            'phase46',
+            'phase47',
+            'phase48',
+            'phase49',
+          ].includes(phase)
+        ) {
           await page.keyboard.press('\\');
           await delay(300);
           originalScreenshot = await shot(`${c.label ?? 'drag'}-${edge}-original`);
@@ -948,7 +1038,20 @@ async function execute(c) {
       } finally {
         await page.mouse.up();
       }
-      if (['phase26', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) {
+      if (
+        [
+          'phase26',
+          'phase33',
+          'phase34',
+          'phase41',
+          'phase43',
+          'phase44',
+          'phase46',
+          'phase47',
+          'phase48',
+          'phase49',
+        ].includes(phase)
+      ) {
         await delay(600);
         await shot(`${c.label ?? 'drag'}-${edge}-released`);
       }
@@ -1086,11 +1189,28 @@ async function execute(c) {
   }
   if (c.action === 'rates-start') {
     assert(
-      ['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase) && !acceptanceRates,
+      [
+        'phase26',
+        'phase32',
+        'phase33',
+        'phase34',
+        'phase41',
+        'phase43',
+        'phase44',
+        'phase46',
+        'phase47',
+        'phase48',
+        'phase49',
+      ].includes(phase) && !acceptanceRates,
       'One owned match observer required',
     );
     if (screenCourtesy) await beginOwnedScreen(c.label ?? 'played-match');
     const { startPhase10MatchRates } = await import('./phase10-match-rates.mjs');
+    if (['phase47', 'phase48'].includes(phase) && c.cadence && !webRoute) {
+      const { startPhase7NativeInputObserver } = await import('./phase7-input-stream.mjs');
+      await startPhase7NativeInputObserver(worker(), { discreteOnly: true });
+      nativeInputObserverActive = true;
+    }
     acceptanceRates = await startPhase10MatchRates({
       page,
       out,
@@ -1115,13 +1235,31 @@ async function execute(c) {
         }, webRoute),
       readNativeCadenceEndpoint:
         c.cadence && !webRoute
-          ? () =>
-              worker().evaluate(async () => ({
-                atMs: performance.now(),
-                timeOrigin: performance.timeOrigin,
-                clockContext: 'worker',
-                diagnostics: await globalThis.__auditCore.getDiagnostics('usage'),
-              }))
+          ? async () => {
+              const endpoint = await worker().evaluate(
+                async (traceInput) => ({
+                  atMs: performance.now(),
+                  timeOrigin: performance.timeOrigin,
+                  clockContext: 'worker',
+                  diagnostics: await globalThis.__auditCore.getDiagnostics('usage'),
+                  ...(traceInput
+                    ? {
+                        inputState: JSON.parse(
+                          new TextDecoder().decode(
+                            await globalThis.__auditCore.connection.request(14, new Uint8Array([1, 0, 0, 0])),
+                          ),
+                        ),
+                      }
+                    : {}),
+                }),
+                ['phase47', 'phase48'].includes(phase),
+              );
+              if (['phase47', 'phase48'].includes(phase)) {
+                const { drainPhase7NativeInputObserver } = await import('./phase7-input-stream.mjs');
+                endpoint.nativeInput = await drainPhase7NativeInputObserver(worker());
+              }
+              return endpoint;
+            }
           : undefined,
     });
     await acceptanceRates.inputCheckpoint('start', {
@@ -1133,11 +1271,28 @@ async function execute(c) {
   }
   if (c.action === 'rates-stop') {
     assert(
-      ['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase) && acceptanceRates,
+      [
+        'phase26',
+        'phase32',
+        'phase33',
+        'phase34',
+        'phase41',
+        'phase43',
+        'phase44',
+        'phase46',
+        'phase47',
+        'phase48',
+        'phase49',
+      ].includes(phase) && acceptanceRates,
       'Owned played-match observer required',
     );
     await acceptanceRates.inputCheckpoint('end', { completed: c.completed !== false });
     const result = await acceptanceRates.stop();
+    if (nativeInputObserverActive) {
+      nativeInputObserverActive = false;
+      const { drainPhase7NativeInputObserver } = await import('./phase7-input-stream.mjs');
+      await record('native-input-observer-tail', await drainPhase7NativeInputObserver(worker(), true));
+    }
     acceptanceRates = null;
     if (screenCourtesy && !c.keepScreen) await releaseOwnedScreen(c.label ?? 'rates-stopped');
     const transitions = await page.evaluate(() => window.__hdBridge?.timeline ?? null);
@@ -2163,14 +2318,41 @@ end tell`,
     return c.label ? shot(c.label) : state();
   }
   if (c.action === 'drag') {
-    const a = await point(c.x, c.y),
-      b = await point(c.toX, c.toY);
+    let from = [c.x, c.y],
+      to = [c.toX, c.toY],
+      scrollBefore = null;
+    if (c.scrollEnd !== undefined) {
+      assert(['top', 'bottom'].includes(c.scrollEnd), 'Use an actual scrollbar end');
+      const snapshot = await worker().evaluate(() => globalThis.__auditCore.getMenuSnapshot?.() ?? null);
+      const list = snapshot?.controls.find((control) => control.id === c.id && control.visible && control.enabled);
+      const bar = snapshot?.controls.find(
+        (control) =>
+          control.visible &&
+          control.enabled &&
+          control.scroll?.thumb &&
+          control.scroll?.groove &&
+          list &&
+          Math.abs(control.rect.x - (list.rect.x + list.rect.width)) <= 2 &&
+          Math.abs(control.rect.y - list.rect.y) <= 2,
+      );
+      assert(bar, 'Actual adjacent scrollbar geometry required for list ' + c.id);
+      const { thumb, groove } = bar.scroll;
+      from = [thumb.x + thumb.width / 2, thumb.y + thumb.height / 2];
+      to = [
+        from[0],
+        c.scrollEnd === 'bottom' ? groove.y + groove.height - thumb.height / 2 : groove.y + thumb.height / 2,
+      ];
+      scrollBefore = { list, scrollbar: bar };
+    }
+    const a = await point(...from),
+      b = await point(...to);
     await page.mouse.move(...a);
     await page.mouse.down();
     try {
       await page.mouse.move(...b, { steps: 12 });
       await delay(300);
-      return await shot(c.label);
+      const screenshot = await shot(c.label);
+      return scrollBefore ? { from, to, scrollBefore, screenshot } : screenshot;
     } finally {
       await page.mouse.up();
     }
@@ -2427,6 +2609,157 @@ end tell`,
   if (c.action === 'menu-state') {
     return {
       snapshot: await worker().evaluate(() => globalThis.__auditCore.getMenuSnapshot?.() ?? null),
+      ...(c.fontMetrics
+        ? {
+            fontMetrics: await worker().evaluate(async (web) => {
+              const core = globalThis.__auditCore;
+              const read = async (address, length) =>
+                web
+                  ? core.emulator.read_memory(address, length).slice()
+                  : (await core.connection.read(address, length)).bytes;
+              const u32 = (bytes, offset = 0) =>
+                new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true);
+              const i32 = (bytes, offset = 0) =>
+                new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt32(offset, true);
+              const pointer = u32(await read(0x89c4d0, 4));
+              if (pointer < 0x10000) return { pointer, invalid: 'Missing original BitFont' };
+              const font = await read(pointer, 0x48);
+              const glyphPointer = u32(font, 4);
+              const fallback = u32(font, 8);
+              if (glyphPointer < 0x10000) return { pointer, bytes: Array.from(font), invalid: 'Missing glyph set' };
+              const glyphSet = await read(glyphPointer, 0x24);
+              const stride = i32(glyphSet, 0x14);
+              const table = u32(glyphSet, 0x18);
+              const records = u32(glyphSet, 0x1c);
+              if (stride < 1 || stride > 4096 || table < 0x10000 || records < 0x10000)
+                return { pointer, glyphPointer, stride, table, records, invalid: 'Invalid original glyph geometry' };
+              const glyphs = [];
+              for (const character of ' ABCD?0123456789[]()（），,加州尔湾') {
+                const code = character.charCodeAt(0);
+                const indexBytes = await read(table + code * 2, 2);
+                const index = new DataView(indexBytes.buffer, indexBytes.byteOffset, 2).getUint16(0, true);
+                const address = index ? records + (index - 1) * stride : fallback;
+                const record = address >= 0x10000 ? await read(address, stride) : null;
+                glyphs.push({
+                  character,
+                  code,
+                  index,
+                  address,
+                  width: record?.[0] ?? null,
+                  bytes: record ? Array.from(record) : null,
+                });
+              }
+              return {
+                source: 'Read-only original YR BitFont singleton; no text, glyph, or game-state writes',
+                pointer,
+                fontBytes: Array.from(font),
+                glyphPointer,
+                glyphSetBytes: Array.from(glyphSet),
+                lineHeight: i32(font, 0x1c),
+                spacing: i32(font, 0x2c),
+                fallback,
+                stride,
+                table,
+                records,
+                glyphs,
+              };
+            }, webRoute),
+          }
+        : {}),
+      ...(c.rawNodes
+        ? {
+            ...(webRoute
+              ? {
+                  webCapture: await worker().evaluate(async () => {
+                    const { HYPERCALL_CALLBACK_DEPTH } = await import('/src/vm86/pe.ts');
+                    const core = globalThis.__auditCore;
+                    const shim = core.shim;
+                    const bytes = core.emulator.read_memory(HYPERCALL_CALLBACK_DEPTH, 4);
+                    return {
+                      // This live tree is diagnostic only; it is not paired
+                      // with displayed pixels and must never authorize HD.
+                      rawSnapshotRenderable: false,
+                      rawUnpairedSnapshot: shim.inspectMenuSnapshot?.() ?? null,
+                      callbackDepth: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true),
+                      invalidatedWindows: [...(shim.invalidatedWindows ?? [])],
+                      pendingPaintValidations: [...(shim.pendingPaintValidations ?? [])],
+                      activePaintCallbacks: [...(shim.activePaintCallbacks ?? [])].map(([owner, paint]) => ({
+                        owner,
+                        ownerValue: new DataView(core.emulator.read_memory(owner, 4).slice().buffer).getUint32(0, true),
+                        hwnd: paint.hwnd,
+                        hasSignature: paint.signature !== null,
+                      })),
+                      observedMenuPaint: shim.observedMenuPaint ?? false,
+                      hasCompletedPaintSignature: shim.completedMenuPaintSignature != null,
+                      lastDispatchedCallback: shim.inspectCallbackState?.() ?? null,
+                    };
+                  }),
+                }
+              : {}),
+            rawNodes: await worker().evaluate(async (web) => {
+              const core = globalThis.__auditCore;
+              const read = async (address, length) =>
+                web
+                  ? core.emulator.read_memory(address, length).slice()
+                  : (await core.connection.read(address, length)).bytes;
+              const u32 = (bytes, offset = 0) =>
+                new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true);
+              const root = await read(0xac1b00, 0x1c);
+              const buckets = u32(root),
+                count = u32(root, 4),
+                capacity = u32(root, 8);
+              if (!buckets || !count || capacity > 65536) return { invalid: Array.from(root) };
+              const heads = await read(buckets, capacity * 4);
+              const nodes = [],
+                seen = new Set();
+              for (let bucket = 0; bucket < capacity && nodes.length < 256; bucket++) {
+                let address = u32(heads, bucket * 4);
+                while (address >= 0x10000 && !seen.has(address) && nodes.length < 256) {
+                  seen.add(address);
+                  const bytes = await read(address, 0x208);
+                  nodes.push({
+                    address,
+                    hwnd: u32(bytes),
+                    words: Array.from({ length: 0x208 / 4 }, (_, i) => u32(bytes, i * 4)),
+                  });
+                  address = u32(bytes, 0x204);
+                }
+              }
+              const procedureRoot = await read(0xac18c0, 28),
+                editRecords = [];
+              for (const node of nodes.filter((node) => node.words[0x6c / 4] === 1)) {
+                const object = await read(node.words[0x40 / 4], 4),
+                  procedureNodes = [];
+                const bucket = u32(procedureRoot) + (node.hwnd & (u32(procedureRoot, 8) - 1)) * 4;
+                let address = u32(await read(bucket, 4));
+                for (let depth = 0; address >= 0x10000 && depth < 16; depth++) {
+                  const bytes = await read(address, 12);
+                  procedureNodes.push({ address, words: [u32(bytes), u32(bytes, 4), u32(bytes, 8)] });
+                  if (u32(bytes) === node.hwnd || address === u32(bytes, 8)) break;
+                  address = u32(bytes, 8);
+                }
+                editRecords.push({
+                  hwnd: node.hwnd,
+                  object: Array.from(object),
+                  text: u32(object) ? Array.from(await read(u32(object), 128)) : [],
+                  procedureNodes,
+                });
+              }
+              const editGlobals = await Promise.all(
+                [
+                  [0x614e7c, 13],
+                  [0xb73564, 12],
+                  [0xac184c, 4],
+                ].map(async ([address, length]) => ({ address, bytes: Array.from(await read(address, length)) })),
+              );
+              return {
+                root: Array.from(root),
+                nodes,
+                editDiagnostics: { procedureRoot: Array.from(procedureRoot), editRecords, editGlobals },
+              };
+            }, webRoute),
+          }
+        : {}),
       layer: await page.locator('#hd-menus').evaluateAll((layers) =>
         layers.map((layer) => ({
           display: getComputedStyle(layer).display,
@@ -2448,9 +2781,10 @@ end tell`,
     );
     await page.mouse.down();
     try {
-      await delay(100);
+      await delay(500);
+      const captureBefore = await execute({ action: 'menu-state' });
       await shot(c.label);
-      return await execute({ action: 'menu-state' });
+      return { ...(await execute({ action: 'menu-state' })), captureBefore };
     } finally {
       await page.mouse.up();
     }
@@ -2988,6 +3322,13 @@ async function cleanup() {
       await acceptanceRates.stop().catch((error) => record('played-match-observer-cleanup-error', String(error)));
       acceptanceRates = null;
     }
+    if (nativeInputObserverActive) {
+      nativeInputObserverActive = false;
+      const { drainPhase7NativeInputObserver } = await import('./phase7-input-stream.mjs');
+      await drainPhase7NativeInputObserver(worker(), true)
+        .then((tail) => record('native-input-observer-tail', tail))
+        .catch((error) => record('native-input-observer-cleanup-error', String(error)));
+    }
     if (context) {
       let routeTimer;
       const routes = await Promise.race([
@@ -3079,7 +3420,21 @@ try {
   if (webRoute) {
     const root = resolve(wt, '../..');
     process.env.RA2_DEV_HTTP = '1';
-    if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase))
+    if (
+      [
+        'phase26',
+        'phase32',
+        'phase33',
+        'phase34',
+        'phase41',
+        'phase43',
+        'phase44',
+        'phase46',
+        'phase47',
+        'phase48',
+        'phase49',
+      ].includes(phase)
+    )
       process.env.RA2_PERF_LOG = join(out, 'session-feel.jsonl');
     process.env.RA2_GAME_ROOT ||= feelSettings.webGameRoot || join(base, phase, 'web-game');
     process.env.RA2_THIRD_PARTY_CACHE_DIR ||= join(root, '.tmp-third-party');
@@ -3113,6 +3468,13 @@ try {
       launchEnvironment.RA2_HD_CACHE_DIR = join(base, phase, 'farm');
     }
     servedFarmRoot = resolve(launchEnvironment.RA2_HD_CACHE_DIR);
+    if (['phase47', 'phase48'].includes(phase) && feelSettings.missingCrossOverBottle === true) {
+      // Exercise normal automatic fallback without modifying any installed bottle.
+      launchEnvironment.RA2_NATIVE_WINE_BOTTLE = 'native-session47-missing-bottle';
+      delete launchEnvironment.RA2_NATIVE_WINE_PREFIX;
+      delete launchEnvironment.WINEPREFIX;
+      delete launchEnvironment.CX_BOTTLE_PATH;
+    }
     // The runner's explicit free-Wine scope must override the saved CrossOver
     // smoke configuration; never launch the two prefixes by accident.
     if (['free', 'free-cx'].includes(process.env.RA2_NATIVE_WINE_FLAVOR)) {
@@ -3121,13 +3483,25 @@ try {
       delete launchEnvironment.RA2_NATIVE_WINE_BOTTLE;
       delete launchEnvironment.WINEPREFIX;
       delete launchEnvironment.CX_BOTTLE_PATH;
+      if (feelSettings.freshPrefix === true) {
+        // A new isolated first-run prefix leaves the runner's retained prefix intact.
+        launchEnvironment.RA2_NATIVE_WINE_PREFIX = join(base, phase, `prefix-${tag}`);
+        assert(!(await exists(launchEnvironment.RA2_NATIVE_WINE_PREFIX)), 'First-run prefix must not exist');
+        await record('fresh-prefix', { path: launchEnvironment.RA2_NATIVE_WINE_PREFIX, existed: false });
+      }
     }
     launchStartedAtMs = Date.now();
     launch = spawn(
       process.execPath,
       [
         join(wt, 'scripts/remaster/native/phase8-launch-trace.mjs'),
-        ...(useViewportHandshake ? (fullWindow ? ['--fullscreen'] : []) : ['--size', '1728x1117']),
+        ...(feelSettings.gameSize
+          ? ['--size', feelSettings.gameSize]
+          : useViewportHandshake
+            ? fullWindow
+              ? ['--fullscreen']
+              : []
+            : ['--size', '1728x1117']),
         ...(viewChoice ? ['--view', viewChoice] : []),
       ],
       {
@@ -3179,11 +3553,12 @@ try {
   const profileName = process.argv[4];
   if (profileName) assert(/^[a-zA-Z0-9_-]+$/.test(profileName));
   if (profileName || ownedChromePhase) {
-    const profilePath = ['phase41', 'phase44', 'phase49'].includes(phase)
-      ? join(base, phase, 'profile')
-      : profileName
-        ? join(base, phase, 'profiles', profileName)
-        : join(out, 'chrome-profile');
+    const profilePath =
+      menuSession || ['phase41', 'phase43', 'phase44', 'phase46', 'phase47', 'phase48', 'phase49'].includes(phase)
+        ? join(base, phase, 'profile')
+        : profileName
+          ? join(base, phase, 'profiles', profileName)
+          : join(out, 'chrome-profile');
     if (feelSettings.zoom) {
       const preferencesPath = join(profilePath, 'Default', 'Preferences');
       await mkdir(dirname(preferencesPath), { recursive: true });
@@ -3322,7 +3697,21 @@ try {
       ),
     });
   });
-  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase))
+  if (
+    [
+      'phase26',
+      'phase32',
+      'phase33',
+      'phase34',
+      'phase41',
+      'phase43',
+      'phase44',
+      'phase46',
+      'phase47',
+      'phase48',
+      'phase49',
+    ].includes(phase)
+  )
     await context.route('**/src/ui/pages/game/hdBridge.ts*', async (route) => {
       const response = await route.fetch();
       const source = await response.text();
@@ -3344,8 +3733,21 @@ try {
   if (screenCourtesy) await restoreForegroundApp(originalForegroundApp, 'ordinary-window-created');
   directMouseMove = page.mouse.move.bind(page.mouse);
   if (
-    ['phase26', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase) ||
-    ['phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)
+    [
+      'phase26',
+      'phase32',
+      'phase33',
+      'phase34',
+      'phase41',
+      'phase42',
+      'phase43',
+      'phase44',
+      'phase45',
+      'phase46',
+      'phase47',
+      'phase48',
+      'phase49',
+    ].includes(phase)
   ) {
     page.mouse.move = humanMove;
     for (const method of ['click', 'dblclick']) {
@@ -3477,7 +3879,24 @@ try {
     });
   }
   await delay(1000);
-  if (['phase26', 'phase32', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) {
+  if (
+    [
+      'phase26',
+      'phase28',
+      'phase32',
+      'phase33',
+      'phase34',
+      'phase41',
+      'phase42',
+      'phase43',
+      'phase44',
+      'phase45',
+      'phase46',
+      'phase47',
+      'phase48',
+      'phase49',
+    ].includes(phase)
+  ) {
     const start = page.locator(feelSettings.fullscreenStart ? '#native-start' : '#native-start-window');
     if (!webRoute || feelSettings.playStart)
       await wait(
@@ -3506,7 +3925,20 @@ try {
         })),
         browserWindow: await cdp.send('Browser.getWindowForTarget'),
       });
-      if (['phase26', 'phase33', 'phase34', 'phase41', 'phase44', 'phase49'].includes(phase)) {
+      if (
+        [
+          'phase26',
+          'phase33',
+          'phase34',
+          'phase41',
+          'phase43',
+          'phase44',
+          'phase46',
+          'phase47',
+          'phase48',
+          'phase49',
+        ].includes(phase)
+      ) {
         await page
           .locator('#display-refresh-notice')
           .waitFor({ state: 'visible', timeout: 8000 })
@@ -3524,11 +3956,30 @@ try {
     );
     // Creating the shim/primary surface precedes the game's first usable menu.
     // Do not release the screen lease or call a black initialization frame ready.
+    let lastMovieSkipAt = 0;
     await wait(
-      'web usable menu or movie skip control',
+      menuSession ? 'web usable main menu after ordinary movie skip' : 'web usable menu or movie skip control',
       async () => {
         const input = await state();
         mainMenuControlsObserved = !!input.controls?.some((c) => usable(c) && c.id === 1667);
+        if (menuSession) {
+          if (mainMenuControlsObserved) return true;
+          if (input.moviePlaying === true && !input.modal && Date.now() - lastMovieSkipAt >= 1500) {
+            lastMovieSkipAt = Date.now();
+            const skipMovie = page.locator('#vm-skip-movie');
+            if (await skipMovie.isVisible()) {
+              await locatorClick(skipMovie);
+              await record('web-intro-skip-input', { input: 'Trusted movie-skip button click', moviePlaying: true });
+            } else if (await page.evaluate(() => document.activeElement === document.querySelector('#screen'))) {
+              await page.keyboard.press('Escape', { delay: 100 });
+              await record('web-intro-skip-input', {
+                input: 'Trusted Escape key on focused canvas',
+                moviePlaying: true,
+              });
+            }
+          }
+          return false;
+        }
         return mainMenuControlsObserved || (input.moviePlaying === true && !input.modal);
       },
       120000,
@@ -3549,6 +4000,13 @@ try {
       },
       120000,
     );
+  }
+  if (menuSession && (await page.evaluate(() => !!document.pointerLockElement))) {
+    await page.keyboard.press('Escape', { delay: 100 });
+    await wait('ordinary Escape releases startup pointer lock', () =>
+      page.evaluate(() => !document.pointerLockElement),
+    );
+    await record('startup-pointer-lock-released', { input: 'Trusted Escape key' });
   }
   const toggle = page.locator('#vm-controls-toggle');
   if (
@@ -3632,7 +4090,10 @@ try {
         const result = await execute(cmd);
         await writeFile(join(out, file.replace('command-', 'result-')), JSON.stringify({ ok: true, result }, null, 2));
         await record('command', { file, action: cmd.action });
-        if (cmd.action === 'close') close = true;
+        if (cmd.action === 'close') {
+          close = true;
+          break;
+        }
       } catch (e) {
         await releaseOwnedScreen('command-error').catch((error) =>
           record('screen-release-error', { error: String(error) }),
@@ -3642,7 +4103,12 @@ try {
           JSON.stringify({ ok: false, error: String(e.stack || e) }, null, 2),
         );
         await record('command-error', { file, error: String(e) });
-        if (['phase26', 'phase32', 'phase33', 'phase34'].includes(phase)) {
+        if (feelSettings.unattended === true) {
+          process.exitCode = 1;
+          close = true;
+          break;
+        }
+        if (['phase26', 'phase32', 'phase33', 'phase34', 'phase43', 'phase46', 'phase47', 'phase48'].includes(phase)) {
           await writeFile(join(out, 'paused-command'), file + '\n');
           while (!(await exists(join(out, 'resume'))) && !(await exists(join(out, 'cancel')))) {
             await ownerIdle();

@@ -518,13 +518,14 @@ static void order_captured_child_overlay(struct paint_windows *state)
     state->count = count;
 }
 
-void nh_hidden_paint(void)
+int nh_hidden_paint(void)
 {
     if (!nh_hidden_active() || painting || !g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || !g_ddraw.primary)
-        return;
+        return 0;
+    int committed = 0;
     struct paint_windows state = {0};
     state.root = nh_window_target(NH_WINDOW_PAINT);
-    if (!state.root || GetWindowThreadProcessId(state.root, NULL) != g_ddraw.gui_thread_id) return;
+    if (!state.root || GetWindowThreadProcessId(state.root, NULL) != g_ddraw.gui_thread_id) return 0;
     /* No control redraw is added to ordinary match pictures. Paused dialogs
      * and menu controls need genuine paint because their ancestors stay hidden. */
     if (state.root != g_ddraw.hwnd)
@@ -537,17 +538,17 @@ void nh_hidden_paint(void)
         order_captured_child_overlay(&state);
     }
     EnumWindows(collect_paint_popup, (LPARAM)&state);
-    if (!state.count) return;
+    if (!state.count) return 0;
     LARGE_INTEGER paint_start;
     QueryPerformanceCounter(&paint_start);
     /* Paint callbacks can enter game code, so no wrapper lock, retained surface
      * dereference or auxiliary COM reference may span them. Surface Release has
      * compatibility behavior even at a nonzero reference count. Copy a genuine
      * primary baseline into a private DIB and commit only changed pixels later. */
-    if (!TryEnterCriticalSection(&g_ddraw.cs)) return;
+    if (!TryEnterCriticalSection(&g_ddraw.cs)) return 0;
     IDirectDrawSurfaceImpl *initial_primary = g_ddraw.primary;
     if (!initial_primary || (g_config.lock_surfaces && !TryEnterCriticalSection(&initial_primary->cs)))
-    { LeaveCriticalSection(&g_ddraw.cs); return; }
+    { LeaveCriticalSection(&g_ddraw.cs); return 0; }
     DWORD width = initial_primary->width, height = initial_primary->height, bpp = initial_primary->bpp;
     DWORD source_pitch = initial_primary->pitch;
     HDC initial_dc = initial_primary->hdc;
@@ -586,7 +587,7 @@ void nh_hidden_paint(void)
     {
         if (baseline) HeapFree(GetProcessHeap(), 0, baseline);
         if (dib) DeleteObject(dib);
-        return;
+        return 0;
     }
     HGDIOBJ previous_bitmap = SelectObject(dc, dib);
     if (!previous_bitmap || previous_bitmap == HGDI_ERROR)
@@ -594,7 +595,7 @@ void nh_hidden_paint(void)
         DeleteDC(dc);
         DeleteObject(dib);
         HeapFree(GetProcessHeap(), 0, baseline);
-        return;
+        return 0;
     }
     painting = 1;
     InterlockedExchange(&paint_in_progress, 1);
@@ -729,6 +730,8 @@ void nh_hidden_paint(void)
         {
             BYTE *destination = dds_GetBuffer(current);
             if (destination == initial_buffer && nh_window_target(NH_WINDOW_PAINT) == state.root && nh_hidden_visible(state.root))
+            {
+                committed = 1;
                 for (DWORD y = 0; y < height; y++)
                 {
                     if (bpp == 16)
@@ -748,6 +751,7 @@ void nh_hidden_paint(void)
                             if (drawn[x] != before[x] && dst[x] == before[x]) dst[x] = drawn[x];
                     }
                 }
+            }
             if (g_config.lock_surfaces) LeaveCriticalSection(&current->cs);
         }
         LeaveCriticalSection(&g_ddraw.cs);
@@ -770,6 +774,7 @@ void nh_hidden_paint(void)
         InterlockedExchange(&last_paint_us, (LONG)duration);
         if (duration > (uint32_t)InterlockedCompareExchange(&maximum_paint_us, 0, 0)) InterlockedExchange(&maximum_paint_us, (LONG)duration);
     }
+    return committed;
 }
 
 HWND WINAPI nh_hidden_set_capture(HWND window)

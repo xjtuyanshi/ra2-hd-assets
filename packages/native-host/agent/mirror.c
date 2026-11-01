@@ -2,10 +2,13 @@
  * YR 1.001 detour; subscriptions and follow rules are generic memory mechanisms. */
 #include "mirror-internal.h"
 #include "mirror-pages.h"
+#include "mirror-page-equal.h"
 #include "mirror-read-cache.h"
 #include "mirror-region-read.h"
 #include "mirror-membership.h"
 #include "mirror-flight.h"
+#include "mirror-profile.h"
+#include "mirror-budget.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
@@ -30,7 +33,7 @@ static CRITICAL_SECTION state_lock, patch_lock;
 static LONG initialized, enabled, installed;
 static LARGE_INTEGER frequency;
 static struct nh_subscription subscription;
-static struct nh_page *shadow_pages, *capture_pages;
+static struct nh_page *shadow_pages, *capture_pages, *sort_pages;
 static uint8_t *shadow_bytes, *capture_bytes, *packet;
 static uint32_t shadow_count, capture_count, page_hash[NH_MIRROR_HASH_SIZE];
 static uint32_t old_indices[NH_MAX_PAGES], removed_pages[NH_MAX_PAGES];
@@ -42,6 +45,7 @@ static uint32_t subscription_revision, applied_revision, random_state;
 static uint64_t generation;
 static struct nh_mirror_flights flights;
 static int reset_pending;
+static int page_equal_sse2;
 static uint32_t pending_flags;
 static struct nh_range fixed_samples[16];
 static uint32_t fixed_sample_count;
@@ -81,6 +85,9 @@ static uint64_t fault_count, fault_event_count;
 static int previous_capture_failed;
 static struct nh_read_cache read_cache;
 static struct nh_read_region_cursor capture_region;
+static struct nh_budget_probe membership_probe;
+static LARGE_INTEGER capture_started;
+static int capture_pointer_page(uint32_t address, void *out, uint32_t length);
 static uint32_t hook_times[NH_TIMING_SAMPLES], hook_time_count, hook_time_cursor;
 static uint64_t hook_calls;
 static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t limit) {
@@ -95,7 +102,7 @@ static void fault(uint32_t reason, uint32_t address, uint32_t value, uint32_t li
 }
 static int capture_read(uint32_t address, void *out, uint32_t length) {
     SetLastError(ERROR_SUCCESS);
-    if (capture_stage == 1 ? nh_read_cache_copy(&read_cache, capture_bytes, address, out, length, nh_safe_read) :
+    if (capture_stage == 1 ? nh_read_cache_copy(&read_cache, capture_bytes, address, out, length, capture_pointer_page) :
         capture_stage == 2 ? nh_safe_read_scoped(&capture_region, address, out, length) :
         nh_safe_read(address, out, length)) return 1;
     fault(3, address, length, 0);
@@ -110,8 +117,20 @@ static uint32_t get_u32(const uint8_t *p) {
 static void put_u32(uint8_t *p, uint32_t n) { memcpy(p, &n, sizeof(n)); }
 static int expired(LARGE_INTEGER start, uint32_t budget) {
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    nh_profile_count(NH_PROFILE_QPC, 0);
     return (uint64_t)(now.QuadPart - start.QuadPart) * 1000000u >=
         (uint64_t)frequency.QuadPart * budget;
+}
+static int membership_expired(LARGE_INTEGER start) {
+    return nh_budget_probe_due(&membership_probe) && expired(start, subscription.budget_us);
+}
+static int capture_pointer_page(uint32_t address, void *out, uint32_t length) {
+    /* Cached pointer reads may resolve many fields without a syscall. Only the
+     * actual page fill needs a mandatory clock probe before its protected read. */
+    if (expired(capture_started, subscription.budget_us)) {
+        fault(1, address, length, subscription.budget_us); return 0;
+    }
+    return nh_safe_read(address, out, length);
 }
 static uint32_t random_u32(void) {
     random_state ^= random_state << 13;
@@ -130,14 +149,17 @@ static int init_mirror(void) {
     InitializeCriticalSection(&state_lock);
     InitializeCriticalSection(&patch_lock);
     QueryPerformanceFrequency(&frequency);
+    nh_profile_init();
+    page_equal_sse2 = IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE);
     shadow_pages = calloc(NH_MAX_PAGES, sizeof(*shadow_pages));
     capture_pages = calloc(NH_MAX_PAGES, sizeof(*capture_pages));
+    sort_pages = malloc(NH_MAX_PAGES * sizeof(*sort_pages));
     shadow_bytes = malloc(NH_MAX_PAGES * NH_PAGE_SIZE);
     capture_bytes = malloc(NH_MAX_PAGES * NH_PAGE_SIZE);
     packet = malloc(NH_MAX_MESSAGE);
     random_state = GetCurrentProcessId() ^ GetTickCount() ^ 0x9e3779b9u;
     if (!random_state) random_state = 1;
-    if (!frequency.QuadPart || !shadow_pages || !capture_pages || !shadow_bytes || !capture_bytes || !packet) {
+    if (!frequency.QuadPart || !shadow_pages || !capture_pages || !sort_pages || !shadow_bytes || !capture_bytes || !packet) {
         InterlockedExchange(&initialized, -1);
         return 0;
     }
@@ -311,16 +333,12 @@ static int add_range(uint32_t address, uint32_t length, uint32_t *flags, LARGE_I
     if (!length) return 1;
     if (end > UINT64_C(0x100000000)) { fault(5, address, length, 0); *flags |= NH_MIRROR_INVALID; return 0; }
     do {
-        if (expired(start, subscription.budget_us)) { fault(1, address, length, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; return 0; }
+        if (membership_expired(start)) { fault(1, address, length, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; return 0; }
         if (!add_page(page, flags)) return 0;
         if ((uint64_t)page + NH_PAGE_SIZE >= end) break;
         page += NH_PAGE_SIZE;
     } while (1);
     return 1;
-}
-static int compare_pages(const void *a, const void *b) {
-    uint32_t x = ((const struct nh_page *)a)->address, y = ((const struct nh_page *)b)->address;
-    return x > y ? 1 : x < y ? -1 : 0;
 }
 static void follow_member_vector(uint32_t member, const struct nh_rule *rule, int capacity_span,
     uint32_t *flags, LARGE_INTEGER start) {
@@ -339,7 +357,7 @@ static void follow_member_vector(uint32_t member, const struct nh_rule *rule, in
     if (*flags || capacity_span) return;
     if (!capture_read(items, rule_items, (uint32_t)span)) { *flags |= NH_MIRROR_INVALID; return; }
     for (uint32_t k = 0; k < count && !*flags; ++k) {
-        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; break; }
+        if (membership_expired(start)) { fault(1, 0, capture_count, subscription.budget_us); *flags |= NH_MIRROR_TRUNCATED; break; }
         if (rule_items[k]) add_range(rule_items[k], rule->bytes, flags, start);
     }
 }
@@ -347,6 +365,8 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
     uint32_t i, flags = fixed_seed.flags;
     capture_stage = 1; capture_rule = UINT32_MAX; capture_object = 0;
     capture_request_address = capture_request_length = 0;
+    capture_started = start;
+    nh_budget_probe_reset(&membership_probe);
     nh_read_cache_clear(&read_cache);
     if (flags) fault(7, 0, fixed_seed.count, subscription.max_pages);
     capture_count = fixed_seed.count;
@@ -392,7 +412,7 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
             if (!flags && !capture_read(pointer, parents, (uint32_t)span)) flags |= NH_MIRROR_INVALID;
             for (j = 0; j < count && !flags; ++j) {
                 uint32_t item = parents[j];
-                if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
+                if (membership_expired(start)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
                 if (!item) continue;
                 capture_object = item;
                 if (rule->kind == 2) { add_range(item, rule->bytes, &flags, start); continue; }
@@ -420,6 +440,12 @@ static uint32_t resolve_union(LARGE_INTEGER start) {
                 } else follow_member_vector((uint32_t)member, rule, rule->kind == 6, &flags, start);
             }
         }
+    }
+    /* A cache-fill deadline failure travels through the same failed-read
+     * callers, but remains a truncation rather than an unreadable-page fault. */
+    if (current_fault.reason == 1) flags = (flags & ~NH_MIRROR_INVALID) | NH_MIRROR_TRUNCATED;
+    if (!flags && expired(start, subscription.budget_us)) {
+        fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED;
     }
     return flags;
 }
@@ -533,11 +559,13 @@ void nh_logic_tick(void) {
     }
     memset(&current_fault, 0, sizeof(current_fault));
     ++capture_attempts;
+    nh_profile_begin((uint32_t)game_thread_id);
     flags = resolve_union(start);
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
     capture_stage = 2; capture_rule = UINT32_MAX;
+    nh_profile_phase(1);
     nh_read_region_clear(&capture_region);
-    qsort(capture_pages, capture_count, sizeof(*capture_pages), compare_pages);
+    nh_sort_pages(capture_pages, sort_pages, capture_count);
     next_generation = generation + 1;
     removed_count = nh_merge_membership(capture_pages, capture_count, shadow_pages, shadow_count,
         old_indices, removed_pages, &membership_changed);
@@ -556,7 +584,7 @@ void nh_logic_tick(void) {
         for (j = i; j < i + run; ++j) {
             uint32_t old = old_indices[j];
             if (reset_pending || old == UINT32_MAX ||
-                memcmp(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + old * NH_PAGE_SIZE, NH_PAGE_SIZE))
+                !nh_page_bytes_equal(capture_bytes + j * NH_PAGE_SIZE, shadow_bytes + old * NH_PAGE_SIZE, page_equal_sse2))
                 capture_pages[j].dirty = next_generation;
             else capture_pages[j].dirty = shadow_pages[old].dirty;
         }
@@ -566,16 +594,27 @@ void nh_logic_tick(void) {
     /* Legacy membership changes require an exclusive reset. Opted-in window
      * clients use explicit removals, so their ordinary deltas do not reset. */
     if (reset_pending && flights.count) { ++in_flight_skips; InterlockedIncrement(&dropped_updates); goto done; }
+    if (expired(start, subscription.budget_us)) {
+        fault(1, 0, capture_count, subscription.budget_us);
+        publish_incomplete(frame, NH_MIRROR_TRUNCATED, start); goto done;
+    }
     capture_stage = 3;
+    nh_profile_phase(2);
+    struct nh_budget_probe packing_probe = {0};
     for (i = 0; i < capture_count; ++i) {
         if (!capture_pages[i].dirty) continue;
-        if (expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
+        if (nh_budget_probe_due(&packing_probe) && expired(start, subscription.budget_us)) { fault(1, 0, capture_count, subscription.budget_us); flags |= NH_MIRROR_TRUNCATED; break; }
         put_u32(packet + length, capture_pages[i].address); length += 4;
         memcpy(packet + length, capture_bytes + i * NH_PAGE_SIZE, NH_PAGE_SIZE); length += NH_PAGE_SIZE;
         ++dirty_count;
     }
     if (flags) { publish_incomplete(frame, flags, start); goto done; }
+    if (expired(start, subscription.budget_us)) {
+        fault(1, 0, capture_count, subscription.budget_us);
+        publish_incomplete(frame, NH_MIRROR_TRUNCATED, start); goto done;
+    }
     capture_stage = 4;
+    nh_profile_phase(3);
     for (i = 0; i < subscription.sample_count && (capture_count || i < fixed_sample_count); ++i) {
         uint32_t address, bytes;
         if (i < fixed_sample_count) {
@@ -631,6 +670,7 @@ void nh_logic_tick(void) {
         reset_pending = 0; mirror_bytes += length;
     } else { ++publish_rejections; InterlockedIncrement(&dropped_updates); }
 done:
+    nh_profile_end(!current_fault.reason);
     QueryPerformanceCounter(&finish);
     { uint64_t us = (uint64_t)(finish.QuadPart - start.QuadPart) * 1000000u / (uint64_t)frequency.QuadPart;
       hook_us_total += us; ++hook_calls;
@@ -910,8 +950,24 @@ static void format_fault(char *out, uint32_t capacity, const struct mirror_fault
         (unsigned long)f->memory_protect, (unsigned long)f->memory_type, (unsigned long)f->read_error,
         f->retry_readable ? "true" : "false", (unsigned long)f->occurrences, (unsigned long)f->last_frame);
 }
+void nh_mirror_fault_diagnostics(char *out, uint32_t capacity) {
+    struct mirror_fault snapshot;
+    char detail[768];
+    if (!capacity) return;
+    if (initialized != 2) {
+        snprintf(out, capacity, "{\"lastMirrorFault\":null}");
+        return;
+    }
+    /* Capacity recovery needs the actual fault, not percentile sorting and
+     * trace formatting on the I/O thread that must also retire mirror ACKs. */
+    EnterCriticalSection(&state_lock);
+    snapshot = last_fault;
+    LeaveCriticalSection(&state_lock);
+    format_fault(detail, sizeof(detail), &snapshot);
+    snprintf(out, capacity, "{\"lastMirrorFault\":%s}", detail);
+}
 void nh_mirror_diagnostics(char *out, uint32_t capacity) {
-    char hook[256], detail[768], recent[6400], entry[768];
+    char hook[256], detail[768], recent[6400], entry[768], profile[1600];
     uint32_t times[NH_TIMING_SAMPLES], ack_samples[NH_TIMING_SAMPLES];
     uint32_t time_count, ack_count, p50, p99, ack_p50, ack_p99, used = 0;
     if (!capacity) return;
@@ -945,6 +1001,7 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
     if (installed) snprintf(hook, sizeof(hook), "{\"site\":%lu,\"original\":[137,21,132,237,168,0],\"patched\":[%u,%u,%u,%u,%u,%u]}",
         (unsigned long)NH_HOOK_ADDRESS, detour[0],detour[1],detour[2],detour[3],detour[4],detour[5]);
     else strcpy(hook, "null");
+    nh_profile_json(profile, sizeof(profile));
     snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP50Us\":%lu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s,\"mirrorCaptureAttempts\":%llu,\"mirrorProduced\":%llu,\"mirrorsPublished\":%llu,\"mirrorIncompletePublished\":%llu,\"mirrorInFlightSkips\":%llu,\"mirrorPublishRejections\":%llu,\"mirrorEmptySubscriptionSkips\":%llu,\"hookLockSkips\":%lu,\"mirrorAcks\":%llu,\"mirrorAckP50Us\":%lu,\"mirrorAckP99Us\":%lu,\"mirrorAckSamples\":%lu,\"mirrorInFlightCount\":%lu,\"mirrorWindow\":%lu,\"mirrorMailboxSkips\":%llu,\"mirrorAckNotifications\":%llu",
         (unsigned long)logic_frames, (unsigned long long)mirror_bytes, (unsigned long long)hook_us_total,
         (unsigned long long)hook_us_max, (unsigned long long)budget_overruns, (unsigned long)dropped_updates,
@@ -960,5 +1017,7 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
         (unsigned long long)mirror_acks, (unsigned long)ack_p50, (unsigned long)ack_p99, (unsigned long)ack_count,
         (unsigned long)flights.count, (unsigned long)(subscription.mirror_window ? subscription.mirror_window : 1),
         (unsigned long long)mailbox_skips, (unsigned long long)ack_notifications);
+    used = (uint32_t)strlen(out);
+    if (used < capacity) snprintf(out + used, capacity - used, ",\"captureProfile\":%s", profile);
     LeaveCriticalSection(&state_lock);
 }

@@ -66,6 +66,10 @@ backup/restore behavior and local Go helper are documented in
   use RGB565 literals and compressed `0xF81F` runs. Surface contention defers
   capture through the GUI timer without a busy error or retry cutoff. Encoded
   pictures hand off an owned buffer rather than copying the full payload again.
+  Clients that negotiate menu identity receive a generation paired with fully
+  painted dialog state; legacy credits keep the original packet format.
+  Version-validated YR policy reads actual labels, list records, swatches and
+  slider/popup state on the GUI thread. Incomplete state retains original pixels.
 - Input passes through game-facing WinAPI cursor/key hooks and bounded tagged
   messages on the game window thread. Battle input reaches its original WndProc;
   logically visible owned dialogs route picture-coordinate mouse messages to

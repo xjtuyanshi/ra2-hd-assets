@@ -11,6 +11,7 @@
 #include "agent.h"
 #include "mirror-internal.h"
 #include "mirror-region-read.h"
+#include "mirror-profile.h"
 #include "hidden.h"
 
 #define NH_REPLY_SLOTS 16u
@@ -48,7 +49,7 @@ static LARGE_INTEGER nh_counter_frequency;
 struct nh_mirror_trace {
     uint64_t sequence;
     uint32_t frame, revision, flags;
-    LARGE_INTEGER hook_started, published_at, send_started, send_finished, ack_at;
+    LARGE_INTEGER hook_started, published_at, send_started, send_finished, ack_received_at, ack_at;
 };
 static struct nh_mirror_trace nh_mirror_trace[NH_MIRROR_TRACE_CAPACITY];
 static uint32_t nh_mirror_trace_count, nh_mirror_trace_cursor;
@@ -57,6 +58,15 @@ static LARGE_INTEGER nh_clock_anchor;
 static uint64_t nh_clock_epoch_us, nh_clock_correlation_span_ns;
 static uint64_t nh_diagnostic_count, nh_diagnostic_us;
 static uint32_t nh_diagnostic_last_us, nh_diagnostic_max_us;
+enum nh_io_stage { NH_IO_SELECT, NH_IO_READ, NH_IO_ACK, NH_IO_DIAGNOSTIC,
+    NH_IO_INPUT, NH_IO_OTHER, NH_IO_REPLY_SEND, NH_IO_PICTURE_SEND, NH_IO_STAGE_COUNT };
+/* Fixed I/O-owner counters expose waits without logging on every input/ACK.
+ * Each full diagnostic drains only the interval peak, preserving total/max. */
+struct nh_io_timing {
+    uint64_t count, total_us, max_us, window_count, window_max_us;
+    LARGE_INTEGER window_max_started;
+};
+static struct nh_io_timing nh_io_timings[NH_IO_STAGE_COUNT];
 
 static uint64_t nh_elapsed_us(LARGE_INTEGER before, LARGE_INTEGER after) {
     uint64_t ticks = (uint64_t)(after.QuadPart - before.QuadPart);
@@ -65,6 +75,46 @@ static uint64_t nh_elapsed_us(LARGE_INTEGER before, LARGE_INTEGER after) {
 }
 static uint64_t nh_epoch_us(LARGE_INTEGER at) {
     return nh_clock_epoch_us + nh_elapsed_us(nh_clock_anchor, at);
+}
+static void nh_io_timing(enum nh_io_stage stage, LARGE_INTEGER started, LARGE_INTEGER finished) {
+    struct nh_io_timing *timing = nh_io_timings + stage;
+    uint64_t elapsed = nh_elapsed_us(started, finished);
+    ++timing->count; timing->total_us += elapsed;
+    if (elapsed > timing->max_us) timing->max_us = elapsed;
+    if (!timing->window_count++ || elapsed > timing->window_max_us) {
+        timing->window_max_us = elapsed; timing->window_max_started = started;
+    }
+}
+static void nh_io_diagnostics(char *out, uint32_t capacity) {
+    static const char *names[NH_IO_STAGE_COUNT] = { "select", "receive", "ackDispatch", "diagnosticDispatch",
+        "inputDispatch", "otherDispatch", "replySend", "pictureSend" };
+    uint32_t used = 0;
+    if (!capacity) return;
+    out[used++] = '{';
+    for (uint32_t i = 0; i < NH_IO_STAGE_COUNT; ++i) {
+        struct nh_io_timing *timing = nh_io_timings + i;
+        char at[32];
+        if (timing->window_count) {
+            uint64_t epoch = nh_epoch_us(timing->window_max_started);
+            snprintf(at, sizeof(at), "%llu.%03u", (unsigned long long)(epoch / 1000u), (unsigned)(epoch % 1000u));
+        } else strcpy(at, "null");
+        int written = snprintf(out + used, capacity - used,
+            "%s\"%s\":{\"count\":%llu,\"totalUs\":%llu,\"maxUs\":%llu,\"windowCount\":%llu,\"windowMaxUs\":%llu,\"windowMaxStartEpochMs\":%s}",
+            i ? "," : "", names[i], (unsigned long long)timing->count,
+            (unsigned long long)timing->total_us, (unsigned long long)timing->max_us,
+            (unsigned long long)timing->window_count, (unsigned long long)timing->window_max_us, at);
+        if (written < 0 || (uint32_t)written >= capacity - used) return;
+        used += (uint32_t)written;
+        timing->window_count = timing->window_max_us = 0;
+    }
+    snprintf(out + used, capacity - used, "}");
+}
+static void nh_mirror_trace_ack_received(uint32_t frame, LARGE_INTEGER at) {
+    for (uint32_t i = 0; i < nh_mirror_trace_count; ++i) {
+        uint32_t index = (nh_mirror_trace_cursor + NH_MIRROR_TRACE_CAPACITY - 1 - i) % NH_MIRROR_TRACE_CAPACITY;
+        struct nh_mirror_trace *trace = nh_mirror_trace + index;
+        if (trace->frame == frame && !trace->ack_received_at.QuadPart) { trace->ack_received_at = at; return; }
+    }
 }
 void nh_mirror_trace_ack(uint32_t frame, LARGE_INTEGER at) {
     /* ACK dispatch and stream sending have the same I/O owner. The matching
@@ -88,20 +138,24 @@ static void nh_trace_diagnostics(char *out, uint32_t capacity) {
     for (uint32_t i = 0; i < nh_mirror_trace_count; ++i) {
         uint32_t index = (nh_mirror_trace_cursor + NH_MIRROR_TRACE_CAPACITY - nh_mirror_trace_count + i) % NH_MIRROR_TRACE_CAPACITY;
         const struct nh_mirror_trace *trace = nh_mirror_trace + index;
-        char ack[32];
+        char ack[32], received[32];
         uint64_t hook_us = nh_epoch_us(trace->hook_started), publish_us = nh_epoch_us(trace->published_at);
         uint64_t start_us = nh_epoch_us(trace->send_started), end_us = nh_epoch_us(trace->send_finished);
         if (trace->ack_at.QuadPart) {
             uint64_t ack_us = nh_epoch_us(trace->ack_at);
             snprintf(ack, sizeof(ack), "%llu.%03u", (unsigned long long)(ack_us / 1000u), (unsigned)(ack_us % 1000u));
         } else strcpy(ack, "null");
+        if (trace->ack_received_at.QuadPart) {
+            uint64_t received_us = nh_epoch_us(trace->ack_received_at);
+            snprintf(received, sizeof(received), "%llu.%03u", (unsigned long long)(received_us / 1000u), (unsigned)(received_us % 1000u));
+        } else strcpy(received, "null");
         written = snprintf(out + used, capacity - used,
-            "%s{\"sequence\":%llu,\"frame\":%u,\"revision\":%u,\"flags\":%u,\"hookStartEpochMs\":%llu.%03u,\"publishEpochMs\":%llu.%03u,\"sendStartEpochMs\":%llu.%03u,\"sendEndEpochMs\":%llu.%03u,\"ackEpochMs\":%s}",
+            "%s{\"sequence\":%llu,\"frame\":%u,\"revision\":%u,\"flags\":%u,\"hookStartEpochMs\":%llu.%03u,\"publishEpochMs\":%llu.%03u,\"sendStartEpochMs\":%llu.%03u,\"sendEndEpochMs\":%llu.%03u,\"ackReceivedEpochMs\":%s,\"ackEpochMs\":%s}",
             i ? "," : "", (unsigned long long)trace->sequence, trace->frame, trace->revision, trace->flags,
             (unsigned long long)(hook_us / 1000u), (unsigned)(hook_us % 1000u),
             (unsigned long long)(publish_us / 1000u), (unsigned)(publish_us % 1000u),
             (unsigned long long)(start_us / 1000u), (unsigned)(start_us % 1000u),
-            (unsigned long long)(end_us / 1000u), (unsigned)(end_us % 1000u), ack);
+            (unsigned long long)(end_us / 1000u), (unsigned)(end_us % 1000u), received, ack);
         if (written < 0 || (uint32_t)written >= capacity - used) return;
         used += (uint32_t)written;
     }
@@ -124,6 +178,12 @@ static uint32_t nh_u32(const uint8_t *p) {
 static void nh_put32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
+static SIZE_T nh_query_memory(const void *address, MEMORY_BASIC_INFORMATION *info) {
+    LONGLONG started = nh_profile_before();
+    SIZE_T result = VirtualQuery(address, info, sizeof(*info));
+    nh_profile_after(NH_PROFILE_QUERY, 0, started);
+    return result;
+}
 static int nh_range(uint32_t address, uint32_t length, int write) {
     uint64_t end = (uint64_t)address + length;
     uint64_t cursor = address;
@@ -132,7 +192,7 @@ static int nh_range(uint32_t address, uint32_t length, int write) {
         MEMORY_BASIC_INFORMATION info;
         DWORD protection;
         uint64_t next;
-        if (!VirtualQuery((const void *)(uintptr_t)cursor, &info, sizeof(info))) return 0;
+        if (!nh_query_memory((const void *)(uintptr_t)cursor, &info)) return 0;
         protection = info.Protect & 0xffu;
         if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) || protection == PAGE_NOACCESS || !protection) return 0;
         if (!write && protection == PAGE_EXECUTE) return 0;
@@ -145,13 +205,16 @@ static int nh_range(uint32_t address, uint32_t length, int write) {
 
 static int nh_copy_exact(uint32_t address, void *out, uint32_t length) {
     SIZE_T copied = 0;
-    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)address, out, length, &copied) && copied == length;
+    LONGLONG started = nh_profile_before();
+    int result = ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)address, out, length, &copied) && copied == length;
+    nh_profile_after(NH_PROFILE_READ, length, started);
+    return result;
 }
 
 static int nh_query_read_region(uint32_t address, struct nh_read_region *region) {
     MEMORY_BASIC_INFORMATION info;
     DWORD protection;
-    if (!VirtualQuery((const void *)(uintptr_t)address, &info, sizeof(info))) return 0;
+    if (!nh_query_memory((const void *)(uintptr_t)address, &info)) return 0;
     protection = info.Protect & 0xffu;
     region->base = (uint64_t)(uintptr_t)info.BaseAddress;
     region->end = region->base + info.RegionSize;
@@ -619,6 +682,9 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     uint32_t i, id, payload_length;
     uint16_t type;
     uint8_t opcode;
+    LARGE_INTEGER read_started, dispatch_started, dispatch_finished;
+    enum nh_io_stage dispatch_stage;
+    QueryPerformanceCounter(&read_started);
     if (!nh_recv_all(socket, header, 2)) return 0;
     opcode = header[0] & 15;
     if (!(header[0] & 0x80) || (header[0] & 0x70) || !(header[1] & 0x80)) return 0;
@@ -641,6 +707,11 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     if (opcode != 2 || length < 16 || nh_u32(buffer) != NH_MAGIC || buffer[4] != NH_VERSION || buffer[5]) return 0;
     type = (uint16_t)(buffer[6] | ((uint16_t)buffer[7] << 8)); id = nh_u32(buffer + 8); payload_length = nh_u32(buffer + 12);
     if (payload_length != length - 16 || !id) return 0;
+    QueryPerformanceCounter(&dispatch_started);
+    nh_io_timing(NH_IO_READ, read_started, dispatch_started);
+    dispatch_stage = type == NH_ACK ? NH_IO_ACK : type == NH_DIAGNOSTICS ? NH_IO_DIAGNOSTIC :
+        type == NH_INPUT || type == NH_INPUT_STATE || type == NH_CREDIT ? NH_IO_INPUT : NH_IO_OTHER;
+    if (type == NH_ACK && payload_length == 4) nh_mirror_trace_ack_received(nh_u32(buffer + 16), dispatch_started);
     if (type == NH_READ || type == NH_WRITE || type == NH_ALLOC || type == NH_FREE)
         nh_memory_dispatch(type, id, buffer + 16, payload_length);
     else if (type == NH_HOOK || type == NH_SUBSCRIBE || type == NH_ACK || type == NH_BATCH || type == NH_SAMPLE)
@@ -650,8 +721,11 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
     else if (type == NH_DIAGNOSTICS) {
         /* One I/O owner, with no recursive receive. Keep large formatting buffers
          * off the receive stack used by every high-frequency input and ACK. */
-        static char fragment[8192], hidden_host[1024], picture[256], draw_journal[4096], cursor[512], trace[49152], diagnostic[65536];
-        if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload");
+        static char fragment[10240], hidden_host[1024], picture[256], draw_journal[4096], cursor[512], trace[49152], io[4096], diagnostic[73728];
+        if (payload_length == 4 && nh_u32(buffer + 16) == 1) {
+            nh_mirror_fault_diagnostics(diagnostic, sizeof(diagnostic));
+            nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
+        } else if (payload_length) nh_error(id, "DIAGNOSTICS takes no payload or fault-snapshot flag one");
         else {
             LARGE_INTEGER format_started, format_finished;
             QueryPerformanceCounter(&format_started);
@@ -661,11 +735,12 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
             nh_draw_journal_diagnostics(draw_journal, sizeof(draw_journal));
             nh_cursor_diagnostics(cursor, sizeof(cursor));
             nh_trace_diagnostics(trace, sizeof(trace));
-            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"drawJournal\":%s,\"cursor\":%s,\"mirrorMessagesSent\":%llu,\"mirrorQueueUs\":%llu,\"mirrorSendUs\":%llu,\"mirrorQueueMaxUs\":%u,\"mirrorSendMaxUs\":%u,\"diagnosticFormatCount\":%llu,\"diagnosticFormatUs\":%llu,\"diagnosticFormatLastUs\":%u,\"diagnosticFormatMaxUs\":%u,%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, draw_journal, cursor,
+            nh_io_diagnostics(io, sizeof(io));
+            snprintf(diagnostic, sizeof(diagnostic), "{%s,\"gameThreadId\":%u,\"allocatedBytes\":%u,\"replyQueue\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"picture\":%s,\"drawJournal\":%s,\"cursor\":%s,\"mirrorMessagesSent\":%llu,\"mirrorQueueUs\":%llu,\"mirrorSendUs\":%llu,\"mirrorQueueMaxUs\":%u,\"mirrorSendMaxUs\":%u,\"diagnosticFormatCount\":%llu,\"diagnosticFormatUs\":%llu,\"diagnosticFormatLastUs\":%u,\"diagnosticFormatMaxUs\":%u,\"ioStageTiming\":%s,%s}", fragment, nh_game_thread_id(), nh_allocated, nh_reply_count, nh_hidden_active() ? "true" : "false", hidden_host, picture, draw_journal, cursor,
                 (unsigned long long)nh_mirrors_sent, (unsigned long long)nh_mirror_queue_us,
                 (unsigned long long)nh_mirror_send_us, nh_mirror_queue_max_us, nh_mirror_send_max_us,
                 (unsigned long long)nh_diagnostic_count, (unsigned long long)nh_diagnostic_us,
-                nh_diagnostic_last_us, nh_diagnostic_max_us, trace);
+                nh_diagnostic_last_us, nh_diagnostic_max_us, io, trace);
             QueryPerformanceCounter(&format_finished);
             nh_diagnostic_last_us = (uint32_t)nh_elapsed_us(format_started, format_finished);
             if (nh_diagnostic_last_us > nh_diagnostic_max_us) nh_diagnostic_max_us = nh_diagnostic_last_us;
@@ -673,6 +748,8 @@ static int nh_receive(SOCKET socket, uint8_t *buffer) {
             nh_send(type, id, diagnostic, (uint32_t)strlen(diagnostic));
         }
     } else nh_error(id, "Unsupported request type");
+    QueryPerformanceCounter(&dispatch_finished);
+    nh_io_timing(dispatch_stage, dispatch_started, dispatch_finished);
     return 1;
 }
 
@@ -725,7 +802,13 @@ static int nh_flush(SOCKET socket, uint8_t **staging) {
             if (queue_us > nh_mirror_queue_max_us) nh_mirror_queue_max_us = queue_us;
             if (send_us > nh_mirror_send_max_us) nh_mirror_send_max_us = send_us;
         }
-    } else ok = nh_send_packet(socket, &packet);
+    } else {
+        LARGE_INTEGER before, after;
+        QueryPerformanceCounter(&before);
+        ok = nh_send_packet(socket, &packet);
+        QueryPerformanceCounter(&after);
+        nh_io_timing(reply ? NH_IO_REPLY_SEND : NH_IO_PICTURE_SEND, before, after);
+    }
     if (ok && packet.type == NH_PICTURE) nh_picture_sent();
     if (reply) free(packet.bytes);
     return ok ? 2 : 0;
@@ -737,7 +820,7 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
     nh_packet packet;
     nh_surface_info(&width, &height, &bpp);
     nh_hidden_diagnostics(hidden_host, sizeof(hidden_host));
-    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"mirrorWindow\":2,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"drawJournal\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
+    snprintf(hello, sizeof(hello), "{\"protocol\":%u,\"pid\":%lu,\"gameThreadId\":%u,\"hidden\":%s,\"hiddenHost\":%s,\"exe\":{\"size\":%u,\"peTimestamp\":%u,\"sha256\":\"%s\",\"verified\":%s},\"surface\":{\"width\":%u,\"height\":%u,\"bpp\":%u,\"format\":\"RGB565\"},\"limits\":{\"messageBytes\":%u,\"pages\":%u,\"rules\":%u,\"pageRemovals\":true,\"subscribeRevision\":true,\"mirrorWindow\":2,\"mirrorFaultSnapshot\":true,\"cursorSnapshot\":true,\"menuSnapshot\":true,\"menuIdentity\":true,\"drawJournal\":true,\"maxBudgetUs\":%u,\"followRuleKinds\":[1,2,3,4,5,6,7,8]}}",
         NH_VERSION, (unsigned long)GetCurrentProcessId(), nh_game_thread_id(), nh_hidden_active() ? "true" : "false", hidden_host, nh_exe_size, nh_pe_timestamp, nh_hash,
         nh_identity_verified() ? "true" : "false", width, height, bpp, NH_MAX_MESSAGE, NH_MAX_PAGES, NH_MAX_RULES, NH_MIRROR_MAX_BUDGET_US);
     memset(&packet, 0, sizeof(packet)); packet.type = NH_HELLO; packet.length = (uint32_t)strlen(hello); packet.bytes = (uint8_t *)hello;
@@ -748,12 +831,16 @@ static void nh_session(SOCKET socket, uint8_t *receive, uint8_t **staging) {
     while (nh_running && nh_connected()) {
         fd_set readable;
         struct timeval timeout;
+        LARGE_INTEGER select_started, select_finished;
         int selected, flushed;
         /* Cap reply draining so incoming ACK/input cannot starve behind stream traffic. */
         uint32_t i;
         for (i = 0; i < NH_REPLY_SLOTS + 2; i++) { flushed = nh_flush(socket, staging); if (!flushed) return; if (flushed == 1) break; }
         FD_ZERO(&readable); FD_SET(socket, &readable); timeout.tv_sec = 0; timeout.tv_usec = 2000;
+        QueryPerformanceCounter(&select_started);
         selected = select(0, &readable, NULL, NULL, &timeout);
+        QueryPerformanceCounter(&select_finished);
+        nh_io_timing(NH_IO_SELECT, select_started, select_finished);
         if (selected == SOCKET_ERROR || (selected > 0 && !nh_receive(socket, receive))) return;
     }
 }

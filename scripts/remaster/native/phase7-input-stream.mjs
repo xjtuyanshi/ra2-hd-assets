@@ -53,8 +53,8 @@ export async function createPhase7EvidenceStream(path) {
 
 /** Observe the real NativeCore Input requests and GUI-consumption replies.
  * This wrapper never submits, delays, replaces or retries a request. */
-async function startPhase7NativeInputObserver(worker) {
-  return worker.evaluate(() => {
+export async function startPhase7NativeInputObserver(worker, { discreteOnly = false } = {}) {
+  return worker.evaluate((discreteOnly) => {
     let observer = globalThis.__phase7NativeInputObserver;
     if (!observer) {
       const connection = globalThis.__auditCore?.connection;
@@ -78,10 +78,14 @@ async function startPhase7NativeInputObserver(worker) {
       const original = connection.request.bind(connection);
       connection.request = function (type, payload, ...rest) {
         if (type !== 10 || payload?.byteLength !== 16) return original(type, payload, ...rest);
+        const input = new Uint32Array(payload.buffer, payload.byteOffset, 4);
+        const position = input[0] === 3 || (input[0] === 1 && input[1] === 0x0200);
+        // Long feel windows only need the keys and buttons that can open a menu.
+        // Keep pointer traffic out of this bounded trace without changing its delivery.
+        if (observer.discreteOnly && position) return original(type, payload, ...rest);
         const sequence = ++observer.sequence;
         const startAt = performance.timeOrigin + performance.now();
-        const fields = Array.from(new Uint32Array(payload.buffer, payload.byteOffset, 4));
-        const position = fields[0] === 3 || (fields[0] === 1 && fields[1] === 0x0200);
+        const fields = Array.from(input);
         observer.pending.add(sequence);
         if (observer.active) observer.started++;
         put({ kind: 'native-input-request', at: startAt, sequence, fields, position });
@@ -123,12 +127,13 @@ async function startPhase7NativeInputObserver(worker) {
     observer.samples = [];
     observer.started = observer.acknowledged = observer.errors = observer.lostEvidence = 0;
     observer.sequenceBeforeStart = observer.sequence;
+    observer.discreteOnly = discreteOnly;
     observer.active = true;
-    return { pendingBeforeStart: observer.pending.size, sequenceBeforeStart: observer.sequence };
-  });
+    return { pendingBeforeStart: observer.pending.size, sequenceBeforeStart: observer.sequence, discreteOnly };
+  }, discreteOnly);
 }
 
-async function drainPhase7NativeInputObserver(worker, stop = false) {
+export async function drainPhase7NativeInputObserver(worker, stop = false) {
   return worker.evaluate((stop) => {
     const observer = globalThis.__phase7NativeInputObserver;
     if (stop) observer.active = false;
@@ -153,6 +158,8 @@ export async function installPhase7InputProbe(page) {
     const probe = {
       counts: {},
       samples: [],
+      discrete: [],
+      lifecycle: [],
       positions: [],
       lostEvidence: 0,
       latest: null,
@@ -205,6 +212,11 @@ export async function installPhase7InputProbe(page) {
         button: event.button ?? null,
         buttons: event.buttons ?? null,
         code: event.code ?? null,
+        key: event.key ?? null,
+        repeat: event.repeat ?? false,
+        modifiers: { alt: event.altKey, control: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey },
+        target: event.target?.id ?? null,
+        activeElement: document.activeElement?.id ?? null,
         deltaY: event.deltaY ?? null,
         coalesced: coalesced.length,
         pointerLocked: !!document.pointerLockElement,
@@ -223,10 +235,31 @@ export async function installPhase7InputProbe(page) {
         probe.positions.push(record);
         if (probe.positions.length > 4096) probe.positions.splice(0, probe.positions.length - 4096);
       }
+      if (event.type !== 'pointermove') {
+        probe.discrete.push(record);
+        if (probe.discrete.length > 256) probe.discrete.shift();
+      }
       enqueue(record);
     };
     const types = ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'keyup'];
     for (const type of types) window.addEventListener(type, listen, true);
+    const lifecycleTypes = ['fullscreenchange', 'pointerlockchange', 'visibilitychange', 'focus', 'blur'];
+    const lifecycle = (event) => {
+      probe.lifecycle.push({
+        kind: 'page-input-lifecycle',
+        type: event.type,
+        at: at(),
+        trusted: event.isTrusted,
+        target: event.target?.id ?? null,
+        activeElement: document.activeElement?.id ?? null,
+        focused: document.hasFocus(),
+        hidden: document.hidden,
+        fullscreenElement: document.fullscreenElement?.id ?? null,
+        pointerLockElement: document.pointerLockElement?.id ?? null,
+      });
+      if (probe.lifecycle.length > 128) probe.lifecycle.shift();
+    };
+    for (const type of lifecycleTypes) window.addEventListener(type, lifecycle, true);
     const presentation = {
       latestFrame: null,
       latestRaster: null,
@@ -407,6 +440,7 @@ export async function installPhase7InputProbe(page) {
     };
     probe.stop = () => {
       for (const type of types) window.removeEventListener(type, listen, true);
+      for (const type of lifecycleTypes) window.removeEventListener(type, lifecycle, true);
       delete window.__phase7InputProbe;
       delete window.__phase7Presentation;
     };

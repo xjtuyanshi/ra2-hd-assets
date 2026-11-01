@@ -109,9 +109,9 @@ export function withUser32MessageLoop<TBase extends Constructor<User32WindowingC
       }
       // Synchronous dispatch: real SendMessageA enters WndProc directly. Rewrite return addresses with the message-pump
       // trampoline; WndProc's EAX naturally becomes SendMessageA's result.
-      if (message === 0x000f) this.pendingPaintValidations.add(hwnd);
       const originalReturn = this.readU32(call.stack);
       const frame = reservedFrame ?? this.reserveGuestCallback();
+      if (message === 0x000f) this.beginPaintCallback(hwnd, frame);
       const { depth, trampoline } = frame;
       this.lastCallbackState = { hwnd, message, callback, callStack: call.stack, originalReturn, trampoline, depth };
       const code: number[] = [];
@@ -567,8 +567,6 @@ export function withUser32MessageLoop<TBase extends Constructor<User32WindowingC
         if (message === 0x000f) this.invalidatedWindows.delete(hwnd);
         return result;
       }
-      if (message === 0x000f) this.pendingPaintValidations.add(hwnd);
-
       const callbackArgs =
         multimediaTimer?.callback === lParam
           ? [multimediaTimer.id, 0, multimediaTimer.user, 0, 0]
@@ -580,6 +578,7 @@ export function withUser32MessageLoop<TBase extends Constructor<User32WindowingC
       const originalReturn = this.readU32(call.stack);
       // Callbacks may reenter the message pump; each level needs an independent bridge to preserve outer return addresses.
       const frame = this.reserveGuestCallback();
+      if (message === 0x000f) this.beginPaintCallback(hwnd, frame);
       const { depth, trampoline } = frame;
       this.lastCallbackState = { hwnd, message, callback, callStack: call.stack, originalReturn, trampoline, depth };
       const code: number[] = [];

@@ -105,6 +105,15 @@ describe('桌面鼠标跟手性', () => {
       Object.assign(h.doc, { activeElement: toolbarButton, fullscreenElement: null });
       await toggleImmersiveFullscreen(h.canvas as unknown as HTMLCanvasElement);
       expect(h.doc.activeElement).toBe(h.canvas);
+      // Entering fullscreen and adopting/releasing pointer lock cannot itself
+      // open the game menu; only the following explicit physical key may do so.
+      const sentBeforeLifecycle = h.vm.postMessage.mock.calls.length;
+      h.doc.dispatchEvent(new Event('fullscreenchange'));
+      for (const pointerLockElement of [h.canvas, null]) {
+        Object.assign(h.doc, { pointerLockElement });
+        h.doc.dispatchEvent(new Event('pointerlockchange'));
+      }
+      expect(h.vm.postMessage).toHaveBeenCalledTimes(sentBeforeLifecycle);
       for (const type of ['keydown', 'keyup']) {
         window.dispatchEvent(
           Object.assign(new Event(type, { cancelable: true }), {

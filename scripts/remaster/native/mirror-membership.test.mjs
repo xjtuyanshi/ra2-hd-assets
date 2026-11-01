@@ -14,13 +14,121 @@ test('membership and bounded publication credits preserve removals, generations 
   writeFileSync(
     source,
     `
+#define _DEFAULT_SOURCE
 #include <stdint.h>
-struct nh_page { uint32_t address; uint64_t dirty; };
+#define NH_PAGE_SIZE 4096u
+struct nh_page {
+    uint32_t address, rule, range, object, request_address, request_length;
+    uint64_t dirty;
+};
 #include "mirror-membership.h"
 #include "mirror-flight.h"
+#include "mirror-page-equal.h"
 #include <assert.h>
-#define P(address) {address, 0}
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#define P(page_address) {.address = page_address}
+static int compare_pages(const void *a, const void *b) {
+    uint32_t x = ((const struct nh_page *)a)->address, y = ((const struct nh_page *)b)->address;
+    return (x > y) - (x < y);
+}
+static void check_equal_modes(const uint8_t *left, const uint8_t *right, int expected) {
+    assert(nh_page_bytes_equal(left, right, 0) == expected);
+#if defined(__i386__) || defined(__x86_64__)
+    if (__builtin_cpu_supports("sse2")) assert(nh_page_bytes_equal(left, right, 1) == expected);
+#else
+    assert(nh_page_bytes_equal(left, right, 1) == expected);
+#endif
+}
+static void check_page_equal(void) {
+    uint8_t left_storage[NH_PAGE_SIZE + 16], right_storage[NH_PAGE_SIZE + 16];
+    uint32_t boundaries[] = {0, 15, 16, 63, 64, NH_PAGE_SIZE - 1};
+    for (unsigned left_offset = 0; left_offset < 16; ++left_offset) {
+        for (unsigned right_offset = 0; right_offset < 16; ++right_offset) {
+            uint8_t *left = left_storage + left_offset, *right = right_storage + right_offset;
+            for (unsigned i = 0; i < NH_PAGE_SIZE; ++i) left[i] = right[i] = (uint8_t)(i * 137u);
+            check_equal_modes(left, right, 1);
+            for (unsigned i = 0; i < sizeof(boundaries) / sizeof(*boundaries); ++i) {
+                right[boundaries[i]] ^= 0x81;
+                check_equal_modes(left, right, 0);
+                right[boundaries[i]] ^= 0x81;
+            }
+        }
+    }
+    /* Every byte must affect equality, including different unaligned pointers. */
+    for (unsigned offset = 0; offset <= 3; offset += 3) {
+        uint8_t *left = left_storage + offset, *right = right_storage + offset * 3;
+        memset(left, 0x5a, NH_PAGE_SIZE); memset(right, 0x5a, NH_PAGE_SIZE);
+        for (unsigned i = 0; i < NH_PAGE_SIZE; ++i) {
+            right[i] ^= 0x81;
+            check_equal_modes(left, right, 0);
+            right[i] ^= 0x81;
+        }
+        check_equal_modes(left, right, 1);
+    }
+    /* Guard pages catch reads before/after the owned page on the native host,
+     * even when its physical VM page size exceeds the protocol page size. */
+    size_t host_page = (size_t)sysconf(_SC_PAGESIZE), allocation = host_page * 3;
+    assert(host_page >= NH_PAGE_SIZE);
+    uint8_t *a = mmap(NULL, allocation, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    uint8_t *b = mmap(NULL, allocation, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(a != MAP_FAILED && b != MAP_FAILED);
+    assert(!mprotect(a + host_page, host_page, PROT_READ | PROT_WRITE));
+    assert(!mprotect(b + host_page, host_page, PROT_READ | PROT_WRITE));
+    for (unsigned edge = 0; edge < 2; ++edge) {
+        uint8_t *left = a + host_page + (edge ? host_page - NH_PAGE_SIZE : 0);
+        uint8_t *right = b + host_page + (edge ? host_page - NH_PAGE_SIZE : 0);
+        memset(left, 0xc3, NH_PAGE_SIZE); memset(right, 0xc3, NH_PAGE_SIZE);
+        check_equal_modes(left, right, 1);
+        right[NH_PAGE_SIZE - 1] ^= 1;
+        check_equal_modes(left, right, 0);
+    }
+    assert(!munmap(a, allocation) && !munmap(b, allocation));
+}
+static void check_sort(void) {
+    enum { capacity = 8192 };
+    struct nh_page *actual = calloc(capacity + 2, sizeof(*actual));
+    struct nh_page *expected = calloc(capacity + 2, sizeof(*expected));
+    struct nh_page *scratch = calloc(capacity + 2, sizeof(*scratch));
+    uint32_t sizes[] = {0, 1, 2, 1023, 1024, 1025, 3000, capacity};
+    assert(actual && expected && scratch);
+    for (unsigned n = 0; n < sizeof(sizes) / sizeof(*sizes); ++n) {
+        uint32_t count = sizes[n];
+        /* Reverse, ascending and permuted addresses exercise both radix digits,
+         * zero and the highest page. All owner fields and generations travel
+         * with their page, including data at both scratch-array boundaries. */
+        for (unsigned pattern = 0; pattern < 3; ++pattern) {
+            memset(actual, 0xa5, (capacity + 2) * sizeof(*actual));
+            memset(scratch, 0x5a, (capacity + 2) * sizeof(*scratch));
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t page = pattern == 0 ? 0xfffffu - i : pattern == 1 ? i :
+                    (i * 0x9e377u) & 0xfffffu;
+                actual[i + 1] = (struct nh_page){page << 12, i, UINT32_MAX - i,
+                    i ^ 0x12345678u, i * 13u, i * 31u, UINT64_C(0xabcdef0123456789) + i};
+            }
+            memcpy(expected, actual, (capacity + 2) * sizeof(*actual));
+            qsort(expected + 1, count, sizeof(*expected), compare_pages);
+            nh_sort_pages(actual + 1, scratch + 1, count);
+            assert(!memcmp(actual, expected, (capacity + 2) * sizeof(*actual)));
+            for (unsigned byte = 0; byte < sizeof(*scratch); ++byte) {
+                assert(((unsigned char *)scratch)[byte] == 0x5a);
+                assert(((unsigned char *)(scratch + count + 1))[byte] == 0x5a);
+            }
+        }
+    }
+    free(actual); free(expected); free(scratch);
+}
 int main(void) {
+#if defined(__i386__) || defined(__x86_64__)
+    puts(__builtin_cpu_supports("sse2") ? "page equality: x86 SSE2 and forced CRT fallback" :
+        "page equality: x86 without SSE2, CRT fallback only");
+#else
+    puts("page equality: non-x86 CRT fallback");
+#endif
+    check_sort();
+    check_page_equal();
     struct nh_page old[] = {P(0x1000), P(0x3000), P(0x5000)};
     struct nh_page next[] = {P(0x1000), P(0x2000), P(0x5000), P(0x9000)};
     uint32_t indices[4096], removed[4096]; int changed;
@@ -100,13 +208,26 @@ int main(void) {
 `,
   );
   try {
-    const build = spawnSync('cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-I', include, source, '-o', binary], {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
-    assert.equal(build.status, 0, build.error?.message ?? build.stderr);
-    const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 10000 });
-    assert.equal(run.status, 0, run.error?.message ?? run.stderr);
+    const architectures = [[]];
+    if (process.env.NATIVE_HOST_TEST_X86_64 === '1') {
+      assert.equal(process.platform, 'darwin', 'NATIVE_HOST_TEST_X86_64 requires macOS with Rosetta');
+      assert.equal(process.arch, 'arm64', 'NATIVE_HOST_TEST_X86_64 requires a native arm64 Node process');
+      architectures.push(['-arch', 'x86_64']);
+    }
+    for (const architecture of architectures) {
+      const build = spawnSync(
+        'cc',
+        ['-O2', '-std=c11', '-Wall', '-Wextra', '-Werror', ...architecture, '-I', include, source, '-o', binary],
+        {
+          encoding: 'utf8',
+          timeout: 10000,
+        },
+      );
+      assert.equal(build.status, 0, build.error?.message ?? build.stderr);
+      const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 10000 });
+      assert.equal(run.status, 0, run.error?.message ?? run.stderr);
+      process.stdout.write(run.stdout);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

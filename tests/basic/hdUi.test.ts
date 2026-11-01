@@ -21,7 +21,92 @@ import { startHdMenus } from '../../src/ui/pages/game/hdMenus';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 import { identifyYrHdMenu, yrMenuText } from '../../src/games/yr/hdMenus';
+import { layoutYrMenuText, parseYrMenuFont } from '../../src/games/yr/menuTypography';
 import type { MenuControlSnapshot, MenuSnapshot } from '../../src/vm86/menuSnapshot';
+
+describe('source-bound HD menu typography', () => {
+  const metrics = () => ({
+    version: 1,
+    lineHeight: 17,
+    spacing: 1,
+    glyphs: {
+      '32': [4, 0, 0, 0, 0],
+      '65': [7, 0, 4, 7, 9],
+      '66': [6, 0, 4, 6, 9],
+      '20013': [15, 1, 1, 13, 15],
+      '65292': null,
+    },
+  });
+
+  it('uses supplied mixed-font ink boxes and advances without host-font widening', () => {
+    const font = parseYrMenuFont(metrics())!;
+    const [line] = layoutYrMenuText('A 中B', font)!;
+    expect(line!.width).toBe(36);
+    expect(line!.glyphs.map(({ x, advance }) => [x, advance])).toEqual([
+      [0, 8],
+      [8, 5],
+      [13, 16],
+      [29, 7],
+    ]);
+    expect(line!.glyphs[0]!.ink).toEqual({ x: 0, y: 4, width: 7, height: 9 });
+    expect(line!.glyphs[0]!.font).toContain('Arial Black');
+    expect(line!.glyphs[2]!.font).not.toContain('Arial Black');
+  });
+
+  it('omits only verified absent glyphs and rejects unknown coverage for the whole label', () => {
+    const font = parseYrMenuFont(metrics())!;
+    expect(layoutYrMenuText('A，B', font)![0]!.width).toBe(15);
+    expect(layoutYrMenuText('A,B', font)).toBeNull();
+    const supportedComma = parseYrMenuFont({
+      ...metrics(),
+      glyphs: { ...metrics().glyphs, '65292': [2, 0, 12, 2, 4] },
+    })!;
+    expect(layoutYrMenuText('A，B', supportedComma)![0]!.width).toBe(18);
+    expect(layoutYrMenuText('A\r\nB', font)!.map(({ width }) => width)).toEqual([8, 7]);
+  });
+
+  it('rejects malformed dimensions and advance contracts before they can cover original text', () => {
+    expect(parseYrMenuFont({ ...metrics(), lineHeight: 0 })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), glyphs: { '65': [7, 0, 9, 7, 9] } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), glyphs: { '65': [7, 1, 4, 7, 9] } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), glyphs: { '65': [7, 0, 0, 0, 9] } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), glyphs: { '65536': null } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), aliases: { toString: 'A' } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), aliases: { constructor: 'A' } })).toBeNull();
+  });
+
+  it('keeps source advances and uses prebuilt ink-local paths without partial font fallback', () => {
+    const path = 'M0 0L7 0L7 9L0 9Z';
+    const font = parseYrMenuFont({ ...metrics(), outlines: { '65': path } })!;
+    expect(layoutYrMenuText('A ', font)![0]!.glyphs[0]).toMatchObject({
+      path,
+      advance: 8,
+      ink: { x: 0, y: 4, width: 7, height: 9 },
+    });
+    expect(layoutYrMenuText('A，', font)![0]!.width).toBe(8);
+    expect(layoutYrMenuText('AB', font)).toBeNull();
+  });
+
+  it('rejects unclosed, out-of-box and malformed outlines before covering original text', () => {
+    for (const path of [
+      'M0 0L7 9',
+      'M0 0L8 9Z',
+      'M0 0L7 10Z',
+      'M0 0L-1 0Z',
+      'M0 0LNaN 0Z',
+      'M0 0L1..2 0Z',
+      'M0 0L7 Z',
+      'M0 0M1 1Z',
+      'Z',
+      '',
+    ])
+      expect(parseYrMenuFont({ ...metrics(), outlines: { '65': path } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), outlines: { toString: 'M0 0L1 1Z' } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), outlines: { '65292': '' } })).toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), outlines: { '32': '' } })).not.toBeNull();
+    expect(parseYrMenuFont({ ...metrics(), outlines: { '65': 'M0 0Q3 0 7 9L0 9Z' } })).not.toBeNull();
+  });
+});
 
 describe('HD menu atomic fallback', () => {
   const control = (hwnd: number, id: number, className = 'Button'): MenuControlSnapshot => ({
@@ -39,6 +124,7 @@ describe('HD menu atomic fallback', () => {
     pressed: false,
   });
   const snapshot = (): MenuSnapshot => ({
+    generation: 7,
     width: 1728,
     height: 914,
     dialogHwnd: 1,
@@ -49,8 +135,40 @@ describe('HD menu atomic fallback', () => {
       { ...control(1, 0, '#32770'), parent: 0, rect: { x: 0, y: 0, width: 1728, height: 914 } },
       control(2, 1670),
       control(3, 1737),
-      control(4, 65535, 'Static'),
+      { ...control(4, 0xffff_ffff, 'Static'), text: 'Quit prompt' },
     ],
+  });
+  it.each([65535, -1, 0xffff_ffff])('recognizes static label ID %i without changing its captured identity', (id) => {
+    const quit = snapshot();
+    quit.controls[3]!.id = id;
+    expect(identifyYrHdMenu(quit)).toBe('quit');
+    expect(quit.controls[3]!.id).toBe(id);
+    const chooseMap: MenuSnapshot = {
+      ...quit,
+      width: 800,
+      height: 600,
+      controls: [
+        { ...quit.controls[0]!, rect: { x: 0, y: 0, width: 800, height: 600 } },
+        ...[1363, 1771].map((listId) => ({
+          ...control(listId, listId, 'ListBox'),
+          items: ['Map'],
+          itemsComplete: true,
+          selection: 0,
+          topIndex: 0,
+          itemHeight: 18,
+          visibleRows: 1,
+        })),
+        ...[1472, 1733, 1411].map((buttonId) => control(buttonId, buttonId)),
+        control(1684, 1684, 'Static'),
+        control(1128, 1128, 'Static'),
+        control(8313, id, 'Static'),
+      ],
+    };
+    expect(identifyYrHdMenu(chooseMap)).toBe('choose-map');
+    expect(chooseMap.controls.at(-1)!.id).toBe(id);
+    // An unknown actionable ID must not become a recognized static label.
+    chooseMap.controls.at(-1)!.className = 'Button';
+    expect(identifyYrHdMenu(chooseMap)).toBeNull();
   });
   it('retains the whole original dialog when any visible control is unknown or outside its picture', () => {
     const complete = snapshot();
@@ -136,13 +254,14 @@ describe('HD menu atomic fallback', () => {
       blob: async () => new Blob(),
     }));
     vi.stubGlobal('createImageBitmap', async () => ({ close: vi.fn() }));
+    const menuDrawing = recording();
     const canvas = {
       style: {} as Record<string, string>,
       dataset: {} as Record<string, string>,
       width: 0,
       height: 0,
       setAttribute: vi.fn(),
-      getContext: () => recording().ctx,
+      getContext: () => menuDrawing.ctx,
       remove: vi.fn(),
     };
     vi.stubGlobal('document', { createElement: () => canvas, pointerLockElement: null });
@@ -170,18 +289,44 @@ describe('HD menu atomic fallback', () => {
       parentElement: { appendChild: vi.fn() },
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 1728, height: 914 }),
     });
-    const getMenuSnapshot = vi.fn(async (): Promise<MenuSnapshot | null> => snapshot());
+    const unsignedQuit = snapshot();
+    unsignedQuit.controls[3]!.id = 0xffff_ffff;
+    unsignedQuit.controls[3]!.text = 'Quit prompt';
+    const getMenuSnapshot = vi.fn(async (): Promise<MenuSnapshot | null> => unsignedQuit);
+    let pictureGeneration = 7;
+    let picturePresented: (() => void) | undefined;
+    const unsubscribePicture = vi.fn();
     const menus = await startHdMenus({
       screen: screen as unknown as HTMLCanvasElement,
       vm: { getMenuSnapshot } as unknown as Parameters<typeof startHdMenus>[0]['vm'],
       side: () => 0,
       pageCursorAvailable: () => true,
       frameSize: () => ({ width: 1728, height: 914 }),
+      pictureGeneration: () => pictureGeneration,
+      onFramePresented: (listener) => {
+        picturePresented = listener;
+        return unsubscribePicture;
+      },
     });
     const paint = () => {
       while (frames.length) frames.shift()!(0);
     };
     await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    expect(menuDrawing.calls.find(({ name, args }) => name === 'fillText' && args[0] === 'Quit prompt')).toMatchObject({
+      args: ['Quit prompt', 702.5, 109],
+      style: { textBaseline: 'alphabetic' },
+    });
+    expect(menuDrawing.calls.some(({ name }) => name === 'fillRect')).toBe(false);
+    pictureGeneration = 8;
+    picturePresented!();
+    // A new picture can arrive without a click or a different HWND tree.
+    expect(canvas.style.display).toBe('none');
+    paint();
+    expect(canvas.dataset.fallback).toBe('picture-generation');
+    pictureGeneration = 7;
+    picturePresented!();
     paint();
     expect(canvas.style.display).toBe('block');
     const incomplete = snapshot();
@@ -272,6 +417,7 @@ describe('HD menu atomic fallback', () => {
     paint();
     expect(canvas.style.display).toBe('block');
     menus!.dispose();
+    expect(unsubscribePicture).toHaveBeenCalledOnce();
   });
 });
 
@@ -323,9 +469,17 @@ function recording() {
           for (const key of Object.keys(state)) delete state[key];
           Object.assign(state, stack.pop());
         }
-        if (name === 'measureText')
-          return { width: String(args[0]).length * parseFloat(String(state.font).split(' ')[1]!) * 0.55 };
-        if (name === 'createLinearGradient') {
+        if (name === 'measureText') {
+          const width = String(args[0]).length * parseFloat(String(state.font).split(' ')[1]!) * 0.55;
+          return {
+            width,
+            actualBoundingBoxLeft: 0,
+            actualBoundingBoxRight: width,
+            actualBoundingBoxAscent: 9,
+            actualBoundingBoxDescent: 3,
+          };
+        }
+        if (name === 'createLinearGradient' || name === 'createRadialGradient') {
           const stops: unknown[] = [];
           return { stops, addColorStop: (...stop: unknown[]) => stops.push(stop) };
         }
@@ -1879,5 +2033,292 @@ describe('chrome extras: single control images and overlays', () => {
     expect(loaded.pieces).toHaveLength(1);
     expect([loaded.controlImages, loaded.overlays]).toEqual([undefined, undefined]);
     assets.dispose();
+  });
+});
+
+describe('HD setup complete geometry and popup fallback', () => {
+  const control = (id: number, className = 'Static'): MenuControlSnapshot => ({
+    hwnd: id + 100,
+    parent: 1,
+    id,
+    className,
+    style: 0,
+    text: 'Original text',
+    textComplete: true,
+    rect: { x: 20, y: 20, width: 150, height: 24 },
+    visible: true,
+    enabled: true,
+    focused: false,
+    pressed: false,
+  });
+  const setup = (): MenuSnapshot => {
+    const list = (id: number, className: string): MenuControlSnapshot => ({
+      ...control(id, className),
+      items: ['Original item'],
+      itemsComplete: true,
+      selection: 0,
+      topIndex: 0,
+      itemHeight: 18,
+      visibleRows: 1,
+      ...(className === 'ComboBox'
+        ? { popup: { dropped: false, rect: { x: 20, y: 44, width: 150, height: 150 }, topIndex: 0 } }
+        : {}),
+      ...(id === 1698 ? { itemColors: [0xff0000] } : {}),
+    });
+    return {
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      generation: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 0, y: 0 },
+      controls: [
+        { ...control(0, '#32770'), hwnd: 1, parent: 0, rect: { x: 0, y: 0, width: 800, height: 600 } },
+        list(1696, 'ListBox'),
+        ...[1697, 1698, 1699, 1901].map((id) => list(id, 'ComboBox')),
+        control(1754),
+        control(1128),
+        ...[1559, 1450, 1472].map((id) => control(id, 'Button')),
+        ...[1686, 1683, 1358, 1690, 1693].map((id) => ({ ...control(id, 'Button'), checked: 0 })),
+        ...[1292, 1297, 1321].map((id) => ({
+          ...control(id, 'msctls_trackbar32'),
+          slider: {
+            min: 0,
+            max: 6,
+            value: 5,
+            valueText: '5',
+            groove: { x: 20, y: 20, width: 100, height: 24 },
+            thumb: { x: 100, y: 20, width: 12, height: 24 },
+          },
+        })),
+      ],
+    };
+  };
+  it('preflights literal values and complete combo geometry before covering the original screen', async () => {
+    const snapshot = setup();
+    for (const control of snapshot.controls) {
+      control.text = 'A';
+      if (control.items) control.items = ['A'];
+      if (control.slider) control.slider.valueText = 'A';
+    }
+    const name = snapshot.controls.find(({ id }) => id === 1696)!;
+    name.text = 'A:';
+    name.edit = { caret: 2, firstVisible: 0, caretVisible: false, caretColor: 0xffff00 };
+    const combo = snapshot.controls.find(({ id }) => id === 1697)!;
+    const buttons = { normal: 'plate.png', hover: 'plate.png', pressed: 'plate.png', disabled: 'plate.png' };
+    vi.stubGlobal('fetch', async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith('menus.json')
+          ? {
+              version: 1,
+              strings: 'strings.json',
+              fontMetrics: 'font.json',
+              controlSkin: 'vector-v1',
+              main: { shell: 'shell.png', buttons },
+              setup: { background: 'setup.png', buttons },
+              themes: {},
+            }
+          : url.endsWith('font.json')
+            ? {
+                version: 1,
+                lineHeight: 17,
+                spacing: 1,
+                glyphs: Object.fromEntries([...new Set('AB:[]')].map((char) => [char.charCodeAt(0), [7, 0, 4, 7, 9]])),
+              }
+            : {},
+      blob: async () => new Blob(),
+    }));
+    vi.stubGlobal('createImageBitmap', async () => ({ close: vi.fn() }));
+    const { ctx, calls } = recording();
+    const canvas = {
+      style: {} as Record<string, string>,
+      dataset: {} as Record<string, string>,
+      width: 0,
+      height: 0,
+      setAttribute: vi.fn(),
+      getContext: () => ctx,
+      remove: vi.fn(),
+    };
+    const frames: FrameRequestCallback[] = [];
+    const polls: (() => void)[] = [];
+    vi.stubGlobal('document', { createElement: () => canvas, pointerLockElement: null });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal(
+      'window',
+      Object.assign(new EventTarget(), {
+        devicePixelRatio: 1.5,
+        setTimeout: (callback: () => void) => polls.push(callback),
+      }),
+    );
+    const screen = Object.assign(new EventTarget(), {
+      offsetLeft: 0,
+      offsetTop: 0,
+      clientWidth: 800,
+      clientHeight: 600,
+      parentElement: { appendChild: vi.fn() },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+    });
+    const menus = await startHdMenus({
+      screen: screen as unknown as HTMLCanvasElement,
+      vm: { getMenuSnapshot: async () => structuredClone(snapshot) } as unknown as Parameters<
+        typeof startHdMenus
+      >[0]['vm'],
+      side: () => 0,
+      pageCursorAvailable: () => true,
+      frameSize: () => ({ width: 800, height: 600 }),
+      pictureGeneration: () => 1,
+    });
+    const paint = async () => {
+      await settle();
+      while (frames.length) frames.shift()!(0);
+    };
+    try {
+      await paint();
+      // The colon belongs to the typed name, not an unresolved CSF key.
+      expect(canvas.style.display).toBe('block');
+      expect(calls.some(({ name, args }) => name === 'fillText' && args[0] === ':')).toBe(true);
+      for (const target of [name, combo]) {
+        name.text = 'A';
+        name.edit!.caret = 1;
+        target.text = '[A&B]';
+        if (target === combo) target.selection = -1;
+        calls.length = 0;
+        polls.shift()!();
+        await paint();
+        // Ampersands in actual values are not accelerator markers. Missing
+        // font coverage must withhold the whole screen before any painting.
+        expect(canvas.style.display).toBe('none');
+        expect(canvas.dataset.fallback).toBe('unknown-font-glyph');
+        expect(calls).toEqual([]);
+      }
+      combo.text = 'A:';
+      polls.shift()!();
+      await paint();
+      expect(canvas.style.display).toBe('block');
+      expect(calls.some(({ name, args }) => name === 'fillText' && args[0] === ':')).toBe(true);
+      // The real web NewCombo is two pixels shorter than the native HWND.
+      combo.rect.height = 23;
+      polls.shift()!();
+      await paint();
+      expect(canvas.style.display).toBe('block');
+      combo.rect.height = 22;
+      calls.length = 0;
+      polls.shift()!();
+      await paint();
+      expect(canvas.style.display).toBe('none');
+      expect(canvas.dataset.fallback).toBe('control-geometry');
+      expect(calls).toEqual([]);
+    } finally {
+      menus?.dispose();
+    }
+  });
+  it('rejects malformed slider subrectangles before drawing anything outside the control', () => {
+    expect(identifyYrHdMenu(setup())).toBe('setup');
+    for (const rect of [
+      { x: Number.NaN, y: 20, width: 12, height: 24 },
+      { x: 799, y: 20, width: 12, height: 24 },
+      { x: 20, y: 20, width: -1, height: 24 },
+      { x: 20, y: 19, width: 12, height: 24 },
+    ]) {
+      const snapshot = setup();
+      snapshot.controls.find(({ id }) => id === 1292)!.slider!.thumb = rect;
+      expect(identifyYrHdMenu(snapshot)).toBeNull();
+    }
+    const noValueRoom = setup();
+    noValueRoom.controls.find(({ id }) => id === 1292)!.slider!.groove!.width = 150;
+    expect(identifyYrHdMenu(noValueRoom)).toBeNull();
+  });
+  it('accepts only the verified custom list and sibling scrollbar association', () => {
+    const snapshot = setup();
+    const combo = snapshot.controls.find(({ id }) => id === 1697)!;
+    const rect = { x: 20, y: 44, width: 130, height: 150 };
+    combo.popup = { dropped: true, rect, topIndex: 0, selection: 0, hwnd: 9001, scrollbarHwnd: 9002 };
+    snapshot.controls.push(
+      { ...control(0, 'ComboDropWin'), hwnd: 9001, popupOwner: combo.hwnd, rect },
+      {
+        ...control(0, 'ScrollBar'),
+        hwnd: 9002,
+        style: 1,
+        rect: { ...rect, x: 150, width: 20 },
+        scroll: {
+          min: 0,
+          max: 0,
+          page: 0,
+          pos: 0,
+          arrowSize: 22,
+          groove: { x: 152, y: 68, width: 16, height: 102 },
+          thumb: { x: 152, y: 68, width: 16, height: 102 },
+        },
+      },
+    );
+    expect(identifyYrHdMenu(snapshot)).toBe('setup');
+    const noScroll = structuredClone(snapshot);
+    noScroll.controls = noScroll.controls.filter(({ hwnd }) => hwnd !== 9002);
+    noScroll.controls.find(({ hwnd }) => hwnd === 9001)!.rect.width = 150;
+    noScroll.controls.find(({ id }) => id === 1697)!.popup!.rect.width = 150;
+    noScroll.controls.find(({ id }) => id === 1697)!.popup!.scrollbarHwnd = 0;
+    expect(identifyYrHdMenu(noScroll)).toBe('setup');
+    delete noScroll.controls.find(({ id }) => id === 1697)!.popup!.scrollbarHwnd;
+    expect(identifyYrHdMenu(noScroll)).toBeNull();
+    for (const mutate of [
+      (value: MenuSnapshot) => {
+        value.controls.find(({ hwnd }) => hwnd === 9001)!.popupOwner = 123;
+      },
+      (value: MenuSnapshot) => {
+        value.controls.find(({ hwnd }) => hwnd === 9002)!.parent = 9001;
+      },
+      (value: MenuSnapshot) => {
+        value.controls.find(({ hwnd }) => hwnd === 9002)!.rect.x--;
+      },
+      (value: MenuSnapshot) => {
+        value.controls.find(({ id }) => id === 1697)!.popup!.selection = 7;
+      },
+      (value: MenuSnapshot) => {
+        value.controls.find(({ id }) => id === 1697)!.popup!.rect.width = 500;
+      },
+    ]) {
+      const broken = structuredClone(snapshot);
+      mutate(broken);
+      expect(identifyYrHdMenu(broken)).toBeNull();
+    }
+  });
+  it('retains the whole original for unknown popups, ambiguous windows and incomplete visible player rows', () => {
+    for (const targetId of [1697, 1128, 1472]) {
+      const snapshot = setup();
+      snapshot.controls.find(({ id }) => id === targetId)!.popup = {
+        dropped: true,
+        rect: { x: 20, y: 44, width: 150, height: 150 },
+        topIndex: 0,
+      };
+      expect(identifyYrHdMenu(snapshot)).toBeNull();
+    }
+    const duplicate = setup();
+    duplicate.controls.push({ ...duplicate.controls[1]! });
+    expect(identifyYrHdMenu(duplicate)).toBeNull();
+    const partial = setup();
+    partial.controls.push({
+      ...control(1902, 'ComboBox'),
+      items: ['B'],
+      itemsComplete: true,
+      selection: 0,
+      topIndex: 0,
+      itemHeight: 18,
+      visibleRows: 1,
+      popup: { dropped: false, rect: { x: 20, y: 44, width: 150, height: 150 }, topIndex: 0 },
+    });
+    expect(identifyYrHdMenu(partial)).toBeNull();
+    const hiddenRows = setup();
+    hiddenRows.controls.push({ ...control(1902, 'ComboBox'), visible: false });
+    expect(identifyYrHdMenu(hiddenRows)).toBe('setup');
   });
 });

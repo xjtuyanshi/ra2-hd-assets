@@ -1,3 +1,4 @@
+import type { MenuSnapshot } from '../menuSnapshot';
 /**
  * DirectDraw/GDI graphics state and frame presentation, extracted from state.ts: surfaces, palettes, GDI objects, frame snapshots, and hardware cursor overlays. Apply after synchronization and before kernel32/gdi32 dispatch.
  */
@@ -24,6 +25,45 @@ export type ShimGraphicsChain = InstanceType<ReturnType<typeof withShimGraphics>
 
 export function withShimGraphics<TBase extends Constructor<ShimSyncChain>>(Base: TBase) {
   return class extends Base {
+    private presentedMenuSnapshot: MenuSnapshot | null = null;
+    private menuSignature = '';
+    private menuGeneration = 0;
+
+    inspectPresentedMenuSnapshot(): MenuSnapshot | null {
+      return this.presentedMenuSnapshot ? structuredClone(this.presentedMenuSnapshot) : null;
+    }
+
+    protected captureMenuState(): { snapshot: MenuSnapshot; signature: string } | null {
+      const windows = this as unknown as {
+        inspectMenuSnapshot(): MenuSnapshot | null;
+      };
+      let snapshot = windows.inspectMenuSnapshot();
+      if (snapshot && this.options.resolveMenuSnapshot) snapshot = this.options.resolveMenuSnapshot(snapshot);
+      if (!snapshot?.complete) return null;
+      // Cursor movement is presentation-only; every control value and actual
+      // drawn label participates, including same-HWND popup and list changes.
+      const { pointer: _pointer, generation: _generation, ...state } = snapshot;
+      return { snapshot, signature: JSON.stringify(state) };
+    }
+
+    private attachMenuIdentity(frame: VmFrame): void {
+      const state = this.captureMenuState();
+      const windows = this as unknown as { menuPaintComplete(signature: string): boolean };
+      if (!state || !windows.menuPaintComplete(state.signature)) {
+        this.presentedMenuSnapshot = null;
+        frame.menuGeneration = 0;
+        return;
+      }
+      const { snapshot, signature } = state;
+      if (signature !== this.menuSignature) {
+        this.menuSignature = signature;
+        this.menuGeneration = (this.menuGeneration + 1) >>> 0 || 1;
+      }
+      snapshot.generation = this.menuGeneration;
+      this.presentedMenuSnapshot = snapshot;
+      frame.menuGeneration = this.menuGeneration;
+    }
+
     protected readonly surfaces = new Map<number, SurfaceState>();
     protected readonly palettes = new Map<number, PaletteState>();
     protected readonly soundBuffers = new Map<number, SoundBufferState>();
@@ -195,6 +235,7 @@ export function withShimGraphics<TBase extends Constructor<ShimSyncChain>>(Base:
           });
           this.syncWindowTreeToGuest(this.primaryWindow);
         }
+        this.attachMenuIdentity(frame);
         this.attachCursor(frame);
       }
       return frame;

@@ -9,6 +9,7 @@ import type { RuntimeToolbarCallbacks } from '../runtimeToolbar';
 import { Modal } from './Modal';
 import { PerformanceDiagnostics } from './PerformanceDiagnostics';
 import { GameSelect } from './GameSelect';
+import { NativeMarksNotice } from './NativeMarksNotice';
 import type { UpscaleMode } from '../vmFrameRenderer';
 import { DISPLAY_RESOLUTION } from '../vmPageResolution';
 import { controlsCollapsed, hotkeySheet, hotkeySheetVisible, upscaleStatus } from '../state/uiState';
@@ -328,6 +329,7 @@ export function RuntimeToolbarView({
         {collapsed ? '☰' : '✕'}
       </button>
       <span className="brand">{localizeLabel(model.title)}</span>
+      <NativeMarksNotice />
       <output id="vm-fps" title={localizeText(model.rendererDetail)}>
         {model.fps}
       </output>

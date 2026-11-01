@@ -282,6 +282,14 @@ export class VmCore {
         );
         this.pagePointer = await game.runtimeHooks.preparePagePointer(emulator, await this.executableHash);
       }
+      let menuSnapshotReader: ((snapshot: MenuSnapshot) => MenuSnapshot) | undefined;
+      if (game.runtimeHooks?.prepareMenuSnapshot) {
+        this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) =>
+          sha256Hex(this.source.executableBytes),
+        );
+        menuSnapshotReader =
+          (await game.runtimeHooks.prepareMenuSnapshot(emulator, await this.executableHash)) ?? undefined;
+      }
       // Startup patches own the static-stub tail after the import stubs, below the VGA window (see RESERVE_LIMIT).
       const reserve = (size: number): number => {
         const address = stubNext;
@@ -341,6 +349,7 @@ export class VmCore {
         fastFileMirrorTop:
           game.fastFileMirrorTop === undefined ? undefined : Math.min(game.fastFileMirrorTop, guestMemoryBytes),
         fastFileMirrorFiles: game.fastFileMirrorFiles,
+        resolveMenuSnapshot: menuSnapshotReader,
         onFrame: (frame) => {
           if (this.pagePointer) {
             const pointer = this.pagePointer.read(frame.width, frame.height);
@@ -530,23 +539,9 @@ export class VmCore {
 
   async getMenuSnapshot(): Promise<MenuSnapshot | null> {
     if (this.currentPhase !== 'running') return null;
-    const snapshot = this.shim?.inspectMenuSnapshot() ?? null;
-    const read = this.source.game.runtimeHooks?.readMenuTexts;
-    if (!snapshot || !read || !this.emulator) return snapshot;
-    const emulator = this.emulator;
-    this.executableHash ??= import('../utils/sha256').then(({ sha256Hex }) => sha256Hex(this.source.executableBytes));
-    const texts = await read(
-      emulator,
-      snapshot.controls.map(({ hwnd }) => hwnd),
-      await this.executableHash,
-    );
-    if (this.emulator !== emulator || this.shim?.inspectMenuSnapshot()?.dialogHwnd !== snapshot.dialogHwnd) return null;
-    return {
-      ...snapshot,
-      controls: snapshot.controls.map((control) =>
-        texts.has(control.hwnd) ? { ...control, sourceText: control.text, text: texts.get(control.hwnd)! } : control,
-      ),
-    };
+    // The shim captured and resolved this tree while guest execution was
+    // suspended at the picture boundary. Never reread later guest labels.
+    return this.shim?.inspectPresentedMenuSnapshot() ?? null;
   }
 
   /** A state read for the page runs on the guest's thread: its time is part of the usage accounting. */

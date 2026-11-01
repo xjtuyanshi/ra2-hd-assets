@@ -37,12 +37,19 @@ scripts/remaster/native/play-native.sh --open
 ```
 
 For CrossOver, replace `RA2_NATIVE_WINE_PREFIX` with
-`RA2_NATIVE_WINE_BOTTLE="$BOTTLE_NAME"`. The named bottle must already exist;
-`CX_BOTTLE_PATH` supports a custom bottle root. Wine discovery uses `PATH` and
-macOS's installed CrossOver application metadata. Setting `RA2_NATIVE_WINE`
-avoids discovery. `WINEPREFIX` is accepted when neither explicit scope variable
-is supplied and requires an existing prefix. A game folder, scope and executable
-are required; the launcher obtains no game resources.
+`RA2_NATIVE_WINE_BOTTLE="$BOTTLE_NAME"`; `CX_BOTTLE_PATH` supports a custom bottle
+root. The launcher prefers that bottle only after a successful command probe
+bounded to 10 seconds. Missing, refused, expired or unresponsive CrossOver falls
+back to the installed free Wine named by `gameres/wine-free/wine-path`, using a
+separate launcher-owned `gameres/wine-free/prefix-native` environment. Worktrees
+use those resources from the containing repository. With no explicit Wine
+executable or scope, that local free installation is the default. One Chinese
+line names the selected runtime. Without an explicit executable, a named bottle
+first checks macOS's installed CrossOver application metadata and then `PATH`;
+plain prefixes retain `PATH` priority. `RA2_NATIVE_WINE` avoids discovery. Explicit plain-Wine executable/prefix choices remain authoritative and
+do not silently switch runtimes. `WINEPREFIX` is accepted when neither explicit
+scope variable is supplied and requires an existing prefix. The launcher obtains
+no Wine or game resources.
 
 An explicit `RA2_NATIVE_WINE_PREFIX` may point to a missing or empty folder.
 The launcher claims that folder with a private marker tied to its directory
@@ -64,13 +71,38 @@ wrapper chooses a bottle independently of `WINEPREFIX`; use a free Wine executab
 for a new dedicated prefix. Cancelling preparation immediately enters the existing
 owned-process shutdown instead of waiting for its startup timeout.
 
+For a launcher-owned prefix, only the `wineboot.exe --init` process receives
+`mscoree,mshtml=` appended to `WINEDLLOVERRIDES`. Wine 11.0's prefix
+initialization can otherwise offer Mono or Gecko installation when optional local
+components are absent. The game needs neither component. This suppresses those
+installation paths without changing the caller's environment, existing registry
+settings, later preparation commands, CrossOver probes, or the game process.
+Relevant upstream source: Wine tag `wine-11.0`, `loader/wine.inf.in`,
+`dlls/mscoree/mscoree_main.c`, `dlls/mshtml/main.c`, and
+`dlls/appwiz.cpl/addons.c`. This is not a system-wide network restriction.
+
+A friend's Mac needs the player's own complete YR copy and HD cache, Node and
+the repository's configured pnpm with local project dependencies, Google Chrome,
+and a compatible free Wine installation. Supply the native `ddraw.dll` and
+`ra2launch.exe` build outputs; otherwise the local native toolchains are also
+required. Preserve the Wine runtime's `bin/wine`, `bin/wineserver`, `lib/`
+and `share/` together, including their internal links, then update
+`gameres/wine-free/wine-path` for its new location. The current macOS Wine
+executables are x86_64, so an Apple Silicon Mac also needs Rosetta already
+installed. Prefixes should be created locally by this launcher rather than
+copied from another Mac. This checklist does not establish a minimal runtime
+package or acceptance on a second Mac.
+
 The selected HD cache must already contain a readable `_library/` directory;
 without `RA2_HD_CACHE_DIR`, the cache root remains Vite's existing
 `gameres/hd-cache` default. Missing game files, Wine configuration and HD cache
 produce Chinese guidance before any game-file modification. After any dedicated
 prefix preparation and before building or mapping launcher paths, it runs a
 scoped Wine command-line self-check and
-requires its expected reply within 30 seconds. A failed or hung check leaves
+requires its expected reply within 30 seconds. A successful CrossOver selection
+probe already satisfies that self-check. A probe timeout kills only the owned
+probe process group before fallback; its output and observation remain in
+`wine-crossover-check.log` and `.json`, separate from the free runtime's check. A failed or hung check leaves
 the game unstarted and records bounded output in private `wine-check.log`.
 The exact successful reply is recognized incrementally, so later diagnostic
 output cannot erase an already observed acknowledgement from the bounded log.
@@ -87,6 +119,14 @@ no resource-picker or game-version clicks are needed. Both this launcher and
 `scripts/remaster/play.sh` obtain the HD picture options from
 `scripts/remaster/play-options.mjs`, including the cinematic look, enhanced
 effects/water, remaster vehicles, HD vehicle projection and HD UI.
+
+Add `--hd-marks` to opt into experimental sharp mobile health bars and control-group
+numbers for this launch only. The default is off; the option sets the existing
+`native-draw-journal=1` page flag without saving a preference. The start screen and
+tool panel explain this in Chinese. To turn it off, press Ctrl-C in the launcher
+and launch again without `--hd-marks`. The original/HD picture switch and cleanup
+ownership are unchanged. The new launch without the option requests no draw capture
+or installation; live diagnostics and picture checks establish actual acceptance.
 
 `--size WxH` selects the native match resolution, for example
 `--size 1280x720`. Without it, the launcher serves the page before starting the

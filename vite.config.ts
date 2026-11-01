@@ -507,9 +507,13 @@ function isWithinGameDirectory(candidate: string): boolean {
 export default defineConfig({
   // RA2_DEV_HTTP=1 serves plain HTTP for local tooling that rejects the self-signed certificate; localhost stays a secure context.
   plugins: [...(process.env.RA2_DEV_HTTP ? [] : [basicSsl()]), gameAssetsPlugin(), ra2NetworkRelayPlugin()],
+  // Keep development caches local even when a worktree temporarily shares dependency links.
+  cacheDir: '.vite',
   // VM pages with hmr=false cannot rely on reloads to handle a second prebundle. Register JSX and Worker dynamic dependencies
   // up front to avoid a second React instance in lazy pages. This only builds development caches; browser experiments are not preloaded.
   optimizeDeps: {
+    // Scan the application graph, not private resources, archived checkouts or linked HTML projects.
+    entries: ['index.html'],
     include: [
       'react',
       'react-dom',
@@ -526,6 +530,17 @@ export default defineConfig({
     host: true, // Listen on 0.0.0.0 so other LAN devices can connect (the terminal prints the Network address)
     port: 15174,
     strictPort: true,
+    // These files are served on demand, never imported modules. Ignore each root and its descendants
+    // so resource links, archived checkouts and growing launch logs cannot expand the source watcher.
+    watch: {
+      ignored: [
+        ...['gameres', 'game', '.worktrees', 'packages/native-host/build'].map((directory) =>
+          resolve(repositoryDirectory, directory),
+        ),
+        GAME_DIR,
+        HD_CACHE_DIR,
+      ],
+    },
     // VMs and long regressions are stateful; code changes must not reload pages or destroy VMs under test.
     hmr: false,
     // Disable caching in development to prevent stale modules during hot updates/hard reloads (previously mixed old and new map.ts code).

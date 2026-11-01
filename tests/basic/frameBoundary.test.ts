@@ -6,7 +6,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  GUEST_CALLBACK_OWNERS,
   HYPERCALL_ACTIVE_SHELL_SURFACE,
+  HYPERCALL_CALLBACK_DEPTH,
   HYPERCALL_CURSOR_COUNT,
   HYPERCALL_CURSOR_X,
   HYPERCALL_CURSOR_Y,
@@ -19,6 +21,7 @@ import {
   createTestShim,
   readU32,
   writeU32,
+  writeAsciiZ,
   type FakeGuestMemory,
 } from '../helpers/guestMemory';
 
@@ -95,6 +98,189 @@ describe('DirectDraw 帧边界（原 frameBoundarySmoke）', () => {
       clientWidth: 1440,
       clientHeight: 900,
     });
+  });
+
+  it('captures actual menu text with its pixels and rejects unfinished same-HWND painting', () => {
+    const memory = createGuestMemory();
+    const frames: VmFrame[] = [];
+    let actualText = 'Before';
+    const shim = createTestShim(memory, {
+      onFrame: (frame) => frames.push(frame),
+      resolveMenuSnapshot: (snapshot) => ({
+        ...snapshot,
+        controls: snapshot.controls.map((control) => ({ ...control, text: actualText })),
+      }),
+    });
+    writeAsciiZ(memory, 0x12000, '#32770');
+    const root = callShim(shim, 'USER32.DLL!CreateWindowExA', [0, 0x12000, 0, 0x10000000, 0, 0, 4, 4, 0, 0, 0, 0]).eax;
+    callShim(shim, 'USER32.DLL!ValidateRect', [root, 0]);
+    surfaceDesc(memory, 0x10000);
+    dispatchOk(shim, 'DDRAW.COM!IDirectDraw.CreateSurface', [0, 0x10000, 0x10100, 0]);
+    const primary = readU32(memory, 0x10100);
+    const paint = () => {
+      dispatchOk(shim, 'DDRAW.COM!IDirectDrawSurface.Lock', [primary, 0, 0x10200, 0, 0]);
+      dispatchOk(shim, 'DDRAW.COM!IDirectDrawSurface.Unlock', [primary, readU32(memory, 0x10200 + 36)]);
+    };
+    paint();
+    const before = shim.inspectPresentedMenuSnapshot()!;
+    expect(before.controls[0]?.text).toBe('Before');
+    expect(before.generation).toBe(frames.at(-1)?.menuGeneration);
+    callShim(shim, 'USER32.DLL!SetWindowLongA', [root, -4, 0x123456]);
+    callShim(shim, 'USER32.DLL!SendMessageA', [root, 0x0400, 0, 0]); // An outer modal callback stays active.
+    const outer = shim.inspectCallbackState()!;
+    const beginPaint = () => {
+      callShim(shim, 'USER32.DLL!SendMessageA', [root, 0x000f, 0, 0]);
+      return shim.inspectCallbackState()!;
+    };
+    const finishPaint = (callback: ReturnType<typeof beginPaint>) => {
+      // Fake memory does not execute the callback trampoline; release only its real owner slot.
+      writeU32(memory, GUEST_CALLBACK_OWNERS + callback.depth * 4, 0);
+      writeU32(memory, HYPERCALL_CALLBACK_DEPTH, 1);
+    };
+    let callback = beginPaint();
+    // BeginPaint may validate the update region before the guest has drawn its text.
+    callShim(shim, 'USER32.DLL!BeginPaint', [root, 0x10300]);
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+    finishPaint(callback);
+    const framesDuringPaint = frames.length;
+    // A static dialog makes no further pixel writes. Its next normal USER32
+    // call must publish the now-complete primary without another Lock/Unlock.
+    callShim(shim, 'USER32.DLL!GetWindowLongA', [root, -4]);
+    expect(frames.length).toBeGreaterThan(framesDuringPaint);
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBe(before.generation);
+    expect(readU32(memory, GUEST_CALLBACK_OWNERS + outer.depth * 4)).not.toBe(0);
+
+    // Private text changes in an unfinished non-paint handler cannot borrow old pixels.
+    actualText = 'After';
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    callback = beginPaint();
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    finishPaint(callback);
+    paint();
+    const after = shim.inspectPresentedMenuSnapshot()!;
+    expect(after.controls[0]?.text).toBe('After');
+    expect(after.generation).not.toBe(before.generation);
+    expect(after.generation).toBe(frames.at(-1)?.menuGeneration);
+    shim.setCursorPosition(2, 3);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBe(after.generation);
+
+    // Returning from a painter cannot validate an invalidation issued during it.
+    callback = beginPaint();
+    callShim(shim, 'USER32.DLL!InvalidateRect', [root, 0, 0]);
+    finishPaint(callback);
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    callback = beginPaint();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBe(after.generation);
+
+    // Even a returned callback stays original when it changed text while drawing the same HWND.
+    callback = beginPaint();
+    actualText = 'Changed during paint';
+    finishPaint(callback);
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    callback = beginPaint();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.controls[0]?.text).toBe(actualText);
+
+    // A default scrollbar can be the final dirty control after guest painters
+    // finish. Its synchronous paint must publish the validated complete frame,
+    // even though no guest callback remains to trigger another Unlock.
+    writeAsciiZ(memory, 0x12100, 'ScrollBar');
+    const scrollbar = callShim(shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      0x12100,
+      0,
+      0x50000001,
+      0,
+      0,
+      2,
+      4,
+      root,
+      10,
+      0,
+      0,
+    ]).eax;
+    callShim(shim, 'USER32.DLL!InvalidateRect', [scrollbar, 0, 0]);
+    callback = beginPaint();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+    const incompleteFrames = frames.length;
+    callShim(shim, 'USER32.DLL!UpdateWindow', [scrollbar]);
+    expect(frames.length).toBeGreaterThan(incompleteFrames);
+    const complete = shim.inspectPresentedMenuSnapshot()!;
+    expect(complete.generation).toBeGreaterThan(0);
+    expect(complete.generation).toBe(frames.at(-1)?.menuGeneration);
+
+    // A synchronous child painter still cannot authorize an outer guest paint
+    // which has not returned.
+    callback = beginPaint();
+    callShim(shim, 'USER32.DLL!InvalidateRect', [scrollbar, 0, 0]);
+    callShim(shim, 'USER32.DLL!UpdateWindow', [scrollbar]);
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBe(complete.generation);
+
+    // Other default controls do not draw their own pixels. Clearing a Static's
+    // update region cannot certify private text which the guest has not painted.
+    writeAsciiZ(memory, 0x12200, 'Static');
+    const label = callShim(shim, 'USER32.DLL!CreateWindowExA', [
+      0,
+      0x12200,
+      0,
+      0x50000000,
+      0,
+      0,
+      2,
+      2,
+      root,
+      11,
+      0,
+      0,
+    ]).eax;
+    actualText = 'Not painted yet';
+    callShim(shim, 'USER32.DLL!InvalidateRect', [label, 0, 0]);
+    callShim(shim, 'USER32.DLL!UpdateWindow', [label]);
+    paint();
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+
+    // A real host scrollbar paint also cannot certify other unpainted private
+    // text: it may only finish the exact state already painted by the guest.
+    callShim(shim, 'USER32.DLL!InvalidateRect', [scrollbar, 0, 0]);
+    callShim(shim, 'USER32.DLL!UpdateWindow', [scrollbar]);
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+
+    // Returning to a retained HWND requires new guest painting even when the
+    // full control state is identical to its previous visible page.
+    callShim(shim, 'USER32.DLL!SetFocus', [0]);
+    callback = beginPaint();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBeGreaterThan(0);
+    callShim(shim, 'USER32.DLL!ShowWindow', [root, 0]);
+    callShim(shim, 'USER32.DLL!ShowWindow', [root, 5]);
+    callShim(shim, 'USER32.DLL!ValidateRect', [root, 0]);
+    callShim(shim, 'USER32.DLL!ValidateRect', [label, 0]);
+    callShim(shim, 'USER32.DLL!UpdateWindow', [scrollbar]);
+    expect(frames.at(-1)?.menuGeneration).toBe(0);
+    expect(shim.inspectPresentedMenuSnapshot()).toBeNull();
+    callback = beginPaint();
+    finishPaint(callback);
+    paint();
+    expect(shim.inspectPresentedMenuSnapshot()?.generation).toBeGreaterThan(0);
   });
 
   it('默认 profile 不扩展 RA2 专用的 surface 客体布局', () => {

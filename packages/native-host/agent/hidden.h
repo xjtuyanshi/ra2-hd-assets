@@ -12,7 +12,7 @@ int nh_hidden_active(void);
 int nh_hidden_owned(HWND window);
 int nh_hidden_visible(HWND window);
 /* Genuine control painting runs only on the GUI owner, before primary capture. */
-void nh_hidden_paint(void);
+int nh_hidden_paint(void);
 int nh_hidden_painting(void);
 HDC nh_hidden_paint_dc(HWND window, int begin_paint, PAINTSTRUCT *paint);
 /* -1 preserves real User32; scoped forced paint exposes its actual full client. */
@@ -44,7 +44,7 @@ BOOL WINAPI nh_hidden_end_dialog(HWND window, INT_PTR result);
 #define nh_hidden_active() 0
 #define nh_hidden_owned(window) 0
 #define nh_hidden_visible(window) 0
-#define nh_hidden_paint() ((void)0)
+#define nh_hidden_paint() 0
 #define nh_hidden_paint_dc(window, begin_paint, paint) ((HDC)NULL)
 #define nh_hidden_update_rect(window, rect, erase) (-1)
 #define nh_hidden_update_window(window) (-1)

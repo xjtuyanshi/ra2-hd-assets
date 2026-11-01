@@ -1,5 +1,6 @@
 #include "agent.h"
 #include "hidden.h"
+#include "window-target.h"
 #include "dd.h"
 #include "ddsurface.h"
 #include <stdlib.h>
@@ -15,7 +16,7 @@ static uint16_t *baseline, *pending_pixels;
 static uint8_t *encoded;
 static uint32_t capacity_pixels, baseline_width, baseline_height;
 static uint32_t pending_width, pending_height;
-static int baseline_valid, credit, in_flight;
+static int baseline_valid, credit, in_flight, paired_pictures;
 #define NH_WM_PICTURE (WM_APP + 0x149)
 static volatile LONG captures, last_encode_us, maximum_encode_us, last_encoded_bytes, last_changed_rows;
 
@@ -61,6 +62,8 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
     uint32_t count = 0, options = 0;
     if (length == 4 || length == 8) memcpy(&count, payload, 4);
     if (length == 8) memcpy(&options, payload + 4, 4);
+    int identity = (count & 0x80000000u) != 0;
+    count &= 0x7fffffffu;
     if (count != 1 || options & ~1u)
     {
         const char *error = "picture credit must be exactly one";
@@ -81,6 +84,7 @@ void nh_picture_credit(uint32_t id, const uint8_t *payload, uint32_t length)
      * arriving while the preceding packet is being sent requests the next
      * current picture, with its baseline committed by nh_picture_sent first. */
     credit = 1;
+    paired_pictures = identity;
     LeaveCriticalSection(&picture_lock);
     /* Static menus do not present again after a credit arrives. Wake their
      * owning GUI thread instead of retaining a surface pointer on the I/O
@@ -140,7 +144,7 @@ void nh_picture_disconnect(void)
     nh_draw_journal_disconnect();
     if (InterlockedCompareExchange(&initialized, 0, 0) != 2) return;
     EnterCriticalSection(&picture_lock);
-    credit = in_flight = baseline_valid = 0;
+    credit = in_flight = baseline_valid = paired_pictures = 0;
     LeaveCriticalSection(&picture_lock);
 }
 
@@ -172,6 +176,15 @@ uint32_t nh_picture_encode_row(uint8_t *output, uint32_t offset, const uint16_t 
 
 void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp)
 {
+    /* Menus can present midway through a callback. The credited GUI capture
+     * repaints them fully and pairs their control state before publishing. */
+    HWND root = nh_window_target(NH_WINDOW_PAINT);
+    if (root && root != g_ddraw.hwnd) return;
+    nh_present_menu(pixels, width, height, pitch, bpp, 0);
+}
+
+void nh_present_menu(const void *pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp, uint32_t generation)
+{
     if (!NH_ENABLE_PICTURE) return;
     InterlockedExchange(&surface_width, (LONG)width);
     InterlockedExchange(&surface_height, (LONG)height);
@@ -194,7 +207,7 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
     uint32_t pixels_count = width * height;
     /* Worst alternating literal/key pixels cost three bytes per pixel; the
      * conservative four-byte bound also includes segment and row headers. */
-    if ((uint64_t)pixels_count * 4 + (uint64_t)height * 8 + 16 > NH_MAX_MESSAGE)
+    if ((uint64_t)pixels_count * 4 + (uint64_t)height * 8 + 24 > NH_MAX_MESSAGE)
     {
         credit = 0;
         LeaveCriticalSection(&picture_lock);
@@ -240,6 +253,13 @@ void nh_present(const void *pixels, uint32_t width, uint32_t height, uint32_t pi
         rows++;
     }
     memcpy(encoded + 12, &rows, 4);
+    /* Tagged extension preserves decoding of old captures while binding this
+     * publication to exactly the captured menu metadata. Zero means unknown. */
+    if (paired_pictures)
+    {
+        put32(&offset, 0x314e454du); /* MEN1 */
+        put32(&offset, generation);
+    }
     /* Match the owned native plane that was actually encoded, not a surface
      * which could change while the packet is being assembled. */
     offset = nh_draw_journal_append(encoded, offset, NH_MAX_MESSAGE, pending_pixels, width, height, width * 2);

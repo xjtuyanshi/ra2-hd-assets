@@ -6,6 +6,9 @@
 #include "input-capture.h"
 #include "window-target.h"
 #include <stdio.h>
+#include <stdarg.h>
+#include <commctrl.h>
+#include "yr-menu-text.h"
 #include <string.h>
 
 /* Private messages carry a bounded queue ticket, never a client-supplied pointer. */
@@ -386,20 +389,128 @@ struct menu_context {
     int button_queries_failed;
 };
 
-static int menu_button_state(struct menu_context *state, HWND hwnd, int32_t *value)
+static int menu_query(struct menu_context *state, HWND hwnd, UINT message, WPARAM wp, LPARAM lp, int32_t *value)
 {
+    /* Captures run on the GUI owner. Its control calls are synchronous and
+     * SendMessageTimeout cannot time-limit them. Do not mistake time spent
+     * enumerating/serializing earlier controls for a hung current control. */
+    if (GetWindowThreadProcessId(hwnd, NULL) == GetCurrentThreadId())
+    {
+        *value = (int32_t)SendMessageW(hwnd, message, wp, lp);
+        return 1;
+    }
     if (state->button_queries_failed) return 0;
     uint64_t used = elapsed_us(state->query_started);
-    /* All buttons share one 10 ms allowance on the transport owner. A busy
-     * GUI cannot charge another timeout for each child or delay later input,
-     * memory reads and picture credits by an entire dialog's button count. */
+    /* Foreign control owners share one deadline so a hung owner cannot
+     * multiply the budget across the snapshot. */
     UINT remaining_ms = used < 10000 ? (UINT)((10000 - used) / 1000) : 0;
     DWORD_PTR result;
-    if (!remaining_ms || !SendMessageTimeoutA(hwnd, BM_GETSTATE, 0, 0,
+    if (!remaining_ms || !SendMessageTimeoutW(hwnd, message, wp, lp,
         SMTO_ABORTIFHUNG | SMTO_BLOCK, remaining_ms, &result))
     { state->button_queries_failed = 1; return 0; }
     *value = (int32_t)result;
     return 1;
+}
+
+static int menu_append(struct menu_context *state, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(state->json + state->used, state->capacity - state->used, format, args);
+    va_end(args);
+    if (written < 0 || (uint32_t)written >= state->capacity - state->used)
+    { state->complete = 0; return 0; }
+    state->used += (uint32_t)written;
+    return 1;
+}
+
+static void menu_rect(struct menu_context *state, const char *key, RECT rect, HWND client)
+{
+    POINT first = {rect.left, rect.top}, last = {rect.right, rect.bottom};
+    if (client) { ClientToScreen(client, &first); ClientToScreen(client, &last); }
+    first = screen_to_game(first); last = screen_to_game(last);
+    menu_append(state, ",\"%s\":{\"x\":%ld,\"y\":%ld,\"width\":%ld,\"height\":%ld}",
+        key, first.x, first.y, last.x - first.x, last.y - first.y);
+}
+
+static void menu_items(struct menu_context *state, HWND hwnd, int combo)
+{
+    int32_t count, selection, top, height, result;
+    if (!menu_query(state, hwnd, combo ? CB_GETCOUNT : LB_GETCOUNT, 0, 0, &count) || count < 0 || count > 512 ||
+        !menu_query(state, hwnd, combo ? CB_GETCURSEL : LB_GETCURSEL, 0, 0, &selection) ||
+        !menu_query(state, hwnd, combo ? CB_GETTOPINDEX : LB_GETTOPINDEX, 0, 0, &top) ||
+        !menu_query(state, hwnd, combo ? CB_GETITEMHEIGHT : LB_GETITEMHEIGHT, 0, 0, &height) || height <= 0)
+    { state->complete = 0; return; }
+    RECT client;
+    if (!GetClientRect(hwnd, &client)) { state->complete = 0; return; }
+    menu_append(state, ",\"selection\":%ld,\"topIndex\":%ld,\"itemHeight\":%ld,\"visibleRows\":%ld,\"itemData\":[",
+        (long)selection, (long)top, (long)height, (long)((client.bottom - client.top) / height));
+    int complete = 1;
+    uint32_t item_data[512];
+    WNDPROC item_procedure = yr_menu_items_procedure(hwnd);
+    for (int32_t index = 0; index < count; index++)
+    {
+        if (item_procedure)
+            result = (int32_t)CallWindowProcA(item_procedure, hwnd, combo ? CB_GETITEMDATA : LB_GETITEMDATA, index, 0);
+        else if (nh_identity_verified() || !menu_query(state, hwnd, combo ? CB_GETITEMDATA : LB_GETITEMDATA, index, 0, &result))
+        { complete = 0; break; }
+        item_data[index] = (uint32_t)result;
+        menu_append(state, "%s%u", index ? "," : "", item_data[index]);
+    }
+    menu_append(state, "]");
+    uint32_t colors[50];
+    if (complete && yr_menu_item_colors(hwnd, colors, count))
+    {
+        menu_append(state, ",\"itemColors\":[");
+        for (int32_t index = 0; index < count; index++)
+            if (colors[index] == UINT32_MAX) menu_append(state, "%snull", index ? "," : "");
+            else menu_append(state, "%s%u", index ? "," : "", colors[index]);
+        menu_append(state, "]");
+    }
+    /* Owner-drawn item data has game-specific meaning. The game policy resolves
+     * it; treating that pointer as ANSI text produces plausible-looking garbage. */
+    DWORD style = (DWORD)GetWindowLongW(hwnd, GWL_STYLE);
+    int strings = combo ? ((style & 0x30) == 0 || (style & CBS_HASSTRINGS)) :
+        ((style & 0x30) == 0 || (style & LBS_HASSTRINGS));
+    if (complete)
+    {
+        menu_append(state, ",\"items\":[");
+        for (int32_t index = 0; index < count; index++)
+        {
+            WCHAR wide[1024]; char utf8[4096], json[8192];
+            int32_t length;
+            if (yr_menu_item_text(item_data[index], utf8, sizeof(utf8))) { /* Exact owner-drawn text. */ }
+            else if (strings && (style & 0x30) == 0)
+            {
+                if (!menu_query(state, hwnd, combo ? CB_GETLBTEXTLEN : LB_GETTEXTLEN, index, 0, &length) ||
+                    length < 0 || length >= 1024 ||
+                    !menu_query(state, hwnd, combo ? CB_GETLBTEXT : LB_GETTEXT, index, (LPARAM)wide, &result) || result != length)
+                { complete = 0; break; }
+                wide[length] = 0;
+                if (!WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, sizeof(utf8), NULL, NULL))
+                { complete = 0; break; }
+            }
+            else { complete = 0; break; }
+            escaped(json, sizeof(json), utf8);
+            if (state->capacity - state->used < strlen(json) + 2048) { complete = 0; break; }
+            menu_append(state, "%s\"%s\"", index ? "," : "", json);
+        }
+        menu_append(state, "]");
+    }
+    menu_append(state, ",\"itemsComplete\":%s", complete ? "true" : "false");
+    if (!complete) state->complete = 0;
+    if (combo)
+    {
+        HWND popup, scrollbar; int32_t popup_top, popup_selection; RECT popup_rect;
+        if (!yr_menu_popup(hwnd, &popup, &scrollbar, &popup_top, &popup_selection) ||
+            !GetWindowRect(popup ? popup : hwnd, &popup_rect))
+        { state->complete = 0; return; }
+        menu_append(state, ",\"popup\":{\"dropped\":%s,\"hwnd\":%u,\"scrollbarHwnd\":%u,\"topIndex\":%ld,\"selection\":%ld",
+            popup ? "true" : "false", (uint32_t)(uintptr_t)popup, (uint32_t)(uintptr_t)scrollbar,
+            (long)popup_top, (long)popup_selection);
+        menu_rect(state, "rect", popup_rect, NULL);
+        menu_append(state, "}");
+    }
 }
 
 static int menu_control_enabled(HWND window, HWND root)
@@ -439,31 +550,84 @@ static BOOL CALLBACK describe_menu_control(HWND hwnd, LPARAM context)
         text_complete = copied >= 0 && copied < 255 &&
             WideCharToMultiByte(CP_UTF8, 0, wide, -1, title, sizeof(title), NULL, NULL) > 0;
     }
+    char source_json[2048] = "";
+    int game_text = 0;
+    escaped(source_json, sizeof(source_json), title);
+    int actual_text = yr_menu_control_text(hwnd, title, sizeof(title));
+    uint32_t edit[4];
+    int has_edit = GetDlgCtrlID(hwnd) == 1696 && !_stricmp(class_name, "ListBox") &&
+        yr_menu_name_edit(hwnd, title, sizeof(title), edit);
+    if (has_edit) actual_text = 1;
+    if (actual_text > 0) { text_complete = 1; game_text = 1; }
+    else if (actual_text < 0) text_complete = 0;
     /* Cached Unicode text avoids calling owner-drawn WM_GETTEXT handlers, which
      * may report no text even though the original control owns a resource key. */
     escaped(class_json, sizeof(class_json), class_name);
     escaped(title_json, sizeof(title_json), title);
-    int visible = nh_hidden_visible(hwnd), pressed = 0;
+    int visible = nh_hidden_visible(hwnd), pressed = 0, checked = -1;
     if (visible && _stricmp(class_name, "Button") == 0)
     {
         int32_t button_state;
-        if (menu_button_state(state, hwnd, &button_state)) pressed = (button_state & BST_PUSHED) != 0;
+        if (menu_query(state, hwnd, BM_GETSTATE, 0, 0, &button_state))
+        { pressed = (button_state & BST_PUSHED) != 0; checked = button_state & 3; }
         else state->complete = 0;
+        int kind = GetWindowLongW(hwnd, GWL_STYLE) & 0xf;
+        if (kind == BS_CHECKBOX || kind == BS_AUTOCHECKBOX || kind == BS_3STATE || kind == BS_AUTO3STATE ||
+            kind == BS_RADIOBUTTON || kind == BS_AUTORADIOBUTTON)
+        {
+            int32_t actual_check;
+            if (menu_query(state, hwnd, BM_GETCHECK, 0, 0, &actual_check) && actual_check >= 0 && actual_check <= 2)
+                checked = actual_check;
+            else state->complete = 0;
+        }
     }
-    /* List contents are intentionally not guessed from the selected label.
-     * Until they can be captured completely, the whole screen stays original. */
-    if (visible && (_stricmp(class_name, "ListBox") == 0 || _stricmp(class_name, "ComboBox") == 0 ||
-        _stricmp(class_name, "ComboLBox") == 0)) state->complete = 0;
     if (!text_complete) state->complete = 0;
     state->used += (uint32_t)snprintf(state->json + state->used, state->capacity - state->used,
         "%s{\"hwnd\":%u,\"parent\":%u,\"id\":%d,\"className\":\"%s\",\"style\":%u,"
         "\"text\":\"%s\",\"textComplete\":%s,\"rect\":{\"x\":%ld,\"y\":%ld,\"width\":%ld,\"height\":%ld},"
-        "\"visible\":%s,\"enabled\":%s,\"focused\":%s,\"pressed\":%s}",
+        "\"visible\":%s,\"enabled\":%s,\"focused\":%s,\"pressed\":%s",
         state->count ? "," : "", (uint32_t)(uintptr_t)hwnd, (uint32_t)(uintptr_t)GetParent(hwnd),
         GetDlgCtrlID(hwnd), class_json, (uint32_t)GetWindowLongA(hwnd, GWL_STYLE), title_json,
         text_complete ? "true" : "false", first.x, first.y, last.x - first.x, last.y - first.y,
         visible ? "true" : "false", menu_control_enabled(hwnd, state->root) ? "true" : "false",
         hwnd == state->focus ? "true" : "false", pressed ? "true" : "false");
+    if (game_text) menu_append(state, ",\"sourceText\":\"%s\"", source_json);
+    if (has_edit) menu_append(state, ",\"edit\":{\"caret\":%u,\"firstVisible\":%u,\"caretVisible\":%s,\"caretColor\":%u}",
+        edit[0], edit[1], edit[2] ? "true" : "false", edit[3]);
+    if (visible && _stricmp(class_name, "ComboDropWin") == 0)
+    {
+        HWND owner = yr_menu_popup_owner(hwnd);
+        if (owner) menu_append(state, ",\"popupOwner\":%u", (uint32_t)(uintptr_t)owner);
+        else state->complete = 0;
+    }
+    if (checked >= 0) menu_append(state, ",\"checked\":%d", checked);
+    if (visible && (_stricmp(class_name, "ListBox") == 0 || _stricmp(class_name, "ComboLBox") == 0 ||
+        _stricmp(class_name, "ComboBox") == 0)) menu_items(state, hwnd, _stricmp(class_name, "ComboBox") == 0);
+    if (visible && _stricmp(class_name, "msctls_trackbar32") == 0)
+    {
+        int32_t min, max, value; RECT thumb = {0}, groove = {0}; char value_text[64];
+        if (yr_menu_slider(hwnd, &thumb, &groove, &min, &max, &value, value_text, sizeof(value_text)))
+        {
+            menu_append(state, ",\"slider\":{\"min\":%ld,\"max\":%ld,\"value\":%ld,\"valueText\":\"%s\"",
+                (long)min, (long)max, (long)value, value_text);
+            menu_rect(state, "thumb", thumb, NULL); menu_rect(state, "groove", groove, NULL);
+            menu_append(state, "}");
+        }
+        else state->complete = 0;
+    }
+    if (visible && _stricmp(class_name, "ScrollBar") == 0)
+    {
+        int32_t maximum, position; RECT thumb, groove;
+        if (yr_menu_scrollbar(hwnd, &thumb, &groove, &maximum, &position))
+        {
+            menu_append(state, ",\"scroll\":{\"min\":0,\"max\":%ld,\"page\":0,\"pos\":%ld,\"arrowSize\":22",
+                (long)maximum, (long)position);
+            menu_rect(state, "thumb", thumb, NULL); menu_rect(state, "groove", groove, NULL);
+            menu_append(state, "}");
+        }
+        else state->complete = 0;
+    }
+    menu_append(state, "}");
     state->count++;
     return TRUE;
 }
@@ -475,30 +639,75 @@ static BOOL CALLBACK describe_menu_popup(HWND hwnd, LPARAM context)
     return TRUE;
 }
 
-static void menu_snapshot(uint32_t id)
+/* Only the GUI thread enumerates menu controls. The transport returns an
+ * immutable copy paired with a completed picture, never a later live tree. */
+static char menu_before[65536], menu_current[65536], menu_committed[65536];
+static uint32_t menu_generation;
+static int menu_before_valid;
+
+static int describe_menu(char *json, uint32_t capacity)
 {
-    char json[65536];
     HWND root = nh_window_target(NH_WINDOW_PAINT);
-    if (!root || root == g_ddraw.hwnd)
-    { nh_send(NH_INPUT_STATE, id, "null", 4); return; }
+    if (!root || root == g_ddraw.hwnd) { strcpy(json, "null"); return 0; }
     uint32_t width = 0, height = 0, bpp = 0;
     nh_surface_info(&width, &height, &bpp);
     EnterCriticalSection(&input_lock);
     int tracking_failed = movie_tracking_failures != 0, playing = movie_active != 0;
     LeaveCriticalSection(&input_lock);
-    snprintf(json, sizeof(json), "{\"width\":%u,\"height\":%u,\"dialogHwnd\":%u,\"moviePlaying\":%s,"
-        "\"pointer\":{\"x\":%ld,\"y\":%ld},\"controls\":[", width, height,
-        (uint32_t)(uintptr_t)root, tracking_failed ? "null" : playing ? "true" : "false",
-        InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0));
+    snprintf(json, capacity, "{\"width\":%u,\"height\":%u,\"dialogHwnd\":%u,\"moviePlaying\":%s,\"controls\":[",
+        width, height, (uint32_t)(uintptr_t)root, tracking_failed ? "null" : playing ? "true" : "false");
     struct menu_context state = {0};
-    state.json = json; state.capacity = sizeof(json); state.used = (uint32_t)strlen(json);
+    state.json = json; state.capacity = capacity; state.used = (uint32_t)strlen(json);
     state.complete = 1; state.root = root; state.focus = nh_input_get_focus();
     QueryPerformanceCounter(&state.query_started);
     describe_menu_control(root, (LPARAM)&state);
     EnumChildWindows(root, describe_menu_control, (LPARAM)&state);
     EnumWindows(describe_menu_popup, (LPARAM)&state);
     if (root != nh_window_target(NH_WINDOW_PAINT) || !IsWindow(root)) state.complete = 0;
-    snprintf(json + state.used, sizeof(json) - state.used, "],\"complete\":%s}", state.complete ? "true" : "false");
+    snprintf(json + state.used, capacity - state.used, "],\"complete\":%s}", state.complete ? "true" : "false");
+    return state.complete;
+}
+
+void nh_menu_prepare(void)
+{
+    initialize();
+    menu_before_valid = describe_menu(menu_before, sizeof(menu_before));
+}
+
+uint32_t nh_menu_complete(void)
+{
+    int complete = describe_menu(menu_current, sizeof(menu_current));
+    uint32_t result = 0;
+    EnterCriticalSection(&input_lock);
+    /* A callback may change text or children while painting the same HWND.
+     * Such an intermediate picture receives no identity and stays original. */
+    if (complete && menu_before_valid && !strcmp(menu_before, menu_current))
+    {
+        if (strcmp(menu_current, menu_committed))
+        {
+            if (!++menu_generation) ++menu_generation;
+            strcpy(menu_committed, menu_current);
+        }
+        result = menu_generation;
+    }
+    LeaveCriticalSection(&input_lock);
+    return result;
+}
+
+static void menu_snapshot(uint32_t id)
+{
+    char json[65536 + 192];
+    EnterCriticalSection(&input_lock);
+    uint32_t length = (uint32_t)strlen(menu_committed);
+    if (!length || !menu_generation) strcpy(json, "null");
+    else
+    {
+        memcpy(json, menu_committed, length - 1);
+        snprintf(json + length - 1, sizeof(json) - length + 1,
+            ",\"generation\":%u,\"pointer\":{\"x\":%ld,\"y\":%ld}}", menu_generation,
+            InterlockedCompareExchange(&cursor_x, 0, 0), InterlockedCompareExchange(&cursor_y, 0, 0));
+    }
+    LeaveCriticalSection(&input_lock);
     nh_send(NH_INPUT_STATE, id, json, (uint32_t)strlen(json));
 }
 
@@ -815,8 +1024,9 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
         int shortcut = (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) &&
             (wparam == VK_RETURN || wparam == VK_ESCAPE);
         MSG msg = {target, message, wparam, lparam, GetTickCount(), {0, 0}};
-        int control_shortcut = shortcut && target != root &&
+        int control_wants_all_keys = target != root &&
             (SendMessageA(target, WM_GETDLGCODE, wparam, (LPARAM)&msg) & DLGC_WANTALLKEYS);
+        int control_shortcut = shortcut && control_wants_all_keys;
         if (message == WM_KEYDOWN && shortcut && !control_shortcut)
         {
             LRESULT default_id = SendMessageA(root, DM_GETDEFID, 0, 0);
@@ -832,7 +1042,11 @@ static LRESULT route_message(HWND main, UINT message, WPARAM wparam, LPARAM lpar
         /* IsDialogMessage consumes Return/Escape even when there is no real
          * default/cancel control and merely sends an unhandled IDOK/IDCANCEL.
          * Leave unmatched shortcuts to the original game/control handlers. */
-        if (!shortcut && IsDialogMessageA(root, &msg))
+        /* The page already supplies WM_CHAR. A control claiming all keys
+         * owns its key/character handling; IsDialogMessage would translate
+         * its keydown again and insert a second character. Tab navigation
+         * above and ordinary dialog defaults keep their existing route. */
+        if (!shortcut && !control_wants_all_keys && IsDialogMessageA(root, &msg))
         { record_dialog_target(target); return 0; }
         /* An open Combo popup can claim Return/Escape before dialog defaults.
          * Unclaimed shortcuts belong to the original dialog handler, rather

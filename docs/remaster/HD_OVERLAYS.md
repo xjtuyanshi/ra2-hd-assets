@@ -65,7 +65,9 @@ incomplete planes and reported WebGL failures retain the whole native picture. O
 These generic transport and drawing capabilities do not establish visual or runtime performance acceptance.
 
 The native producer is in `src/games/yr/nativeDrawJournal.c`, explicitly enabled by the development-page option
-`native-draw-journal=1`; the ordinary launcher keeps this capture off. It checks the executable and every instruction
+`native-draw-journal=1`. The owner launcher sets it only when given `--hd-marks`, with no stored preference;
+the default remains off. Its start screen and tool panel explain the experiment in Chinese and how to exit with
+Ctrl-C and launch without the option. It checks the executable and every instruction
 signature before installing draw-thread capture: begin/end `0x4F4480/0x4F459D`, mobile border/tick calls
 `0x6F68B4/0x6F6947/0x6F6A4A`, and group
 fill/outline/text `0x70A940/0x70A951/0x70A97B`. Conservative write fences cover DSurface lock/fill

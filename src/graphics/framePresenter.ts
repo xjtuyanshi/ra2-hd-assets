@@ -27,6 +27,7 @@ export interface FrameScheduler {
  */
 export class FramePresenter {
   private latest: VmFrame | null = null;
+  private displayed: VmFrame | null = null;
   private version = 0;
   private drawnVersion = -1;
   private cursor: CursorPresentation = { x: 400, y: 300, visible: false };
@@ -53,6 +54,9 @@ export class FramePresenter {
 
   get frame(): VmFrame | null {
     return this.latest;
+  }
+  get displayedFrame(): VmFrame | null {
+    return this.displayed;
   }
   get frameVersion(): number {
     return this.version;
@@ -110,6 +114,7 @@ export class FramePresenter {
     const target = this.hooks.targetSize();
     // Even when enhancement lags, sample and position the cursor from the latest original frame.
     this.output.draw(enhanced ?? frame, target.width, target.height, this.cursor, frame);
+    this.displayed = enhanced ?? frame;
     this.presentations++;
     this.drawnVersion = this.version;
     this.drawnCursorVersion = this.cursorVersion;
@@ -121,6 +126,7 @@ export class FramePresenter {
     if (this.pending !== null) this.scheduler.cancel(this.pending);
     this.pending = null;
     this.latest = null;
+    this.displayed = null;
     this.output.destroy();
   }
 }

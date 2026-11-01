@@ -1,3 +1,4 @@
+import type { MenuControlSnapshot } from '../menuSnapshot';
 import type { MessageState, SurfaceState, VmGdiFont, Win32Call, Win32Result } from '../win32';
 import { GUEST_CALLBACK_STRIDE as CALLBACK_STRIDE, HYPERCALL_CALLBACK_DEPTH } from '../pe';
 import { withGdi32 } from './gdi32';
@@ -29,7 +30,13 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
     protected activeShellPage = 0;
     protected readonly ownerDrawDcs = new Map<number, number>();
     /** Validate update regions only after guest WM_PAINT callbacks return. */
-    protected readonly pendingPaintValidations = new Set<number>();
+    protected readonly pendingPaintValidations = new Map<number, number>();
+    /** BeginPaint may validate early; the associated guest painter must still return. */
+    protected readonly activePaintCallbacks = new Map<number, { hwnd: number; signature: string | null }>();
+    private observedMenuPaint = false;
+    private completedMenuPaintSignature: string | null = null;
+    private completedGuestMenuPaintSignature: string | null = null;
+    private completedGuestMenuPaintDialog = 0;
     /** Distinguish update-region paint requests from explicitly posted WM_PAINT messages. */
     protected readonly generatedPaintMessages = new WeakSet<MessageState>();
     protected readonly dialogFonts = new Map<number, VmGdiFont>();
@@ -284,6 +291,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
       this.activeShellPage = nextPage;
 
       if (previousPage !== nextPage) {
+        this.clearMenuPaintCompletion();
         if ((this as unknown as User32MessageLoopBridge).isWindowInTree(this.focusWindow, previousPage))
           this.focusWindow = 0;
         if ((this as unknown as User32MessageLoopBridge).isWindowInTree(this.captureWindow, previousPage))
@@ -317,6 +325,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
     }
 
     protected forgetWindow(hwnd: number): void {
+      if (hwnd === this.completedGuestMenuPaintDialog) this.clearMenuPaintCompletion();
       this.mciWindows.delete(hwnd);
       this.windows.delete(hwnd);
       const zIndex = this.windowZOrder.indexOf(hwnd);
@@ -576,6 +585,26 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
       return { x: origin.x, y: origin.y, width: rect?.width ?? 0, height: rect?.height ?? 0 };
     }
 
+    /** Outer modal callbacks may stay alive; only an unchanged completed paint qualifies inside them. */
+    menuPaintComplete(signature: string): boolean {
+      this.flushPendingPaintValidations(false);
+      return (
+        (this.completedMenuPaintSignature === signature ||
+          (!this.observedMenuPaint && this.readU32(HYPERCALL_CALLBACK_DEPTH) === 0)) &&
+        this.activePaintCallbacks.size === 0 &&
+        ![...this.invalidatedWindows].some((hwnd) => this.isWindowTreeVisible(hwnd)) &&
+        this.pendingPaintValidations.size === 0
+      );
+    }
+
+    protected beginPaintCallback(hwnd: number, frame: GuestCallbackFrame): void {
+      const signature = this.captureMenuState()?.signature ?? null;
+      if (signature !== null) this.observedMenuPaint = true;
+      this.completedMenuPaintSignature = null;
+      this.activePaintCallbacks.set(frame.ownerAddress, { hwnd, signature });
+      this.pendingPaintValidations.set(hwnd, frame.ownerAddress);
+    }
+
     /** Copies only: presentation cannot change guest controls, focus, capture or their coordinate space. */
     inspectMenuSnapshot() {
       const dialogHwnd = [...this.windowZOrder]
@@ -585,7 +614,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
       const messages = this as unknown as User32MessageLoopBridge;
       const controls = [...this.windows.keys()]
         .filter((hwnd) => messages.isWindowInTree(hwnd, dialogHwnd))
-        .map((hwnd) => ({
+        .map((hwnd): MenuControlSnapshot => ({
           hwnd,
           parent: this.windowParents.get(hwnd) ?? 0,
           id: this.controlIds.get(hwnd) ?? 0,
@@ -598,12 +627,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
           enabled: messages.isWindowTreeEnabled(hwnd),
           focused: this.focusWindow === hwnd,
           pressed: this.pressedButton === hwnd || (this.captureWindow === hwnd && this.keyStates.get(1) === true),
-          ...(this.controlItems.has(hwnd)
-            ? {
-                items: this.controlItems.get(hwnd)!.map((item) => item.text),
-                selection: this.controlSelections.get(hwnd) ?? -1,
-              }
-            : {}),
+          ...this.inspectMenuControlState(hwnd),
         }));
       return {
         width: this.presentedWidth,
@@ -613,6 +637,60 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
         moviePlaying: this.inspectMoviePlayback(),
         pointer: { x: this.cursorX, y: this.cursorY },
         controls,
+      };
+    }
+
+    private inspectMenuControlState(hwnd: number): Partial<MenuControlSnapshot> {
+      const className = this.windowClassNames.get(hwnd)?.toLowerCase();
+      const rect = this.screenRect(hwnd);
+      if (className === 'button') return { checked: this.buttonChecks.get(hwnd) ?? 0 };
+      if (className === 'scrollbar') {
+        const state = this.scrollbarStates.get(hwnd);
+        if (!state) return {};
+        const scroll = { min: state.min, max: state.max, page: state.page, pos: state.pos };
+        if (((this.windowLongs.get(`${hwnd}:-16`) ?? 0) & 1) === 0) return { scroll };
+        // Capture the same geometry used by the shim painter and hit testing.
+        // A game-owned skin may replace it through the snapshot policy.
+        const geometry = scrollbarGeometry(state, rect.height, rect.width);
+        return {
+          scroll: {
+            ...scroll,
+            arrowSize: geometry.arrow,
+            groove: { ...rect, y: rect.y + geometry.arrow, height: rect.height - 2 * geometry.arrow },
+            thumb: { ...rect, y: rect.y + geometry.start, height: geometry.thumb },
+          },
+        };
+      }
+      if (className === 'msctls_trackbar32') {
+        const state = this.trackbarStates.get(hwnd);
+        // Native skin geometry is game-owned. A policy must supply its actual
+        // thumb/groove; standard logical values alone cannot qualify the screen.
+        return state ? { slider: { min: state.min, max: state.max, value: state.pos } } : {};
+      }
+      if (className !== 'listbox' && className !== 'combobox' && className !== 'combolbox') return {};
+      const items = this.controlItems.get(hwnd) ?? [];
+      const combo = this.comboStates.get(hwnd);
+      const itemHeight = combo?.itemHeight ?? this.controlItemHeights.get(hwnd) ?? 16;
+      const topIndex = this.listboxTopIndices.get(hwnd) ?? 0;
+      const style = this.windowLongs.get(`${hwnd}:-16`) ?? 0;
+      return {
+        items: items.map((item) => item.text),
+        itemData: items.map((item) => item.data),
+        // Owner-drawn item payloads are private game records, not ANSI captions.
+        itemsComplete: (style & 0x30) === 0,
+        selection: this.controlSelections.get(hwnd) ?? -1,
+        topIndex,
+        itemHeight,
+        visibleRows: Math.floor(rect.height / itemHeight),
+        ...(combo
+          ? {
+              popup: {
+                dropped: combo.dropped,
+                topIndex,
+                rect: { ...rect, width: Math.max(rect.width, combo.droppedWidth), height: combo.droppedHeight },
+              },
+            }
+          : {}),
       };
     }
 
@@ -704,6 +782,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
     protected invalidateWindow(hwnd: number): void {
       // Hidden windows/subtrees generate no system paint messages; invalidateWindowTree repaints when shown.
       if (!this.isWindowVisible(hwnd)) return;
+      this.completedMenuPaintSignature = null;
       // DirectDraw owner-draw procedures do not call BeginPaint. If they
       // invalidate themselves while the current WM_PAINT callback is still on
       // the guest stack, that is a request for another paint, not a duplicate
@@ -730,10 +809,53 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
     /**
      * SendMessage/DispatchMessage execute callbacks through guest trampolines; painting is unfinished when the host returns. Retain update regions until callback exit for GetUpdateRect during painting.
      */
-    protected flushPendingPaintValidations(): void {
-      if (!this.pendingPaintValidations.size || this.readU32(HYPERCALL_CALLBACK_DEPTH) !== 0) return;
-      for (const hwnd of this.pendingPaintValidations) this.validateWindow(hwnd);
-      this.pendingPaintValidations.clear();
+    protected flushPendingPaintValidations(publishCompleted = true): void {
+      const finished: Array<string | null> = [];
+      for (const [owner, paint] of this.activePaintCallbacks) {
+        if (this.readU32(owner) !== 0) continue;
+        this.activePaintCallbacks.delete(owner);
+        // A newer invalidation cancels only this validation, not its active
+        // callback. Returning from the old paint cannot erase that new request.
+        if (this.pendingPaintValidations.get(paint.hwnd) === owner) this.validateWindow(paint.hwnd);
+        finished.push(paint.signature);
+      }
+      let signature: string | null = null;
+      if (finished.length && !this.activePaintCallbacks.size && !this.pendingPaintValidations.size) {
+        const state = this.captureMenuState();
+        signature = state?.signature ?? null;
+        // Keep the guest's completed state while a final synchronous scrollbar
+        // is still invalid. That scrollbar cannot certify other unpainted text.
+        this.completedGuestMenuPaintSignature = finished.every((before) => before === signature) ? signature : null;
+        this.completedGuestMenuPaintDialog =
+          this.completedGuestMenuPaintSignature === null ? 0 : state!.snapshot.dialogHwnd;
+      }
+      this.completeMenuPaints(finished, publishCompleted, signature);
+    }
+
+    private completeMenuPaints(
+      finished: readonly (string | null)[],
+      publishCompleted: boolean,
+      signature: string | null,
+    ): boolean {
+      if (
+        finished.length &&
+        !this.activePaintCallbacks.size &&
+        !this.pendingPaintValidations.size &&
+        ![...this.invalidatedWindows].some((hwnd) => this.isWindowTreeVisible(hwnd))
+      ) {
+        this.completedMenuPaintSignature = finished.every((before) => before === signature) ? signature : null;
+        // The final Unlock can publish while WM_PAINT is still on the stack.
+        // Static dialogs need a completed picture after that callback returns,
+        // even when no further pixel write occurs. Snapshot-time validation is
+        // already publishing that picture and must not recursively emit it.
+        const primary = this.surfaces.get(this.primarySurface);
+        if (publishCompleted && this.completedMenuPaintSignature !== null && primary) {
+          primary.dirty = true;
+          this.emitPrimaryFrame();
+        }
+        return this.completedMenuPaintSignature !== null;
+      }
+      return false;
     }
 
     protected invalidateWindowTree(root: number): void {
@@ -761,11 +883,24 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
 
     protected hideWindowState(hwnd: number, redraw = true): void {
       if (!hwnd || !this.windows.has(hwnd)) return;
+      if (
+        this.completedGuestMenuPaintDialog &&
+        (this as unknown as User32MessageLoopBridge).isWindowInTree(this.completedGuestMenuPaintDialog, hwnd)
+      )
+        this.clearMenuPaintCompletion();
       if ((this as unknown as User32MessageLoopBridge).isWindowInTree(this.focusWindow, hwnd)) this.focusWindow = 0;
       if ((this as unknown as User32MessageLoopBridge).isWindowInTree(this.captureWindow, hwnd)) this.captureWindow = 0;
       if ((this as unknown as User32MessageLoopBridge).isWindowInTree(this.pressedButton, hwnd)) this.pressedButton = 0;
       this.clearWindowTreeInvalidation(hwnd);
       if (redraw) this.invalidateWindow(this.windowParents.get(hwnd) ?? 0);
+    }
+
+    private clearMenuPaintCompletion(): void {
+      // A retained HWND may return with identical state but newly erased pixels.
+      // A scrollbar cannot borrow guest painting from its previous visible page.
+      this.completedMenuPaintSignature = null;
+      this.completedGuestMenuPaintSignature = null;
+      this.completedGuestMenuPaintDialog = 0;
     }
 
     /** Discard WM_PAINT left from inactive pages; also handle stale queued messages here. */
@@ -869,9 +1004,21 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
         // WM_PAINT
         if (this.discardInactivePaint(hwnd)) return 0;
         if (className === 'scrollbar') {
-          const primary = this.surfaces.get(this.primarySurface);
-          if (primary) primary.dirty = true;
-          this.emitPrimaryFrame();
+          const signature = this.captureMenuState()?.signature ?? null;
+          if (signature !== null) this.observedMenuPaint = true;
+          // Scrollbars are painted synchronously by compositeWindowControls.
+          // Validate before publishing those pixels; otherwise the last paint
+          // leaves a generation-zero frame with no guest callback to finish it.
+          this.invalidatedWindows.delete(hwnd);
+          const completed =
+            signature !== null &&
+            signature === this.completedGuestMenuPaintSignature &&
+            this.completeMenuPaints([signature], true, this.captureMenuState()?.signature ?? null);
+          if (!completed) {
+            const primary = this.surfaces.get(this.primarySurface);
+            if (primary) primary.dirty = true;
+            this.emitPrimaryFrame();
+          }
         }
         // Standard controls maintain only Win32 state; the game's DirectDraw/owner-draw code determines
         // visible RA2/YR shell appearance. Do not synthesize template borders: templates retain
@@ -1643,6 +1790,7 @@ export function withUser32Windowing<TBase extends Constructor<Gdi32Chain>>(Base:
         this.writeU32(pointer + 44, entry.data);
       });
       this.writeU32(OWNER_DRAW_ACTIVE, 1);
+      this.beginPaintCallback(hwnd, frame);
       this.memory.write_memory(code, trampoline);
       this.writeU32(call.stack, trampoline);
       return true;

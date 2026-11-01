@@ -118,6 +118,25 @@ describe('native binary protocol', () => {
     };
     expect(decodeMenuSnapshot(json(null))).toBeNull();
     expect(decodeMenuSnapshot(json(snapshot))).toEqual(snapshot);
+    expect(decodeMenuSnapshot(json({ ...snapshot, generation: 7 }))?.generation).toBe(7);
+    const edit = { caret: 3, firstVisible: 1, caretVisible: true, caretColor: 0xffff00 };
+    const edited = { ...snapshot, controls: [{ ...snapshot.controls[0], edit }] };
+    expect(decodeMenuSnapshot(json(edited))?.controls[0]!.edit).toEqual(edit);
+    for (const invalid of [
+      { ...edit, caret: -1 },
+      { ...edit, caret: 999 },
+      { ...edit, firstVisible: 1.5 },
+      { ...edit, firstVisible: 4 },
+      { ...edit, caretVisible: 1 },
+      { ...edit, caretColor: 0x1000000 },
+      null,
+    ]) {
+      expect(() =>
+        decodeMenuSnapshot(json({ ...snapshot, controls: [{ ...snapshot.controls[0], edit: invalid }] })),
+      ).toThrow('menu snapshot');
+    }
+    for (const generation of [0, -1, 0x1_0000_0000, 1.5, '7'])
+      expect(() => decodeMenuSnapshot(json({ ...snapshot, generation }))).toThrow('menu snapshot');
     expect(() =>
       decodeMenuSnapshot(
         json({ ...snapshot, controls: [{ ...snapshot.controls[0], rect: { x: 10, y: 20, width: -1, height: 40 } }] }),
@@ -129,6 +148,28 @@ describe('native binary protocol', () => {
     expect(() =>
       decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, menuSnapshot: 1 } })),
     ).toThrow('menu-snapshot');
+  });
+  it('validates the optional fault-only diagnostic capability', () => {
+    for (const mirrorFaultSnapshot of [undefined, false, true])
+      expect(
+        decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, mirrorFaultSnapshot } })).limits
+          .mirrorFaultSnapshot,
+      ).toBe(mirrorFaultSnapshot);
+    for (const mirrorFaultSnapshot of [null, 0, 1, 'true', {}])
+      expect(() =>
+        decodeHello(json({ ...syntheticHello, limits: { ...syntheticHello.limits, mirrorFaultSnapshot } })),
+      ).toThrow('mirror-fault-snapshot');
+  });
+  it('binds menu generations to exact picture deltas without accepting unknown trailing metadata', () => {
+    const decoder = new NativePictureDecoder();
+    const initial = picture(1, 2, 1, [[0, words(2, 0x1111, 0x2222)]]);
+    expect(decoder.apply(concat(initial, encodeU32(0x314e454d, 7))).menuGeneration).toBe(7);
+    const unchanged = picture(2, 2, 1, []);
+    const next = decoder.apply(concat(unchanged, encodeU32(0x314e454d, 8)));
+    expect(next.menuGeneration).toBe(8);
+    expect([...next.pixels]).toEqual([0x1111, 0x2222]);
+    expect(decoder.apply(concat(unchanged, encodeU32(0, 9))).menuGeneration).toBeUndefined();
+    expect(decoder.apply(unchanged).menuGeneration).toBeUndefined();
   });
   it('encodes dynamic rules and rejects overflowing subscriptions before sending', () => {
     const bytes = encodeSubscription({
@@ -367,6 +408,39 @@ describe('atomic native overlay publications', () => {
     const next = decoder.apply(picture(43, 3, 1, []));
     expect([...next.pixels]).toEqual([1, 2, 3]);
     expect(next.overlayJournal).toBeUndefined();
+  });
+  it('binds menu identity and a journal to the same picture without including MEN1 in the journal length', () => {
+    const decoder = new NativePictureDecoder();
+    const base = picture(42, 3, 1, [[0, words(3, 1, 2, 3)]]);
+    const decoded = decoder.apply(concat(base, encodeU32(0x314e454d, 25), journal()));
+    expect(decoded.menuGeneration).toBe(25);
+    expect(decoded.overlayJournal).toMatchObject({ matchGeneration: 7, drawGeneration: 12, commands });
+    expect([...decoded.pixels]).toEqual([1, 2, 3]);
+    expect([...decoded.overlayJournal!.cleanRgb565]).toEqual([0xf81f, 2, 3]);
+    const menuOnly = decoder.apply(concat(picture(43, 3, 1, []), encodeU32(0x314e454d, 26)));
+    expect(menuOnly.menuGeneration).toBe(26);
+    expect(menuOnly.overlayJournal).toBeUndefined();
+    const journalOnly = decoder.apply(concat(picture(44, 3, 1, []), journal()));
+    expect(journalOnly.menuGeneration).toBeUndefined();
+    expect(journalOnly.overlayJournal).toBeDefined();
+    const nativeOnly = decoder.apply(picture(45, 3, 1, []));
+    expect(nativeOnly.menuGeneration).toBeUndefined();
+    expect(nativeOnly.overlayJournal).toBeUndefined();
+    expect([...nativeOnly.pixels]).toEqual([1, 2, 3]);
+  });
+  it('retains valid menu identity and native pixels when only the optional journal is malformed', () => {
+    const decoder = new NativePictureDecoder();
+    const base = picture(42, 3, 1, [[0, words(3, 1, 2, 3)]]);
+    for (const suffix of [journal({ flags: 0 }), journal().subarray(0, -1), encodeU32(0)]) {
+      const decoded = decoder.apply(concat(base, encodeU32(0x314e454d, 25), suffix));
+      expect(decoded.menuGeneration).toBe(25);
+      expect(decoded.overlayJournal).toBeUndefined();
+      expect([...decoded.pixels]).toEqual([1, 2, 3]);
+    }
+    const truncatedMenu = decoder.apply(concat(base, encodeU32(0x314e454d)));
+    expect(truncatedMenu.menuGeneration).toBeUndefined();
+    expect(truncatedMenu.overlayJournal).toBeUndefined();
+    expect([...decoder.apply(picture(43, 3, 1, [])).pixels]).toEqual([1, 2, 3]);
   });
   it('retains the native fallback for mismatched, incomplete, unknown and truncated journals', () => {
     const decoder = new NativePictureDecoder();

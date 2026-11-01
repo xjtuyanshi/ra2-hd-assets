@@ -3,6 +3,7 @@ import { useState, type CSSProperties } from 'react';
 import { forgetGameDirectory } from '../../../../platform/browser/files/directoryAccess';
 import { clearCachedGameFiles } from '../../../../adapter/cachedGameFiles';
 import type { BootState, StatusState } from '../state/uiState';
+import { NativeMarksNotice } from './NativeMarksNotice';
 
 const panelStyle: CSSProperties = {
   left: '50%',
@@ -116,6 +117,7 @@ export function BootView({ game, status, cancel, start }: BootState) {
         <p style={{ maxWidth: '80vw', fontSize: 24, lineHeight: 1.7, textAlign: 'center', margin: 0 }}>
           全屏开始会让游戏画面匹配整个屏幕。
         </p>
+        <NativeMarksNotice />
         <button
           id="native-start"
           type="button"

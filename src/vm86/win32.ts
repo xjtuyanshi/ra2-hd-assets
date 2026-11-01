@@ -1,3 +1,4 @@
+import type { MenuSnapshot } from './menuSnapshot';
 /** Host network status; a live connection does not establish guest-game synchronization. */
 export interface VmNetworkStatus {
   phase: 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -101,6 +102,8 @@ export interface Win32Call {
 }
 
 export interface VmFrame {
+  /** Exact complete menu state captured with these pixels; absent/zero retains the original. */
+  menuGeneration?: number;
   width: number;
   height: number;
   /** Indexes for 8-bit palette mode; empty for RGB565. */
@@ -185,6 +188,8 @@ export interface Win32ShimOptions {
   /** Main-module static IAT; temporarily connect frequent exports directly while native guest DLLs are active, avoiding serial IRQ round trips. */
   staticImports?: readonly PeImport[];
   onFrame?: (frame: VmFrame) => void;
+  /** Synchronous version-validated enrichment at the same boundary as picture copying. */
+  resolveMenuSnapshot?: (snapshot: MenuSnapshot) => MenuSnapshot;
   /** The guest completed one DirectDraw vertical-sync cycle, corresponding to a native main-loop frame. */
   onLogicFrame?: () => void;
   /** Coalesce frequent primary-surface updates into the next host drawing opportunity. */

@@ -54,10 +54,12 @@ class FakeAgent implements NativeWebSocket {
   modal = false;
   menuVisible: boolean | undefined;
   menuSnapshot: MenuSnapshot | null = null;
+  menuIdentity = false;
   moviePlaying: boolean | null | undefined;
   initial = new Uint8Array(NATIVE_PAGE_SIZE);
   revisionSupport = false;
   mirrorWindow: 1 | 2 | undefined;
+  mirrorFaultSnapshot: boolean | undefined;
   subscriptionRevision = 0;
   surface = { width: 0, height: 0, bpp: 0, format: 'RGB565' };
   cursorSnapshot = false;
@@ -80,6 +82,13 @@ class FakeAgent implements NativeWebSocket {
       this.subscriptionRevision++;
       this.emit(request.type, request.id, encodeU32(this.subscriptionRevision));
     } else if (request.type === NativeMessageType.Diagnostics) {
+      if (request.payload.length) {
+        if (this.mirrorFaultSnapshot && request.payload.length === 4 && u32(request.payload) === 1)
+          this.emit(request.type, request.id, json({ lastMirrorFault: this.mirrorFault }));
+        else
+          this.emit(NativeMessageType.Error, request.id, new TextEncoder().encode('unsupported diagnostics payload'));
+        return;
+      }
       this.emit(
         request.type,
         request.id,
@@ -151,9 +160,11 @@ class FakeAgent implements NativeWebSocket {
           maxBudgetUs,
           subscribeRevision,
           mirrorWindow: this.mirrorWindow,
+          mirrorFaultSnapshot: this.mirrorFaultSnapshot,
           ...(this.cursorSnapshot ? { cursorSnapshot: true } : {}),
           menuSnapshot: true,
           ...(this.drawJournal ? { drawJournal: true } : {}),
+          menuIdentity: this.menuIdentity,
         },
       }),
     );
@@ -252,8 +263,9 @@ function setup(callbacks: GameVmCallbacks = {}, options: Partial<NativeCoreOptio
   active.push(core);
   return { agent, core, scheduled, policyFactory, renderFactory, mode };
 }
-async function started(callbacks: GameVmCallbacks = {}) {
+async function started(callbacks: GameVmCallbacks = {}, mirrorFaultSnapshot?: boolean) {
   const test = setup(callbacks);
+  test.agent.mirrorFaultSnapshot = mirrorFaultSnapshot;
   const start = test.core.start();
   test.agent.hello();
   await start;
@@ -424,24 +436,36 @@ describe('native core session and presenter lifecycle', () => {
     },
   );
 
-  it('keeps bounded catch-up progress after budget truncation without starting unreadable-range recovery', async () => {
-    vi.useFakeTimers();
-    const { core, agent } = await started();
-    expect((await core.getRenderState())?.frame).toBe(7);
-    agent.mirrorFault = { reason: 1, stage: 2, rule: 0, value: 1000, limit: 4000 };
-    agent.mirror(2, [], 1);
-    for (let index = 0; index < 3; index++) {
-      await vi.advanceTimersByTimeAsync(600);
-      expect(await core.getRenderState()).toBeNull();
-    }
-    expect(agent.count(NativeMessageType.Subscribe)).toBe(1);
-    expect((await core.getDiagnostics('sample')).native).toMatchObject({
-      renderHealth: { unreadableSinceEpochMs: null },
-      mirrorRecovery: { count: 0 },
-    });
-    agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }]);
-    expect((await core.getRenderState())?.frame).toBe(7);
-  });
+  it.each([undefined, false, true])(
+    'keeps budget truncation transient with fault snapshots %s',
+    async (mirrorFaultSnapshot) => {
+      vi.useFakeTimers();
+      const { core, agent } = await started({}, mirrorFaultSnapshot);
+      expect((await core.getRenderState())?.frame).toBe(7);
+      agent.mirrorFault = { reason: 1, stage: 2, rule: 0, value: 1000, limit: 4000 };
+      agent.mirror(2, [], 1);
+      for (let index = 0; index < 3; index++) {
+        await vi.advanceTimersByTimeAsync(600);
+        expect(await core.getRenderState()).toBeNull();
+      }
+      expect(agent.count(NativeMessageType.Subscribe)).toBe(1);
+      const recoveryDiagnostic = agent.requests
+        .filter((request) => request.type === NativeMessageType.Diagnostics)
+        .at(-1)!;
+      expect([...recoveryDiagnostic.payload]).toEqual(mirrorFaultSnapshot ? [...encodeU32(1)] : []);
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        frameHook: { site: 0x2000, original: [1, 2], patched: [3, 4] },
+        lastMirrorFault: agent.mirrorFault,
+        renderHealth: { unreadableSinceEpochMs: null },
+        mirrorRecovery: { count: 0 },
+      });
+      expect(
+        agent.requests.filter((request) => request.type === NativeMessageType.Diagnostics).at(-1)!.payload,
+      ).toHaveLength(0);
+      agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }]);
+      expect((await core.getRenderState())?.frame).toBe(7);
+    },
+  );
 
   it.each(['stop', 'disconnect'])(
     'settles publication waiting immediately during %s without another input request',
@@ -703,6 +727,28 @@ describe('native core session and presenter lifecycle', () => {
     core.setKeyState(13, true);
     expect(await core.getMenuSnapshot()).toBeNull();
   });
+  it('retains picture-captured strings instead of substituting a later game-memory read', async () => {
+    const { core, agent, policyFactory } = setup();
+    const factory = vi.mocked(policyFactory).getMockImplementation()!;
+    const readMenuTexts = vi.fn(async () => new Map<number, string>());
+    vi.mocked(policyFactory).mockImplementation((...args) => ({ ...factory(...args), readMenuTexts }));
+    agent.modal = true;
+    agent.menuSnapshot = {
+      generation: 41,
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 20, y: 30 },
+      controls: [],
+    };
+    const start = core.start();
+    agent.hello();
+    await start;
+    expect(await core.getMenuSnapshot()).toEqual(agent.menuSnapshot);
+    expect(readMenuTexts).not.toHaveBeenCalled();
+  });
   it('discards a snapshot when a dialog-changing input arrives and is ACKed during its text read', async () => {
     const { core, agent, policyFactory } = setup();
     const factory = vi.mocked(policyFactory).getMockImplementation()!;
@@ -844,30 +890,40 @@ describe('native core session and presenter lifecycle', () => {
     expect(u32(subscription.payload)).toBe(1);
     expect(u32(subscription.payload, 20)).toBe(0x1000);
   });
-  it('recovers a page-capacity truncation by retiring learned scopes and publishing a fresh bounded image', async () => {
-    const { core, agent, mode } = await started();
-    await core.getRenderState();
-    mode.missing = true;
-    agent.mirror(core.memory.frame ?? 1, []);
-    const read = core.getRenderState();
-    await flush();
-    const pages = [0x1000, 0x9000].map((address) => ({ address, bytes: agent.initial }));
-    agent.mirror(2, pages, 2);
-    await flush();
-    agent.mirror(3, [], 0);
-    expect((await read)?.frame).toBe(7);
-    expect(core.getMirrorFootprint().pageCounts.learned).toBe(1);
-    agent.mirrorFault = { reason: 2, stage: 1, rule: 15, value: 4096, limit: 4096 };
-    agent.mirror(4, [], 1);
-    await flush();
-    expect(core.getMirrorFootprint().ranges.learned).toEqual([]);
-    expect(core.getMirrorFootprint().ranges.subscribed).toEqual([{ address: 0x1000, length: 4096 }]);
-    mode.missing = false;
-    agent.mirror(5, [{ address: 0x1000, bytes: agent.initial }], 2);
-    await flush();
-    expect((await core.getRenderState())?.frame).toBe(7);
-    expect(agent.closes).toBe(0);
-  });
+  it.each([undefined, false, true].flatMap((capability) => [2, 7].map((reason) => [capability, reason] as const)))(
+    'retires learned scopes for a real capacity fault (snapshot %s, reason %s)',
+    async (mirrorFaultSnapshot, reason) => {
+      const { core, agent, mode } = await started({}, mirrorFaultSnapshot);
+      await core.getRenderState();
+      mode.missing = true;
+      agent.mirror(core.memory.frame ?? 1, []);
+      const read = core.getRenderState();
+      await flush();
+      const pages = [0x1000, 0x9000].map((address) => ({ address, bytes: agent.initial }));
+      agent.mirror(2, pages, 2);
+      await flush();
+      agent.mirror(3, [], 0);
+      expect((await read)?.frame).toBe(7);
+      expect(core.getMirrorFootprint().pageCounts.learned).toBe(1);
+      const diagnosticsBeforeFault = agent.count(NativeMessageType.Diagnostics);
+      agent.mirrorFault = { reason, stage: 1, rule: 15, value: 4096, limit: 4096 };
+      agent.mirror(4, [], 1);
+      await flush();
+      const recoveryDiagnostics = agent.requests
+        .filter((request) => request.type === NativeMessageType.Diagnostics)
+        .slice(diagnosticsBeforeFault);
+      expect([...recoveryDiagnostics[0].payload]).toEqual(mirrorFaultSnapshot ? [...encodeU32(1)] : []);
+      // A confirmed fault still records the complete recovery diagnostic.
+      expect(recoveryDiagnostics.at(-1)!.payload).toHaveLength(0);
+      expect(core.getMirrorFootprint().ranges.learned).toEqual([]);
+      expect(core.getMirrorFootprint().ranges.subscribed).toEqual([{ address: 0x1000, length: 4096 }]);
+      mode.missing = false;
+      agent.mirror(5, [{ address: 0x1000, bytes: agent.initial }], 2);
+      await flush();
+      expect((await core.getRenderState())?.frame).toBe(7);
+      expect(agent.closes).toBe(0);
+    },
+  );
   it('rejects unknown policy discovery without replacing the prior reader result or subscription scope', async () => {
     const { core, agent, policyFactory } = setup(),
       factory = vi.mocked(policyFactory).getMockImplementation()!;
@@ -932,10 +988,11 @@ describe('native core session and presenter lifecycle', () => {
       2,
     );
     await flush();
+    expect((await pending)?.frame).toBe(7);
     const fresh = new Uint8Array(NATIVE_PAGE_SIZE);
     fresh[0] = 42;
     agent.mirror(3, [{ address: 0x9000, bytes: fresh }]);
-    expect((await pending)?.frame).toBe(42);
+    expect((await core.getRenderState())?.frame).toBe(42);
     const requests = agent.requests.length,
       reads = core.memory.operationRanges,
       footprint = core.getMirrorFootprint();
@@ -1075,39 +1132,46 @@ describe('native core session and presenter lifecycle', () => {
     await start;
     expect(agent.requests.find((request) => request.type === NativeMessageType.Credit)?.payload).toEqual(encodeU32(1));
   });
-  it('negotiates atomic draw journals and forwards the matched planes without changing the native fallback', async () => {
-    const frames = vi.fn();
-    const { core, agent, scheduled } = setup({ onFrame: frames }, { drawJournal: true });
-    agent.drawJournal = true;
-    const start = core.start();
-    agent.hello();
-    await start;
-    expect(agent.requests.find((request) => request.type === NativeMessageType.Credit)?.payload).toEqual(
-      encodeU32(1, 1),
-    );
-    const commands = json([
-      { kind: 'rect', x: 0, y: 0, width: 1, height: 1, colour: 0x7e0, clip: { x: 0, y: 0, width: 2, height: 1 } },
-    ]);
-    agent.emit(
-      NativeMessageType.Picture,
-      0,
-      concat(
-        encodeU32(80, 2, 1, 1, 0, 2),
-        new Uint8Array([2, 0x80]),
-        encodeU32(0x314a564f, 32 + commands.length + 4, 2, 7, 2, 1, 1, commands.length),
-        commands,
-        new Uint8Array([0, 0, 1, 0]),
-      ),
-    );
-    scheduled.shift()!();
-    const frame = frames.mock.calls[0]![0] as VmFrame;
-    expect(frame).toMatchObject({ matchGeneration: 2, drawGeneration: 7 });
-    expect([...frame.rgb565!]).toEqual([0xf81f, 0xf81f]);
-    expect([...frame.overlayJournal!.cleanRgb565]).toEqual([0, 1]);
-    agent.picture(81, false);
-    scheduled.shift()!();
-    expect(frames.mock.calls[1]![0].overlayJournal).toBeUndefined();
-  });
+  it.each([false, true])(
+    'forwards an atomic journal and native fallback with menu identity %s',
+    async (menuIdentity) => {
+      const frames = vi.fn();
+      const { core, agent, scheduled } = setup({ onFrame: frames }, { drawJournal: true });
+      agent.drawJournal = true;
+      agent.menuIdentity = menuIdentity;
+      const start = core.start();
+      agent.hello();
+      await start;
+      expect(agent.requests.find((request) => request.type === NativeMessageType.Credit)?.payload).toEqual(
+        encodeU32(menuIdentity ? 0x80000001 : 1, 1),
+      );
+      const commands = json([
+        { kind: 'rect', x: 0, y: 0, width: 1, height: 1, colour: 0x7e0, clip: { x: 0, y: 0, width: 2, height: 1 } },
+      ]);
+      agent.emit(
+        NativeMessageType.Picture,
+        0,
+        concat(
+          encodeU32(80, 2, 1, 1, 0, 2),
+          new Uint8Array([2, 0x80]),
+          ...(menuIdentity ? [encodeU32(0x314e454d, 9)] : []),
+          encodeU32(0x314a564f, 32 + commands.length + 4, 2, 7, 2, 1, 1, commands.length),
+          commands,
+          new Uint8Array([0, 0, 1, 0]),
+        ),
+      );
+      scheduled.shift()!();
+      const frame = frames.mock.calls[0]![0] as VmFrame;
+      expect(frame).toMatchObject({ matchGeneration: 2, drawGeneration: 7 });
+      expect(frame.menuGeneration).toBe(menuIdentity ? 9 : undefined);
+      expect([...frame.rgb565!]).toEqual([0xf81f, 0xf81f]);
+      expect([...frame.overlayJournal!.cleanRgb565]).toEqual([0, 1]);
+      agent.picture(81, false);
+      scheduled.shift()!();
+      expect(frames.mock.calls[1]![0].overlayJournal).toBeUndefined();
+      expect(frames.mock.calls[1]![0].menuGeneration).toBeUndefined();
+    },
+  );
   it('attaches pictures and protocol input at a menu, then prepares readers only from a real battle mirror', async () => {
     const statuses = vi.fn(),
       frames = vi.fn();
@@ -1245,6 +1309,23 @@ describe('native core session and presenter lifecycle', () => {
     expect(agent.hookEnabled).toBe(false);
     expect(agent.closes).toBe(1);
   });
+  it('negotiates menu identity independently of requested and supported draw capture', async () => {
+    for (const menuIdentity of [false, true])
+      for (const drawSupported of [false, true])
+        for (const drawRequested of [false, true]) {
+          const { core, agent } = setup({}, { drawJournal: drawRequested });
+          agent.menuIdentity = menuIdentity;
+          agent.drawJournal = drawSupported;
+          const start = core.start();
+          agent.hello();
+          await start;
+          core.requestNextFrame();
+          const credit = agent.requests.find((request) => request.type === NativeMessageType.Credit)!;
+          const count = menuIdentity ? 0x80000001 : 1;
+          expect(credit.payload).toEqual(drawSupported && drawRequested ? encodeU32(count, 1) : encodeU32(count));
+          await core.stop();
+        }
+  });
   it('uses one picture credit until presenter recycling, preserving decoder state after consumer transfer', async () => {
     const frames = vi.fn();
     const { core, agent, scheduled } = await started({ onFrame: frames });
@@ -1294,17 +1375,145 @@ describe('native core session and presenter lifecycle', () => {
     expect(core.memory.misses).toBeGreaterThan(0);
     expect(agent.count(NativeMessageType.Subscribe)).toBe(2);
   });
+  it.each([1, 2])(
+    'retries a strict miss from the admitted publication at frame %i without another mirror',
+    async (frame) => {
+      const { core, agent, mode, renderFactory } = setup();
+      const start = core.start();
+      agent.hello(true, true);
+      await start;
+      await core.getRenderState();
+      mode.missing = true;
+      agent.mirror(1, []);
+      let settled = false;
+      const pending = core.getRenderState().then((result) => {
+        settled = true;
+        return result;
+      });
+      await flush();
+      expect(agent.subscriptionRevision).toBe(2);
+      const added = new Uint8Array(NATIVE_PAGE_SIZE);
+      added[0] = 42;
+      agent.mirror(frame, [{ address: 0x9000, bytes: added }], 0, 2);
+      await flush();
+      expect(settled).toBe(true);
+      expect((await pending)?.frame).toBe(42);
+      expect(renderFactory.mock.calls.length).toBeGreaterThan(1);
+      expect(agent.count(NativeMessageType.Read)).toBe(0);
+    },
+  );
+  it('keeps waiting when a strict-miss subscription is unchanged and no newer complete image exists', async () => {
+    const { core, agent, mode } = setup();
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    await core.getRenderState();
+    mode.missing = true;
+    agent.mirror(1, []);
+    const first = core.getRenderState();
+    await flush();
+    const added = new Uint8Array(NATIVE_PAGE_SIZE);
+    added[0] = 42;
+    agent.mirror(2, [{ address: 0x9000, bytes: added }], 0, 2);
+    await first;
+    // The reset removes the page while the requested subscription membership stays the same.
+    agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }], 2, 2);
+    let settled = false;
+    const pending = core.getRenderState().then((result) => {
+      settled = true;
+      return result;
+    });
+    await flush();
+    expect(agent.subscriptionRevision).toBe(2);
+    expect(settled).toBe(false);
+    agent.mirror(4, [{ address: 0x9000, bytes: added }], 0, 2);
+    expect((await pending)?.frame).toBe(42);
+  });
+  it('does not retry a strict miss from an old revision or incomplete admission image', async () => {
+    const { core, agent, mode } = setup();
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    await core.getRenderState();
+    mode.missing = true;
+    agent.mirror(1, []);
+    let settled = false;
+    const pending = core.getRenderState().then((result) => {
+      settled = true;
+      return result;
+    });
+    await flush();
+    const added = new Uint8Array(NATIVE_PAGE_SIZE);
+    added[0] = 42;
+    agent.mirror(2, [{ address: 0x9000, bytes: added }], 0, 1);
+    await flush();
+    expect(settled).toBe(false);
+    agent.mirror(3, [], 1);
+    await flush();
+    expect(settled).toBe(false);
+    agent.mirror(4, [{ address: 0x9000, bytes: added }], 0, 2);
+    await flush();
+    expect(settled).toBe(true);
+    expect((await pending)?.frame).toBe(42);
+  });
+  it('cancels a strict-miss retry when admission arrives in a new reader epoch', async () => {
+    const { core, agent, mode } = setup();
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    await core.getRenderState();
+    mode.missing = true;
+    agent.mirror(1, []);
+    const pending = core.getRenderState();
+    await flush();
+    const added = new Uint8Array(NATIVE_PAGE_SIZE);
+    added[0] = 42;
+    // A game-frame rollback invalidates reader ownership before the admission continuation runs.
+    agent.mirror(0, [{ address: 0x9000, bytes: added }], 0, 2);
+    expect(await pending).toBeNull();
+  });
+  it('rejects a strict-miss retry when disconnect follows complete image application', async () => {
+    let disconnectOnFrame = false;
+    const { core, agent, mode } = setup({
+      onLogicFrame: () => {
+        if (disconnectOnFrame) agent.onclose?.({});
+      },
+    });
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    await core.getRenderState();
+    mode.missing = true;
+    agent.mirror(1, []);
+    const pending = core.getRenderState();
+    const rejected = expect(pending).rejects.toThrow('closed');
+    await flush();
+    disconnectOnFrame = true;
+    const added = new Uint8Array(NATIVE_PAGE_SIZE);
+    added[0] = 42;
+    agent.mirror(2, [{ address: 0x9000, bytes: added }], 0, 2);
+    await rejected;
+    expect(await core.getRenderState()).toBeNull();
+  });
   it('recreates a swallowed-miss reader only after a later complete mirror supplies the page', async () => {
     const { core, agent, mode, renderFactory } = await started();
     await core.getRenderState();
     mode.missing = true;
     agent.mirror(core.memory.frame ?? 1, []);
-    const retry = core.getRenderState();
+    let settled = false;
+    const retry = core.getRenderState().then((result) => {
+      settled = true;
+      return result;
+    });
     await flush();
     const added = new Uint8Array(NATIVE_PAGE_SIZE);
     added[0] = 42;
+    // A complete legacy delta is not the subscription's required reset barrier.
+    agent.mirror(2, [{ address: 0x9000, bytes: added }], 0);
+    await flush();
+    expect(settled).toBe(false);
     agent.mirror(
-      2,
+      3,
       [
         { address: 0x1000, bytes: agent.initial },
         { address: 0x9000, bytes: added },
@@ -1312,7 +1521,7 @@ describe('native core session and presenter lifecycle', () => {
       2,
     );
     await flush();
-    agent.mirror(3, [], 0);
+    expect(settled).toBe(true);
     expect((await retry)?.frame).toBe(42);
     expect(renderFactory.mock.calls.length).toBeGreaterThan(1);
     expect(agent.count(NativeMessageType.Read)).toBe(0);

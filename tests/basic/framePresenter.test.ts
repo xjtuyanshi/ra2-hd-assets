@@ -104,3 +104,25 @@ it('高频光标保留首次即时反馈，帧尾使用最新坐标，不逐事�
   expect(output.draw).toHaveBeenCalledTimes(3);
   expect(hooks.tick).toHaveBeenCalledOnce();
 });
+
+it('menu identity follows the displayed picture, including deferred enhancement, never a queued frame', () => {
+  let enhanced: VmFrame | undefined;
+  const { presenter, flush } = fixture({ transform: () => enhanced ?? null });
+  const old = { ...frame(), menuGeneration: 7 };
+  const next = { ...frame(), menuGeneration: 8 };
+  presenter.submit(old);
+  expect(presenter.displayedFrame).toBeNull();
+  flush();
+  expect(presenter.displayedFrame?.menuGeneration).toBe(7);
+  presenter.submit(next);
+  expect(presenter.displayedFrame?.menuGeneration).toBe(7);
+  enhanced = old;
+  flush();
+  expect(presenter.displayedFrame?.menuGeneration).toBe(7);
+  enhanced = undefined;
+  presenter.invalidate();
+  flush();
+  expect(presenter.displayedFrame?.menuGeneration).toBe(8);
+  presenter.destroy();
+  expect(presenter.displayedFrame).toBeNull();
+});

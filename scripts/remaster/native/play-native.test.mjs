@@ -9,6 +9,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import {
   assertOwnedExecutableIdentity,
+  chooseWineRuntime,
+  discoverWineExecutable,
+  localFreeWineConfiguration,
+  preferredWineConfiguration,
   findPorts,
   installDll,
   nativeFilmReady,
@@ -231,6 +235,194 @@ test('runLauncher reports missing game, Wine and cache prerequisites before star
   assert.equal(await readFile(target, 'utf8'), 'player DLL');
 });
 
+test('Wine discovery prefers installed CrossOver only for named bottles and preserves explicit paths', async () => {
+  const calls = [];
+  const pathWine = (name) => {
+    calls.push(name);
+    return '/path/free-wine';
+  };
+  const crossover = async () => {
+    calls.push('CrossOver');
+    return '/installed/CrossOver/wine';
+  };
+  assert.equal(
+    await discoverWineExecutable({ RA2_NATIVE_WINE_BOTTLE: 'player-bottle' }, pathWine, crossover),
+    '/installed/CrossOver/wine',
+  );
+  assert.deepEqual(calls.splice(0), ['CrossOver']);
+  assert.equal(
+    await discoverWineExecutable({ RA2_NATIVE_WINE_PREFIX: '/player/prefix' }, pathWine, crossover),
+    '/path/free-wine',
+  );
+  assert.deepEqual(calls.splice(0), ['wine']);
+  assert.equal(
+    await discoverWineExecutable(
+      { RA2_NATIVE_WINE: '/chosen/wine', RA2_NATIVE_WINE_BOTTLE: 'player-bottle' },
+      pathWine,
+      crossover,
+    ),
+    '/chosen/wine',
+  );
+  assert.deepEqual(calls, []);
+  assert.equal(
+    await discoverWineExecutable({ RA2_NATIVE_WINE_BOTTLE: 'player-bottle' }, pathWine, async () => null),
+    '/path/free-wine',
+  );
+  assert.deepEqual(calls.splice(0), ['wine']);
+});
+
+test('automatic Wine choice keeps a working bottle and falls back after refusal or timeout without Wine', async (t) => {
+  const { dir } = await fixture(t);
+  const root = join(dir, 'Bottles');
+  await mkdir(join(root, 'player-bottle'), { recursive: true });
+  await writeFile(join(root, 'player-bottle/system.reg'), 'existing bottle registry');
+  const environment = {
+    RA2_NATIVE_WINE: process.execPath,
+    RA2_NATIVE_WINE_BOTTLE: 'player-bottle',
+    CX_BOTTLE_PATH: root,
+  };
+  const fallback = { wine: '/synthetic/free-wine', args: [], environment: { WINEPREFIX: '/synthetic/free-prefix' } };
+  const preferred = await preferredWineConfiguration(environment, () =>
+    assert.fail('working bottle discovery fell back'),
+  );
+  assert.equal(preferred.probeBottle, true);
+  let probes = 0;
+  const selected = await chooseWineRuntime(
+    preferred,
+    async (configuration, timeout) => {
+      assert.equal(configuration.wine, process.execPath);
+      assert.deepEqual(configuration.args, ['--bottle', 'player-bottle']);
+      assert.equal(timeout, 10000);
+      probes++;
+    },
+    () => assert.fail('successful probe fell back'),
+  );
+  assert.equal(selected.checked, true);
+  assert.equal(probes, 1);
+  for (const reason of ['license expired', 'probe timed out']) {
+    let fallbackCalls = 0;
+    const selected = await chooseWineRuntime(
+      preferred,
+      async () => {
+        throw new Error(reason);
+      },
+      async (received) => {
+        assert.equal(received.RA2_NATIVE_WINE_BOTTLE, 'player-bottle');
+        fallbackCalls++;
+        return fallback;
+      },
+    );
+    assert.equal(selected.wine, fallback.wine);
+    assert.equal(selected.crossoverUnavailable, reason);
+    assert.equal(selected.checked, undefined);
+    assert.equal(fallbackCalls, 1);
+  }
+  await assert.rejects(
+    chooseWineRuntime(
+      preferred,
+      async () => {
+        throw new Error('cancelled');
+      },
+      () => assert.fail('cancelled startup fell back'),
+      () => true,
+    ),
+    /cancelled/,
+  );
+  const missing = await preferredWineConfiguration(
+    { ...environment, RA2_NATIVE_WINE: join(dir, 'missing') },
+    async () => fallback,
+  );
+  assert.equal(missing.wine, fallback.wine);
+  assert.match(missing.crossoverUnavailable, /找不到 Wine 程序/);
+  const absentBottle = await preferredWineConfiguration(
+    { ...environment, RA2_NATIVE_WINE_BOTTLE: 'absent' },
+    async () => fallback,
+  );
+  assert.equal(absentBottle.wine, fallback.wine);
+  assert.match(absentBottle.crossoverUnavailable, /找不到已有的 CrossOver 容器/);
+});
+
+test('cancelling during asynchronous Wine fallback prevents selecting the new runtime', { timeout: 1000 }, async () => {
+  let cancelled = false;
+  let enteredFallback;
+  let resolveFallback;
+  const entered = new Promise((resolve) => {
+    enteredFallback = resolve;
+  });
+  const pending = new Promise((resolve) => {
+    resolveFallback = resolve;
+  });
+  const choice = chooseWineRuntime(
+    { probeBottle: true, environment: {} },
+    async () => {
+      throw new Error('CrossOver refused');
+    },
+    async () => {
+      enteredFallback();
+      return pending;
+    },
+    () => cancelled,
+  );
+  await entered;
+  cancelled = true;
+  resolveFallback({ wine: '/synthetic/free-wine', environment: {} });
+  await assert.rejects(choice, /启动已取消/);
+});
+
+test('automatic free Wine discovery prepares its own local prefix and preserves explicit free selections', async (t) => {
+  const { dir } = await fixture(t);
+  const free = join(dir, 'gameres/wine-free');
+  await mkdir(free, { recursive: true });
+  await writeFile(join(free, 'wine-path'), process.execPath + '\n');
+  const inherited = {
+    RA2_NATIVE_WINE_BOTTLE: 'old-bottle',
+    CX_BOTTLE_PATH: '/old/bottles',
+    WINEPREFIX: '/old/prefix',
+    RA2_NATIVE_GAME_DIR: '/player/game',
+  };
+  for (const root of [dir, join(dir, '.worktrees/wine-track')]) {
+    const selected = await localFreeWineConfiguration(inherited, root);
+    assert.equal(selected.wine, process.execPath);
+    assert.equal(selected.preparePrefix, join(free, 'prefix-native'));
+    assert.equal(selected.environment.WINEPREFIX, selected.preparePrefix);
+    assert.equal(selected.environment.RA2_NATIVE_GAME_DIR, '/player/game');
+    assert.equal(selected.environment.RA2_NATIVE_WINE_BOTTLE, undefined);
+    assert.equal(selected.environment.CX_BOTTLE_PATH, undefined);
+    assert.equal(selected.environment.RA2_NATIVE_WINE_FLAVOR, 'free');
+    await assert.rejects(lstat(selected.preparePrefix), { code: 'ENOENT' });
+  }
+  assert.equal(inherited.WINEPREFIX, '/old/prefix');
+  const defaultChoice = await preferredWineConfiguration({}, (environment) =>
+    localFreeWineConfiguration(environment, dir),
+  );
+  assert.equal(defaultChoice.preparePrefix, join(free, 'prefix-native'));
+  const explicit = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: join(dir, 'fresh-user-prefix') };
+  const selected = await preferredWineConfiguration(explicit, () =>
+    assert.fail('explicit free Wine selection fell back'),
+  );
+  assert.equal(selected.preparePrefix, explicit.RA2_NATIVE_WINE_PREFIX);
+  assert.equal(
+    await chooseWineRuntime(
+      selected,
+      () => assert.fail('explicit free Wine was probed as CrossOver'),
+      () => assert.fail('explicit Wine fell back'),
+    ),
+    selected,
+  );
+  await assert.rejects(
+    preferredWineConfiguration({ ...explicit, RA2_NATIVE_WINE: join(dir, 'missing') }, () =>
+      assert.fail('invalid explicit Wine silently fell back'),
+    ),
+    /找不到 Wine 程序/,
+  );
+  await assert.rejects(
+    preferredWineConfiguration({ ...explicit, RA2_NATIVE_WINE_BOTTLE: 'conflicting' }, () =>
+      assert.fail('conflicting scopes silently fell back'),
+    ),
+    /只能设置一个/,
+  );
+});
+
 test('only an explicitly selected missing or empty prefix is prepared; existing environments remain unchanged', async (t) => {
   const { dir } = await fixture(t);
   const prefix = join(dir, 'new-prefix');
@@ -254,24 +446,31 @@ test('new dedicated prefix uses the mapped game drive and verifies the 32-bit Bl
   const game = join(dir, '游戏副本');
   await mkdir(game);
   await writeFile(join(game, 'Blowfish.dll'), 'synthetic player component');
-  const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
+  const env = {
+    RA2_NATIVE_WINE: process.execPath,
+    RA2_NATIVE_WINE_PREFIX: prefix,
+    WINEDLLOVERRIDES: 'version=n;mscoree=b;mshtml=n,b',
+  };
   const calls = [];
-  const command = async (args) => {
+  const command = async (args, _message, commandEnvironment) => {
     calls.push(args);
     if (args[0] === 'wineboot.exe') {
+      assert.equal(commandEnvironment.WINEPREFIX, prefix);
+      assert.equal(commandEnvironment.WINEDLLOVERRIDES, env.WINEDLLOVERRIDES + ';mscoree,mshtml=');
       await writeFile(join(prefix, 'system.reg'), 'synthetic owned registry');
       await mkdir(join(prefix, 'dosdevices'));
       const modules = join(prefix, 'drive_c/windows/syswow64');
       await mkdir(modules, { recursive: true });
       await writeFile(join(modules, 'regsvr32.exe'), 'synthetic 32-bit registration command');
       await writeFile(join(modules, 'reg.exe'), 'synthetic 32-bit registry command');
-    }
+    } else assert.equal(commandEnvironment, undefined, 'later preparation retains the original environment');
     if (args[0] === 'winepath.exe') return 'G:\\Blowfish.dll\r\n';
     if (args[0] === 'reg.exe')
       return 'HKEY_CLASSES_ROOT\\CLSID\\test\r\n    (Default)    REG_SZ    G:\\Blowfish.dll\r\n';
     return '';
   };
   await prepareWinePrefix(await wineConfiguration(env), game, command, () => {});
+  assert.equal(env.WINEDLLOVERRIDES, 'version=n;mscoree=b;mshtml=n,b');
   assert.equal(await readlink(join(prefix, 'dosdevices/g:')), game);
   assert.deepEqual(
     calls.map((args) => args[0]),
@@ -422,7 +621,7 @@ test(
     const wine = join(dir, 'mock-wine.mjs');
     await writeFile(
       wine,
-      `#!${process.execPath}\nimport {writeFile} from 'node:fs/promises';\nawait writeFile(${JSON.stringify(call)}, JSON.stringify({args:process.argv.slice(2),pid:process.pid}));\nprocess.on('SIGTERM',()=>{});setInterval(()=>{},1000);\n`,
+      `#!${process.execPath}\nimport {writeFile} from 'node:fs/promises';\nawait writeFile(${JSON.stringify(call)}, JSON.stringify({args:process.argv.slice(2),pid:process.pid,overrides:process.env.WINEDLLOVERRIDES}));\nprocess.on('SIGTERM',()=>{});setInterval(()=>{},1000);\n`,
       { mode: 0o755 },
     );
     const child = spawn(process.execPath, ['scripts/remaster/native/play-native.mjs', '--size', '1280x720'], {
@@ -434,6 +633,7 @@ test(
         RA2_NATIVE_WINE_PREFIX: join(dir, 'new-prefix'),
         RA2_NATIVE_WINE_BOTTLE: '',
         RA2_HD_CACHE_DIR: dir,
+        WINEDLLOVERRIDES: 'version=n',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -459,6 +659,7 @@ test(
       await delay(10);
     }
     assert.deepEqual(record.args, ['wineboot.exe', '--init']);
+    assert.equal(record.overrides, 'version=n;mscoree,mshtml=');
     const cancelStarted = Date.now();
     child.kill('SIGINT');
     let cancelTimer;
@@ -906,7 +1107,10 @@ if (args[0] === 'winepath.exe') {
       );
       const child = spawn(
         'bash',
-        ['scripts/remaster/native/play-native.sh', ...(stopFailure ? ['--size', '1280x720'] : ['--fullscreen'])],
+        [
+          'scripts/remaster/native/play-native.sh',
+          ...(stopFailure ? ['--size', '1280x720', '--hd-marks'] : ['--fullscreen']),
+        ],
         {
           cwd: repository,
           env: {
@@ -1001,6 +1205,9 @@ if (args[0] === 'winepath.exe') {
       assert.equal(url.searchParams.get('backend'), 'native');
       assert.equal(url.searchParams.get('native-autostart'), 'yr');
       assert.equal(url.searchParams.get('native-fullscreen'), stopFailure ? '0' : '1');
+      assert.equal(url.searchParams.get('native-draw-journal'), stopFailure ? '1' : null);
+      if (stopFailure) assert.match(output, /实验高清血条和编队数字.*Ctrl-C.*不加 --hd-marks/);
+      else assert.doesNotMatch(output, /实验高清血条和编队数字/);
       assert.equal(url.searchParams.get('resolution'), stopFailure ? '1280x720' : null);
       for (const [key, value] of Object.entries(HD_PLAY_OPTIONS)) assert.equal(url.searchParams.get(key), value);
       assert.match(

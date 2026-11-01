@@ -1421,17 +1421,30 @@ void* dds_GetBuffer(IDirectDrawSurfaceImpl* This)
  * Its GUI owner resolves the surface now, never from a retained I/O pointer. */
 void dds_NativeCapturePrimary(void)
 {
-    nh_hidden_paint();
-    if (!g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || !TryEnterCriticalSection(&g_ddraw.cs))
+    static int capture_in_progress;
+    if (!g_ddraw.ref || GetCurrentThreadId() != g_ddraw.gui_thread_id || capture_in_progress)
         return;
+    /* Control queries and paints may pump messages. Protect the complete pair,
+     * including prepare, so nested captures cannot replace its before state.
+     * The pending picture credit remains available for the GUI timer retry. */
+    capture_in_progress = 1;
+    nh_menu_prepare();
+    int menu_painted = nh_hidden_paint();
+    uint32_t menu_generation = menu_painted ? nh_menu_complete() : 0;
+    if (!g_ddraw.ref || !TryEnterCriticalSection(&g_ddraw.cs))
+    {
+        capture_in_progress = 0;
+        return;
+    }
     IDirectDrawSurfaceImpl* primary = g_ddraw.primary;
     if (primary && (!g_config.lock_surfaces || TryEnterCriticalSection(&primary->cs)))
     {
-        nh_present(dds_GetBuffer(primary), primary->width, primary->height, primary->pitch,
-            g_config.rgb555 && primary->bpp == 16 ? 15 : primary->bpp);
+        nh_present_menu(dds_GetBuffer(primary), primary->width, primary->height, primary->pitch,
+            g_config.rgb555 && primary->bpp == 16 ? 15 : primary->bpp, menu_generation);
         if (g_config.lock_surfaces) LeaveCriticalSection(&primary->cs);
     }
     LeaveCriticalSection(&g_ddraw.cs);
+    capture_in_progress = 0;
 }
 
 HRESULT dd_CreateSurface(

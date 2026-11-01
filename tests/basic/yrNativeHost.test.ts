@@ -17,7 +17,7 @@ import {
   YR_EFFECTS_VTABLES as V,
 } from '../../src/games/yr/effectsReader';
 import { YR_STARTUP_PAGE_HASH } from '../../src/games/yr/startupPage';
-import { readYrNativeMenuTexts, readYrVmMenuTexts } from '../../src/games/yr/menuText';
+import { readYrNativeMenuTexts, readYrVmMenuTexts, readYrVmMenuSnapshot } from '../../src/games/yr/menuText';
 import { readYrUnitMovingNow, YR_GATHER_OFFSETS, YR_GATHER_LOCOMOTORS } from '../../src/games/yr/unitGatherState';
 import {
   createYrStateReader,
@@ -218,6 +218,221 @@ describe('native YR policy and bulk cell discovery', () => {
       [105],
     );
     expect(changed.has(105)).toBe(false);
+  });
+
+  it('uses the owner-drawn item record Unicode caption and preserves incomplete items', () => {
+    const memory = createGuestMemory();
+    const record = 0xba0000,
+      source = 0xbb0ffe;
+    writeU32(memory, record + 8, source);
+    memory.write_memory([0x30, 0x4e, 0x87, 0x65, 0, 0], source);
+    const control = {
+      hwnd: 105,
+      parent: 1,
+      id: 1363,
+      className: 'ListBox',
+      style: 0x10,
+      text: '',
+      textComplete: true,
+      rect: { x: 0, y: 0, width: 100, height: 200 },
+      visible: true,
+      enabled: true,
+      focused: false,
+      pressed: false,
+      items: ['incorrect ANSI bytes'],
+      itemData: [record],
+      itemsComplete: false,
+    };
+    const snapshot = {
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 0, y: 0 },
+      controls: [control],
+    };
+    const write = vi.spyOn(memory, 'write_memory');
+    const captured = readYrVmMenuSnapshot(memory, snapshot);
+    expect(captured.controls[0]!.items).toEqual(['丰文']);
+    expect(captured.controls[0]!.itemsComplete).toBe(true);
+    expect(snapshot.controls[0]!.items).toEqual(['incorrect ANSI bytes']);
+    expect(write).not.toHaveBeenCalled();
+    snapshot.controls[0]!.itemData = [0];
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.itemsComplete).toBe(false);
+  });
+
+  it('captures actual NewEdit text and the game caret while retaining unknown composition as original', () => {
+    const memory = createGuestMemory(),
+      buckets = 0xb90000,
+      record = 0xba0000,
+      procedures = 0xb91000,
+      procedure = 0xba1000,
+      textObject = 0xbb0000,
+      text = 0xbb1000;
+    memory.write_memory([0x8b, 0x01, 0xc3], 0x600660);
+    memory.write_memory([0x8b, 0x7e, 0x4c, 0x6a, 0, 0x83, 0xf7, 1, 0x6a, 0, 0x89, 0x7e, 0x4c], 0x614e7c);
+    [buckets, 1, 4, 2, 0, 0, 0x600660].forEach((value, index) => writeU32(memory, 0xac1b00 + index * 4, value));
+    [procedures, 1, 4, 2, 0, 0, 0x600660].forEach((value, index) => writeU32(memory, 0xac18c0 + index * 4, value));
+    writeU32(memory, buckets + 4, record);
+    writeU32(memory, procedures + 4, procedure);
+    writeU32(memory, procedure, 105);
+    writeU32(memory, procedure + 4, 0x614b30);
+    writeU32(memory, record, 105);
+    writeU32(memory, record + 0x6c, 1);
+    writeU32(memory, record + 0x40, textObject);
+    writeU32(memory, textObject, text);
+    memory.write_memory([0x41, 0, 0x42, 0, 0x43, 0, 0x44, 0, 0], text);
+    writeU32(memory, record + 0x44, 3);
+    writeU32(memory, record + 0x48, 1);
+    writeU32(memory, record + 0x3c, 1);
+    writeU32(memory, 0xac184c, 0x00ffffff);
+    const snapshot = {
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 0, y: 0 },
+      controls: [
+        {
+          hwnd: 105,
+          parent: 1,
+          id: 1696,
+          className: 'ListBox',
+          style: 0x110,
+          text: 'cached initial title',
+          textComplete: true,
+          rect: { x: 59, y: 60, width: 150, height: 22 },
+          visible: true,
+          enabled: true,
+          focused: true,
+          pressed: false,
+        },
+      ],
+    };
+    const write = vi.spyOn(memory, 'write_memory');
+    const captured = readYrVmMenuSnapshot(memory, snapshot).controls[0]!;
+    expect(captured.text).toBe('ABCD');
+    expect(captured.edit).toEqual({ caret: 3, firstVisible: 1, caretVisible: true, caretColor: 0xffffff });
+    expect(snapshot.controls[0]!.text).toBe('cached initial title');
+    expect(write).not.toHaveBeenCalled();
+    writeU32(memory, record + 0x50, 1);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.edit?.caretVisible).toBe(false);
+    writeU32(memory, record + 0x50, 0);
+    writeU32(memory, record + 0x3c, 0);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.edit?.caretVisible).toBe(false);
+    writeU32(memory, 0xb73564, 1);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.edit).toBeUndefined();
+    writeU32(memory, 0xb73564, 0);
+    writeU32(memory, record + 0x44, 5);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.edit).toBeUndefined();
+    writeU32(memory, record + 0x44, 3);
+    writeU32(memory, procedure + 4, 0x614190);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.edit).toBeUndefined();
+  });
+
+  it('captures the custom map scrollbar instead of its unchanged Win32 state', () => {
+    const memory = createGuestMemory(),
+      buckets = 0xb90000,
+      record = 0xba0000;
+    memory.write_memory([0x8b, 0x01, 0xc3], 0x600660);
+    [buckets, 1, 4, 2, 0, 0, 0x600660].forEach((value, index) => writeU32(memory, 0xac1b00 + index * 4, value));
+    writeU32(memory, buckets + 4, record);
+    writeU32(memory, record, 105);
+    writeU32(memory, record + 0x6c, 8);
+    writeU32(memory, record + 0xf4, 86);
+    writeU32(memory, record + 0xf8, 86);
+    const snapshot = {
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 0, y: 0 },
+      controls: [
+        {
+          hwnd: 105,
+          parent: 1,
+          id: 0,
+          className: 'ScrollBar',
+          style: 1,
+          text: '',
+          textComplete: true,
+          rect: { x: 515, y: 127, width: 20, height: 346 },
+          visible: true,
+          enabled: true,
+          focused: false,
+          pressed: false,
+          scroll: { min: 0, max: 0, page: 0, pos: 0 },
+        },
+      ],
+    };
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.scroll).toEqual({
+      min: 0,
+      max: 86,
+      page: 0,
+      pos: 86,
+      arrowSize: 22,
+      groove: { x: 515, y: 149, width: 20, height: 302 },
+      thumb: { x: 515, y: 419, width: 20, height: 32 },
+    });
+    expect(snapshot.controls[0]!.scroll.pos).toBe(0);
+    writeU32(memory, record + 0xf0, 1);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.scroll).toBeUndefined();
+    writeU32(memory, record + 0x6c, 11);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.scroll).toEqual(snapshot.controls[0]!.scroll);
+    writeU32(memory, record + 0x6c, 0);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.scroll).toBeUndefined();
+  });
+
+  it('captures the choose-map private list position and rejects unavailable geometry', () => {
+    const memory = createGuestMemory(),
+      buckets = 0xb90000,
+      record = 0xba0000;
+    memory.write_memory([0x8b, 0x01, 0xc3], 0x600660);
+    [buckets, 1, 4, 2, 0, 0, 0x600660].forEach((value, index) => writeU32(memory, 0xac1b00 + index * 4, value));
+    writeU32(memory, buckets + 4, record);
+    writeU32(memory, record, 105);
+    writeU32(memory, record + 0xf4, 86);
+    const snapshot = {
+      width: 800,
+      height: 600,
+      dialogHwnd: 1,
+      complete: true,
+      moviePlaying: false,
+      pointer: { x: 0, y: 0 },
+      controls: [
+        {
+          hwnd: 105,
+          parent: 1,
+          id: 1363,
+          className: 'ListBox',
+          style: 0x10,
+          text: '',
+          textComplete: true,
+          rect: { x: 338, y: 127, width: 177, height: 345 },
+          visible: true,
+          enabled: true,
+          focused: false,
+          pressed: false,
+          items: Array.from({ length: 104 }, (_, index) => `Map ${index}`),
+          topIndex: 3,
+          itemHeight: 19,
+          visibleRows: 18,
+        },
+      ],
+    };
+    const write = vi.spyOn(memory, 'write_memory');
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.topIndex).toBe(86);
+    expect(snapshot.controls[0]!.topIndex).toBe(3);
+    expect(write).not.toHaveBeenCalled();
+    writeU32(memory, record + 0xf4, 87);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.topIndex).toBeUndefined();
+    writeU32(memory, buckets + 4, 0);
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.topIndex).toBeUndefined();
+    snapshot.controls[0]!.id = 1696; // The player-name ListBox has a different private contract.
+    expect(readYrVmMenuSnapshot(memory, snapshot).controls[0]!.topIndex).toBe(3);
   });
 
   it('covers all actual houses and cells while omitting the unused middle of each house allocation', () => {

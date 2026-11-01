@@ -79,6 +79,15 @@ describe('development native URL selection', () => {
     await createVmShell({}, source(), { nativePageCursor: false });
     expect(state.configs[1]!.native!.pageCursor).toBe(false);
   });
+  it('enables journal capture only for the explicit launcher option and leaves later starts off', async () => {
+    vi.stubEnv('DEV', true);
+    const nativeUrl = '?backend=native&agent=ws%3A%2F%2F127.0.0.1%3A15450&agent-token=' + 'ab'.repeat(32);
+    for (const value of ['1', '0', null]) {
+      browser(nativeUrl + (value === null ? '' : `&native-draw-journal=${value}`));
+      await createVmShell({}, source());
+      expect(state.configs.at(-1)!.native!.drawJournal).toBe(value === '1' ? true : undefined);
+    }
+  });
   it('keeps the existing Worker configuration when native was not requested', async () => {
     browser('');
     await createVmShell({}, source());

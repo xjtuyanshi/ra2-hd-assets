@@ -79,6 +79,17 @@ describe('原生滚动条', () => {
     const g = scrollbarGeometry(state, 160, 20);
     expect(g.thumb).toBe(84);
     expect(g.start + g.thumb).toBe(140);
+    const { shim, hwnd, setInfo } = setup();
+    setInfo(7, 0, 9, 7, 3);
+    expect(shim.inspectMenuSnapshot()!.controls.find((control) => control.hwnd === hwnd)?.scroll).toEqual({
+      min: 0,
+      max: 9,
+      page: 7,
+      pos: 3,
+      arrowSize: 20,
+      groove: { x: 100, y: 120, width: 20, height: 120 },
+      thumb: { x: 100, y: 156, width: 20, height: 84 },
+    });
   });
 
   it('壳页兄弟列表收到通知前即可读到更新位置，翻页使用可见行数', () => {
