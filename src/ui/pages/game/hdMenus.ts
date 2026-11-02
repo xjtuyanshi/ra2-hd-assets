@@ -22,6 +22,7 @@ import {
   type CoverageGlyphFitter,
   type CoverageGlyphTarget,
 } from '../../../graphics/text/coverageGlyphFit';
+import { drawMenuSlider, menuSliderParts } from './hdMenuSlider';
 
 interface ButtonArt {
   normal: string;
@@ -34,6 +35,9 @@ interface MenuArt {
   strings: string;
   fontMetrics?: string;
   controlSkin?: 'vector-v1';
+  /** Opt-in tone-reviewed redraws; older code ignores them and keeps the originals. */
+  sliderSkin?: 'vector-v1';
+  disabledButtonSkin?: 'caption-v1';
   main: { shell: string; buttons: ButtonArt };
   themes: Record<string, { background: string; backgroundShade?: number; buttons: ButtonArt }>;
   setup?: { background: string; buttons: ButtonArt };
@@ -42,6 +46,8 @@ interface MenuArt {
 }
 
 type Rect = MenuControlSnapshot['rect'];
+/** A disabled YR shell button's caption colour: the source pixel value (RGB565), the plate unchanged. */
+const DISABLED_CAPTION = '#4a0000';
 // The font is session-owned; cached paths become collectable with that font.
 const outlinePaths = new WeakMap<YrMenuFont, Map<string, Path2D>>();
 // Ink-weight fits for fonts that supply source ink areas, with the output
@@ -221,13 +227,14 @@ function drawControlText(
   font?: YrMenuFont,
   topAligned = false,
   leftInset = 3,
+  color?: string,
 ): void {
   if (!text) return;
   ctx.save();
   ctx.beginPath();
   ctx.rect(r.x, r.y, r.width, r.height);
   ctx.clip();
-  ctx.fillStyle = enabled ? '#ffff00' : '#800000';
+  ctx.fillStyle = color ?? (enabled ? '#ffff00' : '#800000');
   if (font) {
     const lines = layoutYrMenuText(text, font)!;
     const lineTop = topAligned ? r.y : r.y + (r.height - lines.length * font.lineHeight) / 2;
@@ -623,10 +630,16 @@ export async function startHdMenus(
           return;
         }
         if (pregame && ['scrollbar', 'combobox', 'msctls_trackbar32'].includes(className)) {
-          // Keep the entire slider original until its value plate is calibrated.
-          if (art.controlSkin !== 'vector-v1' || className === 'msctls_trackbar32') retainOriginalControl(ctx, r);
+          if (art.controlSkin !== 'vector-v1') retainOriginalControl(ctx, r);
           else if (className === 'combobox') drawMenuCombo(ctx, control, font);
           else if (className === 'scrollbar') drawMenuScroll(ctx, control);
+          else {
+            // Only the tone-reviewed skin and its observed geometry are redrawn;
+            // another manifest, geometry or a disabled slider keeps the original.
+            const parts = art.sliderSkin === 'vector-v1' && font ? menuSliderParts(control) : null;
+            if (!parts || !drawMenuSlider(ctx, control, parts)) retainOriginalControl(ctx, r);
+            else drawControlText(ctx, control.slider!.valueText!, parts.plate, true, 'center', true, font, false, 0);
+          }
           return;
         }
         if (pregame && className === 'listbox') {
@@ -666,8 +679,17 @@ export async function startHdMenus(
           );
           return;
         }
+        // A disabled shell button is the normal plate with a dark caption in the
+        // source; only that reviewed form is redrawn. In-match panel buttons
+        // were not observed disabled and keep the original control.
+        const disabledCaption =
+          className === 'button' &&
+          !control.enabled &&
+          art.disabledButtonSkin === 'caption-v1' &&
+          !!font &&
+          (screen === 'main' || pregame);
         if (className === 'button') {
-          if (!control.enabled) {
+          if (!control.enabled && !disabledCaption) {
             retainOriginalControl(ctx, r);
             return;
           }
@@ -684,7 +706,8 @@ export async function startHdMenus(
           ctx.save();
           // Optional art may share a plate between states. Preserve the real
           // control state visibly without inventing a new interaction target.
-          if (state === 'disabled' && buttons.disabled === buttons.normal) ctx.filter = 'brightness(0.55)';
+          if (state === 'disabled' && buttons.disabled === buttons.normal && !disabledCaption)
+            ctx.filter = 'brightness(0.55)';
           else if (buttons[state] === buttons.normal && state === 'hover') ctx.filter = 'brightness(1.22)';
           ctx.drawImage(images.get(buttons[state])!, r.x, r.y, r.width, r.height);
           if (state === 'pressed' && buttons[state] === buttons.normal) {
@@ -716,6 +739,7 @@ export async function startHdMenus(
             font,
             (screen === 'quit' && yrMenuControlId(control) === 65535) || (screen === 'setup' && control.id === 1448),
             0,
+            disabledCaption ? DISABLED_CAPTION : undefined,
           );
           return;
         }

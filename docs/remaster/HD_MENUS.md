@@ -95,7 +95,22 @@ Compare each calibrated region against its source, including hue and clipping; t
 Retained source shell pieces and previews remain original elements and are not claimed as redrawn art.
 The optional `controlSkin: "vector-v1"` selects source-shaped page paths for combo arrows and frames,
 list scrollbars and checkbox lamps. Other manifests retain complete original skins.
-Sliders and disabled action buttons retain their whole original control while their source tones remain unverified.
+Two further opt-in keys, ignored by older code, redraw controls that earlier candidates failed the tone review on.
+`sliderSkin: "vector-v1"` (`src/ui/pages/game/hdMenuSlider.ts`) draws the set-up sliders: the two-line bevel two
+source pixels outside the control, the groove/plate divider, a translucent groove shade over the HD background,
+the metal thumb as ten measured columns per band, and the value plate evaluated per device pixel from a fitted
+rim model (flat colour times a factor of the anisotropic distance to an inner rectangle). The value is page text.
+Only the observed geometry (22-pixel control, 12x22 thumb inside the groove, plate to its right) of an enabled
+slider is redrawn; any other slider, or a page without `OffscreenCanvas`/`ImageData`, keeps the whole original.
+`disabledButtonSkin: "caption-v1"` draws a disabled shell button (main menu, set-up, choose-map) as the source does:
+the original changes only the caption pixels (yellow to `#4a0000`); the plate is the normal one, so it is drawn
+unfiltered. Disabled in-match panel buttons were not observed and stay original.
+Skin colours are the game's own RGB565 pixel values, read from the native picture, not from screenshots: the HD
+canvas and the original picture pass through the same display conversion, so screenshot values would be converted
+twice (saturated reds visibly shift). The thumb picture is identical at every position, hovered and while dragged.
+Tone review compares device-resolution crops of original and HD in the owner's frame (mean Rec. 709 luma per part,
+p10/p50/p90, chroma-weighted hue). The groove shade is pooled over all three grooves because the HD background under
+it differs locally from the original by up to about 12%; a slider over such a region inherits that difference.
 The verified YR NewEdit player-name field supplies its live string, caret, first visible character, game-owned blink
 and original caret color. The page draws that caret-only editor without its own blink timer or input handling.
 The native bridge sends characters once: a control claiming all keys bypasses dialog key translation,
