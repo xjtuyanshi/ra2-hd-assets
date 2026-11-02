@@ -169,8 +169,9 @@ describe('cinematic preset and sandbox parameters', () => {
           'shadowDarkness',
           'infantryShadow',
           'clarity',
-          // The vehicles' own highlight size (tests/vehicleLook.test.ts); their exposure stays golden's 1.
+          // The vehicles' own highlight size and exposure (tests/vehicleLook.test.ts).
           'vehicleSpecularSize',
+          'vehicleExposure',
         ].includes(key) ||
         key in neutralGrade()
       )

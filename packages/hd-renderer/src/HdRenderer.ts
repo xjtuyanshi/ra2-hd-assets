@@ -370,13 +370,13 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // and buildings; on the projected vehicle redraws it widens the camera glint and multiplies it by 2.56, which
       // turned light top decks white at some facings (frozen same-moment pairs, owner's look, snow / temperate /
       // lunar pads and the player's units at facing 0: HD/original hull p90 x1.13 median, up to x1.36 on a Lasher,
-      // light share +3 points, while the medians matched). vehicleExposure stays golden's 1 (no extra gain on the
-      // finished voxel colour): replay bench, 19 frozen states / 202 hull cells, spec 1.1: hull median x0.95, dark share
-      // +1.0 points, p90 x0.93, luma std x0.91 (exposure 1.08: x0.99, -0.1, x0.95, x0.93; spec 1.6: std x0.97, so the
-      // lower spread comes from the smaller highlight). Sun weight and AO power had no measurable effect on these numbers.
+      // light share +3 points, while the medians matched). 1.1 with a small exposure that returns the hull median
+      // the wider glint used to supply: hull median x0.99, dark share -0.1 points, p90 x0.96 over 148 pad and water
+      // cells; at facing 0 p90 x1.07 (max x1.20). Sun weight and AO power had no measurable effect on these numbers.
       vehicleSunGain: null,
       vehicleSpecularSize: 1.1,
       vehicleAoPower: null,
+      vehicleExposure: 1.08,
       // L5 depth pass (scratchpad finallook5/light, metrics against the battle and park targets): the band-pass clarity
       // brings mid-scale local contrast to the battle target's (|blur2 - blur8| of L* 5.0 -> 5.7, target 5.7) without
       // pixel-scale grain; a gentler S-curve with a higher pivot lifts the too-dark mid-tones and deep-shade share
