@@ -152,6 +152,14 @@ export async function upscaleSprites(options: SpriteHdCacheOptions): Promise<Spr
   const debug = options.limitFrames !== undefined;
   const results: SpriteHdPageResult[] = [];
   for (const page of pages) {
+    // A page published at another scale (a dedicated redraw page, python/sprite_hd_pages.py) is not this tool's 2x
+    // output: an explicit request for it is an error, and a whole-library run leaves it alone.
+    const existing = library?.spriteAtlasesHd?.[page];
+    if (existing && existing.scale !== 2) {
+      if (options.pages !== undefined)
+        throw new Error(`Library page ${page} holds a ${existing.scale}x HD page; hd:sprites writes 2x and keeps it`);
+      continue;
+    }
     const started = performance.now();
     const source = atlases[page]!;
     const ref = outputRef(source, debug);

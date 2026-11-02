@@ -150,6 +150,20 @@ describe('sprite HD cache publication', () => {
       expect(readFileSync(join(dir, file))).toEqual(source[index]);
   });
 
+  it('leaves a page published at another scale to its own tool', async () => {
+    const { cacheDir, dir, library } = libraryFixture();
+    const redraw = { file: 'sprites-2@4x.png', remap: 'sprites-2@4x-remap.png', scale: 4, width: 12, height: 8 };
+    const document = { ...library, spriteAtlasesHd: [library.spriteAtlasesHd[0], null, redraw] };
+    writeFileSync(join(dir, 'library.json'), JSON.stringify(document));
+    const run = vi.fn(fakeNearestRun);
+    const results = await upscaleSprites({ cacheDir, library: 'temperate', run });
+    expect(results.map(({ page }) => page)).toEqual([0, 1]);
+    const updated = JSON.parse(readFileSync(join(dir, 'library.json'), 'utf8')) as { spriteAtlasesHd: unknown[] };
+    expect(updated.spriteAtlasesHd[2]).toEqual(redraw);
+    await expect(upscaleSprites({ cacheDir, library: 'temperate', pages: [2], run })).rejects.toThrow(/4x HD page/);
+    expect(existsSync(join(dir, 'sprites-2@2x.png'))).toBe(false);
+  });
+
   it('keeps debug frame-limit output separate without publishing incomplete map or library references', async () => {
     const map = mapFixture();
     const library = libraryFixture();

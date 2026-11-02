@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LinearFilter, LinearMipmapLinearFilter, NoColorSpace, SRGBColorSpace, type Texture } from 'three/webgpu';
 import type { SpriteAtlasHdRef } from '../../ra2-assets/src/manifest';
-import { loadHdAtlas, type HdAtlasRef, type Ra2Cache } from '../src/ra2/cache';
+import {
+  HD_SUPERSAMPLE_ABOVE_SCALE,
+  hdSupersampled,
+  loadHdAtlas,
+  type HdAtlasRef,
+  type Ra2Cache,
+} from '../src/ra2/cache';
 import { LiveLibrary } from '../src/live/library';
 
 afterEach(() => {
@@ -61,6 +67,28 @@ describe('HD atlas house-paint saturation', () => {
       }
     },
   );
+
+  it('carries the page scale and lists pages above 2x as a supersampled look', async () => {
+    stubPages();
+    expect((await loadHdAtlas('/synthetic', ref)).scale).toBe(2);
+    expect((await loadHdAtlas('/synthetic', { ...ref, scale: 4, width: 16, height: 16 })).scale).toBe(4);
+    expect(hdSupersampled({ scale: 4 }, 2)).toBe(true);
+    expect(hdSupersampled({ scale: 2 }, 4)).toBe(false);
+    expect(hdSupersampled({}, 4)).toBe(true);
+    expect(hdSupersampled(null, 4)).toBe(false);
+    expect(HD_SUPERSAMPLE_ABOVE_SCALE).toBe(2);
+    const pages: SpriteAtlasHdRef[] = [ref, { ...ref, file: 'gi@4x.png', remap: 'gi@4x-remap.png', scale: 4 }];
+    stubPages((url) =>
+      url.endsWith('/library.json')
+        ? new Response(JSON.stringify({ palettes: {}, spriteAtlasesHd: [...pages, null] }))
+        : new Response(null, { status: 404 }),
+    );
+    const library = (await LiveLibrary.load('/synthetic/', {} as Ra2Cache))!;
+    expect(library.hdPageLooks()).toEqual([
+      { paintSaturation: 1, materials: false, windows: false, supersample: false },
+      { paintSaturation: 1, materials: false, windows: false, supersample: true },
+    ]);
+  });
 
   it('retains each live page grade across asynchronous loads and cached reads', async () => {
     const pages: SpriteAtlasHdRef[] = [

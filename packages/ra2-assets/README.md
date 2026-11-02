@@ -410,6 +410,44 @@ pnpm hd:sprites -- --library temperate --pages 0 --cache "$SPRITE_CACHE" --bin "
 The Node entry points are `upscaleSpriteAtlas` in `src/node/spriteHd.ts` (pixels in/out) and `upscaleSprites` in
 `src/node/spriteHdCache.ts` (cache orchestration). Both accept an injectable `run(bin, args)` for asset-free tests.
 
+### Pages above 2x: per-frame redraw packing (Python)
+
+`SpriteAtlasHdRef.scale` is any integer of at least 2: an HD page is exactly `scale` times its indexed page, same
+layout. `hd:sprites` writes 2x pages only; in a library run it skips a page already published at another scale, and
+an explicit `--pages` request for such a page is an error. Higher-resolution redraws (the 4x infantry path) are added
+with `python/sprite_hd_pages.py`, which never edits an existing page:
+
+- Input: a frame index `{"scale": 4, "sprites": {"infantry:GI": {"frames": {"0": {"colour": "c/000.png", "paint":
+"p/000.png", "origin": [-20, -30]}}}}}` (paths relative to the index). `colour` is RGBA at `scale` HD px per game px,
+  house-paint texels written as the grey ramp above; `paint` is the soft house mask of the same size (optional);
+  `origin` is the game-pixel position of the page's top-left corner in the coordinates of the frame's `offset`, so a
+  page may extend beyond the frame (that art feeds the gutter only: the renderer clips to the original coverage).
+- Registration check per frame against the original indexed frame: `iou` of the page alpha (area-averaged to game px,
+  > 0.5) with the original's opaque pixels (`--min-iou`, default 0.8), and `cover`, the share of the original's pixels
+  > the page covers (`--min-cover`, default 0.9). `house_agree` and `paint_grey` (painted texels must be grey) are
+  > reported. Failing or missing frames keep their current page: 2x is the fallback per type and per frame.
+- Output: new pages under content names `sprites-hd<scale>x-<sha>.png` (indexed, a byte-exact copy of each accepted
+  frame's indexed pixels), `…@<scale>x.png` / `…@<scale>x-remap.png`, and `…@<scale>x-normals.png` when the moved
+  frames have material data (copied from `normals.json` at the source pages' material scale). Frames sharing a source
+  rectangle share one placement; frames are shelf-packed with `--gutter` (default 4) indexed px between them, half of
+  it filled with the page's own art beyond the frame and transparent texels colour-bled. Pages are at most
+  `--max-side` (default 8192) HD texels per side and spill to more pages. library.json gains the pages at the end of
+  `spriteAtlases`/`spriteAtlasesHd`; only the accepted frames' `page` and `rect` change (offsets, order, shadows and
+  other fields stay), and types drawing the sprite get the new pages in `atlasPages`.
+- `--out <new dir>` stages pages, library.json, normals.json (when a material page was built) and receipt.json.
+  `--farm <root> --rel _library/<theater> --receipt <new file>` installs through `cache_farm` (pages hard-linked, JSON
+  patched under its lock, never writing through a symlink into the base cache); the patch refuses when a frame changed
+  after validation. `--validate-only` prints the per-frame metrics.
+
+```bash
+python3 -B packages/ra2-assets/python/sprite_hd_pages.py --library "$FARM/_library/urban" --frames "$PAGES/index.json" \
+  --farm "$FARM" --rel _library/urban --receipt "$RECEIPT"
+python3 -B -m pytest packages/ra2-assets/python/test_sprite_hd_pages.py -q
+```
+
+The renderer reads such pages with the same UVs and a supersampled minification filter (hd-renderer README, offline
+sprite atlases). Each theater library needs its own install (its indexed pages and palettes differ).
+
 ## Dark door interiors (Python)
 
 `python/door_interior.py` uses NumPy and Pillow to darken invented HD interiors against the indexed palette art.
