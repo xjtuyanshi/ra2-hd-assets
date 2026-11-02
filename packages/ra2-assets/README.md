@@ -423,9 +423,9 @@ with `python/sprite_hd_pages.py`, which never edits an existing page:
   `origin` is the game-pixel position of the page's top-left corner in the coordinates of the frame's `offset`, so a
   page may extend beyond the frame (that art feeds the gutter only: the renderer clips to the original coverage).
 - Registration check per frame against the original indexed frame: `iou` of the page alpha (area-averaged to game px,
-  > 0.5) with the original's opaque pixels (`--min-iou`, default 0.8), and `cover`, the share of the original's pixels
-  > the page covers (`--min-cover`, default 0.9). `house_agree` and `paint_grey` (painted texels must be grey) are
-  > reported. Failing or missing frames keep their current page: 2x is the fallback per type and per frame.
+  above one half) with the original's opaque pixels (`--min-iou`, default 0.8), and `cover`, the share of the
+  original's pixels the page covers (`--min-cover`, default 0.9). `house_agree` and `paint_grey` (painted texels must
+  be grey) are reported. Failing or missing frames keep their current page: 2x is the fallback per type and per frame.
   `--exclude-index N` (repeatable) leaves the pixels of an indexed colour out of both measures: e.g. the infantry
   contact-shadow footprint (unit-palette index 12), which the pages draw translucent like the 2x pages do.
 - Output: new pages under content names `sprites-hd<scale>x-<sha>.png` (indexed, a byte-exact copy of each accepted
