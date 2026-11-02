@@ -81,6 +81,33 @@ function building(foundation: [number, number], offset: [number, number], level:
   };
 }
 
+describe('building turret look', () => {
+  it('marks a freshly built turret as a building part, so it keeps the scene look instead of the vehicle finish', () => {
+    const b = building([2, 2], [0, -20], 0);
+    try {
+      const visual = {
+        root: new Group(),
+        libraryType: { remap: false, building: { turretVoxel: { voxel: 'gtgcan' } } },
+      };
+      const model = { palette: 'unit' };
+      const built = { root: b.root, turret: new Group() };
+      const view = Object.assign(Object.create(LiveView.prototype), b.state, {
+        library: { voxel: () => model, voxelFailed: () => false, library: { sprites: {} } },
+        voxelDrawable: () => true,
+        libraryPalette: (palette: string) => palette,
+        outOfSight: false,
+        voxelUnits: { build: () => built, setBuildingPart: VoxelUnits.prototype.setBuildingPart },
+      }) as { buildingTurret(object: LiveObject, visual: unknown, facing: number | null): void };
+      expect(b.root.buildingPart).toBe(false);
+      view.buildingTurret(b.object, visual, null);
+      // The part meshes read this flag (vehicleLook.test.ts covers meshes and water twins).
+      expect(b.root.buildingPart).toBe(true);
+    } finally {
+      b.dispose();
+    }
+  });
+});
+
 describe('building turret physical shadow origin', () => {
   it('keeps the physical fallback without a template and enables the native card only in the ground layer', () => {
     const b = building([2, 2], [0, -20], 0);
