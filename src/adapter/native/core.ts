@@ -14,7 +14,7 @@ import type { VmDiagnosticAction, VmDiagnostics } from '../vmDiagnostics';
 import type { GuestMemRecordResult } from '../memRecord';
 import type { VmPointerState } from '../vmShell';
 import type { MenuSnapshot } from '../../vm86/menuSnapshot';
-import type { VmFrame } from '../../vm86/win32';
+import type { GuestMemory, VmFrame } from '../../vm86/win32';
 import { GamePerformanceMeter } from '../gamePerformance';
 import { NativeConnection, NativeConnectionLostError } from './connection';
 import type { NativeConnectionOptions } from './connection';
@@ -41,6 +41,13 @@ import {
   runNativeTransaction,
 } from './memory';
 import type { NativeRange, NativeTransactionHost, NativeWrite } from './memory';
+
+/**
+ * Longest time battle pictures are withheld after attaching to a running battle while the guest has not yet run the
+ * requested repaint (see NativeCore.staleBattlefieldHold). The guest normally takes the request at its next frame
+ * start, well under this; the bound keeps a lost or unreadable counter from hiding the match.
+ */
+export const STALE_BATTLEFIELD_HOLD_MS = 1500;
 
 export class NativeUnsupportedError extends Error {
   constructor(operation: string) {
@@ -277,6 +284,14 @@ export class NativeCore {
   private battlefieldRepaint: 'owed' | 'pending' | 'done' = 'owed';
   private battlefieldRepaintFailures = 0;
   private battlefieldRepaintAt: number | null = null;
+  /**
+   * Attached to a running battle (a page reload): until the guest has run the repaint asked for by
+   * repaintAttachedBattlefield, its battle pictures still copy the stale terrain cache (whole-screen key colour where
+   * the previous client had terrain passthrough on). Those pictures are dropped, never presented, for at most
+   * STALE_BATTLEFIELD_HOLD_MS after the attachment. `before` is the guest's repaint counter when the request was made.
+   */
+  private staleBattlefieldHold: { deadline: number; before: number | null; checking: boolean } | null = null;
+  private staleBattlefieldPicturesHeld = 0;
   private undo: NativeWrite[] = [];
   private readonly allocations = new Map<number, number>();
   private operationTail: Promise<unknown> = Promise.resolve();
@@ -573,6 +588,12 @@ export class NativeCore {
       }
     }
     this.creditOutstanding = false;
+    if (this.holdStaleBattlefieldPicture()) {
+      // Not presented, so no presenter ACK follows: ask for the next picture here.
+      this.staleBattlefieldPicturesHeld++;
+      this.requestNextFrame();
+      return;
+    }
     if (this.hello) this.hello.surface = { width: picture.width, height: picture.height, bpp: 16, format: 'RGB565' };
     const frame: VmFrame = {
       width: picture.width,
@@ -830,6 +851,21 @@ export class NativeCore {
       if (this.options.pageCursor !== undefined && this.hello.surface.width > 0 && this.hello.surface.height > 0)
         await this.readCurrentPointer(this.hello.surface.width, this.hello.surface.height);
       this.running = true;
+      const surface = this.hello.surface,
+        menuSize = this.policy?.menuSurface;
+      if (
+        this.options.renderPassthrough &&
+        this.memory.complete &&
+        menuSize &&
+        surface.width > 0 &&
+        surface.height > 0 &&
+        (surface.width !== menuSize.width || surface.height !== menuSize.height)
+      )
+        this.staleBattlefieldHold = {
+          deadline: performance.now() + STALE_BATTLEFIELD_HOLD_MS,
+          before: null,
+          checking: false,
+        };
       // Attached to a running match: ask for the repaint before the first HD state read, which can take seconds.
       this.repaintAttachedBattlefield();
       this.mirrorWatchdog = setInterval(() => this.checkMirrorHealth(), 250);
@@ -1421,7 +1457,12 @@ export class NativeCore {
       if (!(await this.installPassthrough())) return this.metadata.gameThreadId > 0 ? null : false;
       return runNativeTransaction(
         this.memory,
-        (transaction) => this.passthrough!.repaint?.(transaction) ?? null,
+        (transaction) => {
+          const before = this.repaintCount(transaction);
+          const done = this.passthrough!.repaint?.(transaction) ?? null;
+          if (done && this.staleBattlefieldHold) this.staleBattlefieldHold.before = before;
+          return done;
+        },
         this.host,
       );
     });
@@ -1432,12 +1473,47 @@ export class NativeCore {
         // validated passthrough sites cannot be repainted from here, and is not asked again.
         this.battlefieldRepaint = done === false ? 'owed' : 'done';
         if (done) this.battlefieldRepaintAt = performance.timeOrigin + performance.now();
+        // Nothing will repaint: holding pictures could only delay the (stale) original picture.
+        if (!done || this.staleBattlefieldHold?.before === null) this.staleBattlefieldHold = null;
       },
       (error) => {
         this.battlefieldRepaint = ++this.battlefieldRepaintFailures < 3 ? 'owed' : 'done';
+        this.staleBattlefieldHold = null;
         console.warn('[native] battlefield repaint request failed', error);
       },
     );
+  }
+  /** The guest's count of repaints it has run (the redraw:request gate counter); null when it has none. */
+  private repaintCount(memory: GuestMemory): number | null {
+    const count = this.passthrough?.read(memory).counters['redraw:request'];
+    return typeof count === 'number' ? count : null;
+  }
+  /**
+   * True while a battle picture must not be presented because the guest has not yet run the repaint requested after
+   * attaching to a running battle. Each held picture checks the guest's repaint counter once (one read at a time);
+   * menu pictures, the deadline, or a counter that moved past its value at the request end the hold.
+   */
+  private holdStaleBattlefieldPicture(): boolean {
+    const hold = this.staleBattlefieldHold;
+    if (!hold) return false;
+    if (this.menuSurface === true || performance.now() >= hold.deadline) {
+      this.staleBattlefieldHold = null;
+      return false;
+    }
+    if (hold.before !== null && !hold.checking && this.passthrough) {
+      hold.checking = true;
+      void runNativeTransaction(this.memory, (transaction) => this.repaintCount(transaction), this.host).then(
+        (count) => {
+          hold.checking = false;
+          if (this.staleBattlefieldHold === hold && (count === null || count !== hold.before))
+            this.staleBattlefieldHold = null;
+        },
+        () => {
+          if (this.staleBattlefieldHold === hold) this.staleBattlefieldHold = null;
+        },
+      );
+    }
+    return true;
   }
 
   /** Called only after the presenter ACK, so hidden pages naturally backpressure native picture capture. */
@@ -1565,7 +1641,12 @@ export class NativeCore {
         awaitingLogicMirror: !this.policyPrepared || !this.memory.complete,
         mirrorMisses: this.memory.misses,
         renderHealth: { unreadableSinceEpochMs: this.unreadableSinceEpochMs },
-        battlefieldRepaint: { state: this.battlefieldRepaint, requestedAtEpochMs: this.battlefieldRepaintAt },
+        battlefieldRepaint: {
+          state: this.battlefieldRepaint,
+          requestedAtEpochMs: this.battlefieldRepaintAt,
+          picturesHeld: this.staleBattlefieldPicturesHeld,
+          holding: this.staleBattlefieldHold !== null,
+        },
         lastReaderError: this.render.error ?? this.command.error ?? this.frame.error,
         readerErrors: { render: this.render.error, command: this.command.error, performance: this.frame.error },
         stateReadMs: this.stateReadMs,

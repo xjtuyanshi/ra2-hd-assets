@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NativeCore, NativeUnsupportedError } from '../../../src/adapter/native/core';
+import { NativeCore, NativeUnsupportedError, STALE_BATTLEFIELD_HOLD_MS } from '../../../src/adapter/native/core';
 import type { NativeCoreOptions, NativeGamePolicyFactory } from '../../../src/adapter/native/core';
 import type { NativeWebSocket } from '../../../src/adapter/native/connection';
 import {
@@ -2218,6 +2218,97 @@ describe('native core session and presenter lifecycle', () => {
       await flush();
       expect(unpatched.install).toHaveBeenCalledOnce();
       expect(unpatched.repaint).not.toHaveBeenCalled();
+    });
+
+    describe('stale battle pictures after attaching to a running battle', () => {
+      function withCounter(options: Partial<NativeCoreOptions> = { renderPassthrough: true }) {
+        const frames = vi.fn();
+        const test = setup({ onFrame: frames }, options);
+        const factory = vi.mocked(test.policyFactory).getMockImplementation()!;
+        const guest = { redraws: 4 };
+        const repaint = vi.fn(() => true);
+        vi.mocked(test.policyFactory).mockImplementation((...args) => ({
+          ...factory(...args),
+          menuSurface: { width: 800, height: 600 },
+          installPassthrough: () => ({
+            supported: 7,
+            keyRgb565: 0xf81f,
+            configAddress: 0x1000,
+            set: () => true,
+            repaint,
+            read: () => ({ flags: 0, applied: 0, counters: { 'redraw:request': guest.redraws } }),
+          }),
+        }));
+        // The agent's hello reports the battle's video mode, not the 800x600 front end.
+        test.agent.surface = { width: 2, height: 1, bpp: 16, format: 'RGB565' };
+        return { ...test, frames, guest, repaint };
+      }
+      async function attach(test: ReturnType<typeof withCounter>) {
+        test.mode.map = battle;
+        const start = test.core.start();
+        test.agent.hello();
+        await start;
+        await flush();
+      }
+
+      it('drops battle pictures until the guest has run the requested repaint, then presents again', async () => {
+        const test = withCounter();
+        await attach(test);
+        const { core, agent, frames, guest, scheduled, repaint } = test;
+        expect(repaint).toHaveBeenCalledOnce();
+        const credits = agent.count(NativeMessageType.Credit);
+        // The guest has not run the repaint yet: this picture copies the stale terrain cache.
+        agent.picture(2);
+        await flush();
+        expect(scheduled).toHaveLength(0);
+        expect(frames).not.toHaveBeenCalled();
+        // A dropped picture gets no presenter ACK, so the core asks for the next one itself.
+        expect(agent.count(NativeMessageType.Credit)).toBe(credits + 1);
+        agent.picture(3, false);
+        await flush();
+        expect(scheduled).toHaveLength(0);
+        // The repaint ran at the guest's next frame start.
+        guest.redraws = 5;
+        agent.picture(4, false);
+        await flush();
+        agent.picture(5, false);
+        await flush();
+        expect(scheduled).toHaveLength(1);
+        scheduled.shift()!();
+        expect(frames).toHaveBeenCalledOnce();
+        expect((await core.getDiagnostics('sample')).native).toMatchObject({
+          battlefieldRepaint: { state: 'done', picturesHeld: 3, holding: false },
+        });
+      });
+
+      it('never holds longer than the bound when the counter does not move', async () => {
+        const test = withCounter();
+        let now = 1000;
+        vi.spyOn(performance, 'now').mockImplementation(() => now);
+        await attach(test);
+        test.agent.picture(2);
+        await flush();
+        expect(test.scheduled).toHaveLength(0);
+        now += STALE_BATTLEFIELD_HOLD_MS;
+        test.agent.picture(3, false);
+        await flush();
+        expect(test.scheduled).toHaveLength(1);
+      });
+
+      it('holds nothing at a menu attachment or without passthrough support', async () => {
+        const menu = withCounter();
+        menu.agent.surface = { width: 800, height: 600, bpp: 16, format: 'RGB565' };
+        await attach(menu);
+        menu.agent.picture(2);
+        await flush();
+        expect(menu.scheduled).toHaveLength(1);
+
+        const plain = withCounter({});
+        await attach(plain);
+        plain.agent.picture(2);
+        await flush();
+        expect(plain.scheduled).toHaveLength(1);
+      });
     });
   });
 });
