@@ -27,9 +27,9 @@ import type { VoxelProjectionInputs, VoxelProjectionState } from './voxelProject
 import { highlightExponent } from './spriteLook';
 
 /**
- * The look's light gains a projected redraw takes: the voxel units' own (VoxelLightingState, set from HdSettings
- * vehicleSunGain / vehicleSpecularSize by the renderer), not the sprite look's, so vehicles can be lit apart from
- * terrain, buildings and infantry.
+ * The look's light gains a projected redraw takes (vpl.ts voxelMeshGains): the voxel units' own (VoxelLightingState,
+ * set from HdSettings vehicleSunGain / vehicleSpecularSize by the renderer), so vehicles can be lit apart from
+ * terrain, buildings and infantry, and the scene's for a building's voxel turret.
  */
 export interface VoxelLookGains {
   /** Sun weight of the Lambert terms (form light, house paint shade, relight ratio); 1 = neutral. */

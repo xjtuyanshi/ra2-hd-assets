@@ -340,6 +340,14 @@ export class VoxelUnits {
     setShadowContact(unit.root, grounded, normal, bottomFace);
   }
 
+  /**
+   * A building's voxel turret takes the scene's look like the building's sprite body, not the vehicles' own gains
+   * and finish (vpl.ts meshVehicleLook).
+   */
+  setBuildingPart(unit: VoxelUnit): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setBuildingPart(true);
+  }
+
   /** Painter bias remains additive to either physical flight depth or the native ground card. */
   setPainterBias(unit: VoxelUnit, bias: number): void {
     if (unit.root instanceof VoxelRoot) unit.root.setPainterBias(bias);

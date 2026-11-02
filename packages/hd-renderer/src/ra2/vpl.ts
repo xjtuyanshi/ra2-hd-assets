@@ -9,6 +9,7 @@ import {
   UnsignedByteType,
   Vector3,
   type NodeBuilder,
+  type Object3D,
 } from 'three/webgpu';
 import {
   BRDF_GGX,
@@ -49,7 +50,7 @@ import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
 import { applyObjectTint, meshObjectTint } from '../objectTint';
 import { VoxelProjectionInputs, voxelProjectionFor, type VoxelProjectionPart } from './voxelProjection';
-import { projectedVoxelColour } from './voxelProjectionNodes';
+import { projectedVoxelColour, type VoxelLookGains } from './voxelProjectionNodes';
 import {
   registerVoxelReflectionColour,
   registerVoxelReflectionVariant,
@@ -93,34 +94,73 @@ export const ENGINE_SECTION_SCALE = 16;
 /** The highlight's parameter p in b / (p - (p - 1) b): the float 3.0 TechnoClass passes (0x40400000 @0x706F23). */
 export const ENGINE_SPECULAR = 3;
 
+/** Up component of a voxel unit's normal where the top gain starts to apply, and where it applies in full. */
+const TOP_START = 0.6;
+const TOP_FULL = 0.95;
+
+/** Whose look a placed voxel model takes, shared by its part meshes (VoxelUnit.setBuildingPart). */
+export interface VoxelLookClass {
+  /** A building's voxel turret (TurretAnimIsVoxel) rather than a unit of its own. */
+  building: boolean;
+}
+
+/** meshVehicleLook's value for a drawn object: its own look class, or its source mesh's for a water twin. */
+export function vehicleLookWeight(object: Object3D | null | undefined): number {
+  const own = object?.userData.voxelLookClass as VoxelLookClass | undefined;
+  const source = (object as { source?: Object3D } | null | undefined)?.source?.userData.voxelLookClass as
+    VoxelLookClass | undefined;
+  return (own ?? source)?.building ? 0 : 1;
+}
+
+/**
+ * Whether the voxel mesh being drawn takes the voxel units' look (1) or the scene's (0). Vehicles, ships, aircraft and
+ * voxel projectiles take the vehicle gains and finish (VoxelLightingState sunGain ... topGain). A building's voxel
+ * turret belongs to its building, whose body is a sprite lit with the scene's gains: it takes those and no finish,
+ * as before vehicles had a look of their own, so the turret cannot part from its base. Data of the drawn part mesh
+ * (vehicleLookWeight), one uniform of the shared graphs written per drawn object like the picture tint (objectTint.ts).
+ * The selection is a mix with a weight of exactly 0 or 1, which returns the chosen value unchanged.
+ */
+export const meshVehicleLook: ShaderNode = uniform(1)
+  .setName('vehicleLook')
+  .onObjectUpdate(({ object }: { object?: Object3D | null }) => vehicleLookWeight(object));
+
+/** The light gains a voxel mesh is lit with (see meshVehicleLook): sun weight, highlight size and crease AO power. */
+export interface VoxelMeshGains extends VoxelLookGains {
+  aoPower: ShaderNode;
+}
+
+/** The gains of the mesh being drawn: the voxel units' (`state`) or, for a building's turret, the scene's (`look`). */
+export function voxelMeshGains(state: VoxelLightingState, look: SpriteLookState): VoxelMeshGains {
+  const pick = (scene: ShaderNode, vehicle: ShaderNode): ShaderNode => mix(scene, vehicle, meshVehicleLook);
+  return {
+    sunGain: pick(look.sunGain, state.sunGain),
+    specularSize: pick(look.specularSize, state.specularSize),
+    aoPower: pick(look.aoPower, state.aoPower),
+  };
+}
+
+/**
+ * The look's finish on a voxel unit's colour (every voxel material: engine look, remaster and projected redraws):
+ * exposure, white balance and the top gain on upward-facing surfaces (`normal`: world geometry normal, y up). With
+ * every gain at 1, and for a building's turret (meshVehicleLook), the colour is unchanged.
+ */
+export function voxelLookFinish(colour: ShaderNode, gains: VoxelLightingState, normal: ShaderNode): ShaderNode {
+  const top: ShaderNode = smoothstep(TOP_START, TOP_FULL, normal.y);
+  const finish: ShaderNode = (gains.whiteBalance as ShaderNode).mul(gains.exposure).mul(mix(1, gains.topGain, top));
+  return colour.mul(mix(vec3(1), finish, meshVehicleLook));
+}
+
+/** Water reflections of a voxel unit: exposure and white balance (they show its underside, so no top gain). */
+export function voxelReflectionFinish(colour: ShaderNode, gains: VoxelLightingState): ShaderNode {
+  return colour.mul(mix(vec3(1), (gains.whiteBalance as ShaderNode).mul(gains.exposure), meshVehicleLook));
+}
+
 /**
  * The engine's voxel light in HD world axes as derived from its constants: the engine dots model-space normals with
  * the light taken through the inverse draw matrix, which equals dotting world normals with M^T * light; taking engine
  * world axes as (map x, -map y, up) and HD axes as (map x, up, map y) gives about (0.201, -0.362, 0.910). Checked per
  * pixel against captures of the original: a free light search lands within 6 degrees of it.
  */
-/** Up component of a voxel unit's normal where the top gain starts to apply, and where it applies in full. */
-const TOP_START = 0.6;
-const TOP_FULL = 0.95;
-
-/**
- * The look's finish on a voxel unit's colour (every voxel material: engine look, remaster and projected redraws):
- * exposure, white balance and the top gain on upward-facing surfaces (`normal`: world normal, y up). With every gain
- * at 1 the colour is unchanged.
- */
-export function voxelLookFinish(colour: ShaderNode, gains: VoxelLightingState, normal: ShaderNode): ShaderNode {
-  const top: ShaderNode = smoothstep(TOP_START, TOP_FULL, normal.y);
-  return colour
-    .mul(gains.exposure)
-    .mul(gains.whiteBalance)
-    .mul(mix(1, gains.topGain, top));
-}
-
-/** Water reflections of a voxel unit: exposure and white balance (they show its underside, so no top gain). */
-export function voxelReflectionFinish(colour: ShaderNode, gains: VoxelLightingState): ShaderNode {
-  return colour.mul(gains.exposure).mul(gains.whiteBalance);
-}
-
 export function derivedVoxelLight(out = new Vector3()): Vector3 {
   const [lx, ly, lz] = ENGINE_VOXEL_LIGHT;
   const m = ENGINE_VOXEL_VIEW;
@@ -182,7 +222,8 @@ export class VoxelLightingState {
    * The look's light gains as voxel units take them, set every frame by the renderer (HdRenderer vehicleLookGains:
    * the scene's sunGain / specularSize / aoPower unless the look gives vehicles their own) and 1 in the faithful
    * branch: sun weight of the direct and form light, highlight size (lobe width and squared intensity) and crease AO
-   * power. Separate from the sprite look so a look can light vehicles apart from terrain, buildings and infantry.
+   * power. Separate from the sprite look so a look can light vehicles apart from terrain, buildings and infantry;
+   * buildings' voxel turrets keep the sprite look's (meshVehicleLook).
    */
   readonly sunGain = uniform(1);
   readonly specularSize = uniform(1);
@@ -283,6 +324,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
     private readonly raw: ShaderNode,
     private readonly matp: ShaderNode,
     private readonly state: VoxelLightingState,
+    private readonly gains: VoxelMeshGains,
     private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
@@ -300,7 +342,7 @@ class VoxelLightingModel extends PhysicalLightingModel {
   }: Parameters<PhysicalLightingModel['direct']>[0]): void {
     const live: ShaderNode = float(1).sub(step(0.5, this.state.voxelDebug));
     const dotNL: ShaderNode = (normalView as ShaderNode).dot(l).clamp();
-    const irradiance: ShaderNode = dotNL.mul(lightColor).mul(this.state.sunGain);
+    const irradiance: ShaderNode = dotNL.mul(lightColor).mul(this.gains.sunGain);
     (reflectedLight.directDiffuse as ShaderNode).addAssign(
       irradiance.mul(BRDF_Lambert({ diffuseColor: (diffuseColor as ShaderNode).rgb })),
     );
@@ -311,12 +353,12 @@ class VoxelLightingModel extends PhysicalLightingModel {
           lightDirection: l,
           f0,
           f90: 1,
-          roughness: highlightRoughness(roughness, this.state.specularSize),
+          roughness: highlightRoughness(roughness, this.gains.specularSize),
         } as never),
       )
       .mul(this.matp.z)
       .mul(this.state.voxelSheen)
-      .mul(this.state.specularSize.mul(this.state.specularSize))
+      .mul(this.gains.specularSize.mul(this.gains.specularSize))
       .mul(live);
     (reflectedLight.directSpecular as ShaderNode).addAssign(min(specular, vec3(this.state.voxelSheenCap)));
   }
@@ -330,6 +372,8 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
   matp!: ShaderNode;
   state!: VoxelLightingState;
   look!: SpriteLookState;
+  /** The light gains of the mesh being drawn (voxelMeshGains). */
+  gains!: VoxelMeshGains;
   sceneMultiplier!: ShaderNode;
   override copy(source: this): this {
     super.copy(source);
@@ -338,13 +382,14 @@ class VoxelMaterial extends MeshStandardNodeMaterial {
     this.matp = source.matp;
     this.state = source.state;
     this.look = source.look;
+    this.gains = source.gains;
     this.sceneMultiplier = source.sceneMultiplier;
     // A clone draws the palette and the part its source draws (opacity and native-depth variants of one unit).
     inheritSlotBinder(this, source);
     return this;
   }
   override setupLightingModel(): PhysicalLightingModel {
-    return new VoxelLightingModel(this.raw, this.matp, this.state, this.sceneMultiplier);
+    return new VoxelLightingModel(this.raw, this.matp, this.state, this.gains, this.sceneMultiplier);
   }
 }
 
@@ -420,6 +465,7 @@ function createGraph(
   material.sceneMultiplier = nodes.sceneObjectMul;
   material.state = state;
   const look = (material.look = spriteLookFor(nodes));
+  const gains = (material.gains = voxelMeshGains(state, look));
   nodes.own(material);
   const lut = textureSlot();
   const projection = house === null ? null : new VoxelProjectionInputs();
@@ -427,7 +473,7 @@ function createGraph(
   if (projection) material.name += '-projected';
   const rows = sections + 2;
   const occlusion: ShaderNode = attribute('occlusion', 'float');
-  const ao: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(voxelOcclusion)), state.aoPower);
+  const ao: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(voxelOcclusion)), gains.aoPower);
   const pindex: ShaderNode = attribute('pindex', 'float');
   const u: ShaderNode = pindex.add(0.5).div(256);
   const row = (r: ShaderNode | number): ShaderNode => texture(lut, vec2(u, float(r).add(0.5).div(rows))).rgb;
@@ -484,10 +530,10 @@ function createGraph(
       (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
       lightDirection,
       look.sunDirection,
-      state,
+      gains,
     );
     const projState = voxelProjectionFor(nodes);
-    const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), state.aoPower);
+    const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), gains.aoPower);
     const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
     const projectedShade: ShaderNode = sceneLitColour(
       mix(moonlit(colour, nodes), colour, projected.paint).mul(voxelFill),
@@ -542,10 +588,10 @@ function createGraph(
         (index) => sRGBTransferEOTF(texture(lut, vec2(index.add(0.5).div(256), (sections + 0.5) / rows)).rgb),
         lightDirection,
         look.sunDirection,
-        state,
+        gains,
         { matrix: sourceMatrix, position: positionGeometry, normal: sourceNormal },
       );
-      const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), state.aoPower);
+      const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), gains.aoPower);
       const projectionLevel: ShaderNode = sourceLevel.div(projState.levelRef.max(0.01));
       const projectedAlbedo: ShaderNode = srgbScale(projected.albedo, projectionLevel).mul(formAo);
       const projectedLit: ShaderNode = srgbScale(projected.colour, projectionLevel).mul(formAo);

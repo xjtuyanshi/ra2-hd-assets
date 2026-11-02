@@ -214,15 +214,19 @@ export interface HdSettings extends CinematicGradeParams {
   voxelSheenCap: number | null;
   voxelOcclusion: number | null;
   /**
-   * The look's light gains for voxel units only (vehicles, ships, aircraft and voxel turrets: engine-look, remaster
-   * and projected redraw materials): sun weight, highlight size and crease AO power. null follows sunGain,
-   * specularSize and aoPower; the faithful branch keeps all of them at 1 like the scene gains. Sprites, terrain,
-   * buildings and infantry never read these.
+   * The look's light gains for voxel units only (vehicles, ships, aircraft, their turrets and voxel projectiles:
+   * engine-look, remaster and projected redraw materials): sun weight, highlight size and crease AO power. null follows
+   * sunGain, specularSize and aoPower; the faithful branch keeps all of them at 1 like the scene gains. Sprites,
+   * terrain, buildings, buildings' voxel turrets (lit like the building's sprite body, see ra2/vpl.ts
+   * meshVehicleLook) and infantry never read these or the vehicle finish below.
    */
   vehicleSunGain: number | null;
   vehicleSpecularSize: number | null;
   vehicleAoPower: number | null;
-  /** Linear gain on the finished voxel unit colour in an enhanced look (1 = none; the faithful branch keeps 1). */
+  /**
+   * Linear gain on the finished voxel unit colour in an enhanced look (1 = none). This, vehicleGradeBalance and
+   * vehicleTopGain are the vehicle finish: the faithful branch and every debug view keep it neutral.
+   */
   vehicleExposure: number;
   /**
    * Share of the display grade's colour balance (`gradeBalance`) that voxel units keep in an enhanced look: 1 = the
@@ -238,7 +242,11 @@ export interface HdSettings extends CinematicGradeParams {
   vehicleTopGain: number;
 }
 
-/** Effective voxel unit gains of a look (see HdSettings.vehicleSunGain); `enhanced` is the look's enhanced branch. */
+/**
+ * Effective voxel unit gains of a look (see HdSettings.vehicleSunGain); `enhanced` is the look's enhanced branch. A
+ * debug view (`debugView` other than 'none') draws raw encodings (voxel normals, palette index, occlusion) or
+ * diagnostics through the same shaders, so it keeps the vehicle finish (exposure, balance, top gain) neutral.
+ */
 export function vehicleLookGains(
   settings: Pick<
     HdSettings,
@@ -251,7 +259,8 @@ export function vehicleLookGains(
     | 'vehicleExposure'
     | 'vehicleGradeBalance'
     | 'vehicleTopGain'
-  >,
+  > &
+    Partial<Pick<HdSettings, 'debugView'>>,
   enhanced: boolean,
 ): {
   sunGain: number;
@@ -262,13 +271,14 @@ export function vehicleLookGains(
   topGain: number;
 } {
   if (!enhanced) return { sunGain: 1, specularSize: 1, aoPower: 1, exposure: 1, gradeBalance: 1, topGain: 1 };
+  const finish = (settings.debugView ?? 'none') === 'none';
   return {
     sunGain: settings.vehicleSunGain ?? settings.sunGain,
     specularSize: settings.vehicleSpecularSize ?? settings.specularSize,
     aoPower: settings.vehicleAoPower ?? settings.aoPower,
-    exposure: settings.vehicleExposure,
-    gradeBalance: settings.vehicleGradeBalance,
-    topGain: settings.vehicleTopGain,
+    exposure: finish ? settings.vehicleExposure : 1,
+    gradeBalance: finish ? settings.vehicleGradeBalance : 1,
+    topGain: finish ? settings.vehicleTopGain : 1,
   };
 }
 
@@ -416,19 +426,19 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // instead of the original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurements and the
       // owner's feedback.
       infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
-      // Vehicles (voxel units) take the scene's sun, highlight size and AO power, minus the grade's cool balance and
-      // with dimmer tops. Frozen same-moment native / HD pairs under the owner's look with the chroma-restored redraw
-      // pages (19 states on Xroulette and DeepFrze snow, Unrepent temperate, MoonPatr lunar; 202 hull cells, 370 units
-      // split into faces by the voxel debug normals):
-      // - gradeBalance [0.955, 1, 1.085] put hull b* 1.7 below the original's (snow 2.4, temperate 1.8; lunar 0, where
-      //   airless maps skip the balance). It cools the whole scene alike (terrain -2.8, near buildings -5.2 against the
-      //   original), which this look keeps; vehicles drop the balance (vehicleGradeBalance 0): hull b* -1.7 -> -0.2.
+      // Vehicles (voxel units; not buildings' voxel turrets) take the scene's sun, highlight size and AO power, minus
+      // the grade's cool balance and with dimmer tops. Frozen same-moment native / HD pairs under the owner's look
+      // with the chroma-restored redraw pages (19 states on Xroulette and DeepFrze snow, Unrepent temperate, MoonPatr
+      // lunar; 202 hull cells, 370 units split into faces by the voxel debug normals):
+      // - gradeBalance [0.955, 1, 1.085] put hull b* about 2 below the original's (lunar 0, where airless maps skip
+      //   the balance). It cools the whole scene alike (terrain -2.8, near buildings -5.2 against the original), which
+      //   this look keeps; vehicles drop the balance (vehicleGradeBalance 0): hull b* +0.0.
       // - The redraw pages carry an overhead light: top faces as bright as the engine-lit sides (median ratio 0.89 on
-      //   the page, 0.72 in the original, 0.83 drawn), so light decks read white (top p90 x1.06, Lasher x1.29) while
-      //   the lit sides stay dark (p50 x0.92). Highlight size 1.6 brightens the sides and the contrast (hull luma std
-      //   x0.93 -> x0.98, lit side p50 x0.99) and the top gain 0.75 takes the decks back (top p50 / p90 x0.99 / x1.04);
-      //   exposure 1.04 returns the hull median (x0.99, dark share +0.9 points, p90 x0.99).
-      // A highlight size of 1.1 without the top gain (the previous setting) kept the decks white and the hulls flat.
+      //   the page, 0.72 in the original), so light decks read white while the lit sides stay dark. Highlight size 1.6
+      //   brightens the sides and the contrast, the top gain 0.75 takes the decks back (top p50 / p90 x0.99 / x1.04,
+      //   share above 150 +0.4 points) and exposure 1.04 returns the hull median (x0.99, p90 x0.99, std x0.975).
+      //   Highlight 1.1 without a top gain keeps the decks white and the hulls flat (std x0.93); top gain 0.8 lifts
+      //   top-heavy facings (Rhino facing 0 / 96 x0.88 / x0.91 -> x0.91 / x0.94) but whitens the Lasher deck again.
       vehicleSunGain: null,
       vehicleSpecularSize: null,
       vehicleAoPower: null,
@@ -1981,7 +1991,8 @@ export class HdRenderer {
     look.shadowDarkness.value = on ? s.shadowDarkness : 1;
     look.infantryShadow.value = on ? s.infantryShadow : 1;
     // Voxel units take the look's gains through their own uniforms (vehicleLookGains), so a look can light vehicles
-    // apart from the sprites, terrain, buildings and infantry above.
+    // apart from the sprites, terrain, buildings and infantry above; buildings' voxel turrets keep the uniforms above
+    // (ra2/vpl.ts meshVehicleLook). Debug views keep the vehicle finish neutral (vehicleLookGains).
     const vehicles = vehicleLookGains(s, on);
     const voxels = voxelLightingFor(this.nodes);
     voxels.sunGain.value = vehicles.sunGain;

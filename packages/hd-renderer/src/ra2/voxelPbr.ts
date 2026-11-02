@@ -23,6 +23,7 @@ import {
   modelPosition,
   normalView,
   normalWorld,
+  normalWorldGeometry,
   output,
   positionGeometry,
   positionLocal,
@@ -47,7 +48,14 @@ import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrad
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
-import { voxelLightingFor, voxelLookFinish, voxelReflectionFinish, type VoxelLightingState } from './vpl';
+import {
+  voxelLightingFor,
+  voxelLookFinish,
+  voxelMeshGains,
+  voxelReflectionFinish,
+  type VoxelLightingState,
+  type VoxelMeshGains,
+} from './vpl';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
 import { applyObjectTint, meshObjectTint } from '../objectTint';
@@ -246,7 +254,7 @@ class RemasterLighting extends PhysicalLightingModel {
   constructor(
     private readonly ao: ShaderNode,
     private readonly state: VoxelPbrState,
-    private readonly gains: VoxelLightingState,
+    private readonly gains: VoxelMeshGains,
     private readonly sceneMultiplier: ShaderNode,
   ) {
     super();
@@ -278,8 +286,8 @@ class RemasterMaterial extends MeshStandardNodeMaterial {
   ao!: ShaderNode;
   state!: VoxelPbrState;
   look!: SpriteLookState;
-  /** The voxel units' look gains (VoxelLightingState sunGain / specularSize / aoPower / exposure). */
-  gains!: VoxelLightingState;
+  /** The light gains of the mesh being drawn (vpl.ts voxelMeshGains). */
+  gains!: VoxelMeshGains;
   sceneMultiplier!: ShaderNode;
   override copy(source: this): this {
     super.copy(source);
@@ -332,7 +340,8 @@ function createGraph(
   const pos: ShaderNode = attribute('vpos', 'vec3');
   const curvature: ShaderNode = attribute('curvature', 'float');
   const look = (material.look = spriteLookFor(nodes));
-  const gains = (material.gains = voxelLightingFor(nodes));
+  const voxelState: VoxelLightingState = voxelLightingFor(nodes);
+  const gains = (material.gains = voxelMeshGains(voxelState, look));
   const ao: ShaderNode = poweredOcclusion(
     float(1).sub(attribute('occlusion', 'float').mul(state.aoStrength)).clamp(),
     gains.aoPower,
@@ -431,7 +440,7 @@ function createGraph(
   material.outputNode = Fn(() =>
     vec4(
       applyObjectTint(
-        voxelLookFinish(output.rgb, gains, normalWorld),
+        voxelLookFinish(output.rgb, voxelState, normalWorldGeometry),
         meshObjectTint.x,
         meshObjectTint.y,
         level,
@@ -488,7 +497,10 @@ function createGraph(
       // Keep the ambient attenuation on the ceiling, leaving headroom for the physical BRDF's Fresnel loss.
       .mul(VOXEL_REFLECTION_AMBIENT);
     const ambient: ShaderNode = hemisphere.mul(float(1).sub(surfaceMetalness(reflectedSurface)));
-    return voxelReflectionFinish(voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor), gains);
+    return voxelReflectionFinish(
+      voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor),
+      voxelState,
+    );
   });
   return { prototype: material, lookup: lut };
 }

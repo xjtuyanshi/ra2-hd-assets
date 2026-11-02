@@ -3,13 +3,15 @@ import {
   DataTexture,
   DirectionalLight,
   HemisphereLight,
+  Matrix4,
   Mesh,
+  MeshBasicNodeMaterial,
   PerspectiveCamera,
   Scene,
   WebGPURenderer,
   type Material,
 } from 'three/webgpu';
-import { lights } from 'three/tsl';
+import { lights, uniform, vec3 } from 'three/tsl';
 import {
   HdRenderer,
   LOOK_PRESETS,
@@ -25,8 +27,19 @@ import { spriteLookFor } from '../src/ra2/spriteLook';
 import { createVoxelProjectionPart } from '../src/ra2/voxelProjection';
 import type { VoxelProjectionManifest } from '../src/ra2/voxelProjectionMath';
 import { voxelPbrMaterialFor } from '../src/ra2/voxelPbr';
-import { buildVoxelGeometry, instantiateVoxel } from '../src/ra2/voxels';
-import { voxelLightingFor, voxelMaterialFor, voxelProjectedMaterialFor } from '../src/ra2/vpl';
+import { voxelReflectionColour } from '../src/ra2/voxelReflectionColour';
+import { buildVoxelGeometry, instantiateVoxel, VoxelUnit } from '../src/ra2/voxels';
+import {
+  meshVehicleLook,
+  vehicleLookWeight,
+  voxelLightingFor,
+  voxelLookFinish,
+  voxelMaterialFor,
+  voxelMeshGains,
+  voxelProjectedMaterialFor,
+  voxelReflectionFinish,
+} from '../src/ra2/vpl';
+import type { ShaderNode } from '../src/tsl';
 import { createScenario } from '../sandbox/scenario';
 import { syntheticSection } from './fixtures/syntheticVoxels';
 import type { VoxelModel } from '../../ra2-assets/src/manifest';
@@ -36,7 +49,8 @@ import type { VoxelModel } from '../../ra2-assets/src/manifest';
  * vehicleGradeBalance / vehicleTopGain). The cinematic look's scene gains and display grade were calibrated on terrain
  * and buildings; measured against the original's frozen frames they drew vehicle hulls cooler than the original and
  * their light top decks towards white. The vehicles therefore take their own gains, and nothing else may change with
- * them.
+ * them: not terrain, building sprites or infantry, and not buildings' voxel turrets, which keep the scene's gains and
+ * no vehicle finish so they cannot part from the sprite body they stand on.
  */
 
 const SCENE_GAINS = ['sunGain', 'specularSize', 'aoPower', 'contactShade', 'shadowLength', 'shadowDarkness'] as const;
@@ -226,6 +240,57 @@ describe('vehicle look gains', () => {
   });
 });
 
+describe('vehicle finish wiring', () => {
+  it('keeps the vehicle finish neutral in every debug view, and follows the night fade and airless maps', () => {
+    const hd = headlessRenderer();
+    const frame = hd as unknown as LookUpdater & {
+      nightDisplay: { value: number };
+      updateGrade(airless: boolean): void;
+    };
+    const voxels = voxelLightingFor(hd.nodes);
+    const finish = () => [voxels.exposure.value, voxels.topGain.value, ...voxels.whiteBalance.value.toArray()];
+    try {
+      applyLookPreset(hd.settings, 'cinematic');
+      frame.lighting.sunArc = true;
+      frame.lighting.update(16.5, 0);
+      frame.updateGrade(false);
+      frame.updateSpriteLook(1, 0);
+      const day = vehicleBalanceGain(hd.settings.gradeBalance, 1, CINEMATIC.gradeBalance).toArray();
+      expect(finish()).toEqual([CINEMATIC.exposure, CINEMATIC.topGain, ...day]);
+      // Debug views draw raw encodings (voxel normals, palette index, occlusion) or diagnostics: no exposure, top gain
+      // or balance on them. The light gains stay the vehicles' (the debug encodings do not read them).
+      for (const view of ['voxel-xy', 'voxel-z', 'overbright', 'silhouette'] as const) {
+        hd.settings.debugView = view;
+        frame.updateSpriteLook(1, 0);
+        expect(finish()).toEqual([1, 1, 1, 1, 1]);
+        expect([voxels.sunGain.value, voxels.specularSize.value, voxels.aoPower.value]).toEqual([1.25, 1.6, 1.5]);
+        expect(vehicleLookGains(hd.settings, true)).toMatchObject({ exposure: 1, gradeBalance: 1, topGain: 1 });
+      }
+      hd.settings.debugView = 'none';
+      // Night: the grade fades out of the display (nightDisplay), and the balance correction with it.
+      frame.nightDisplay.value = 0.6;
+      frame.updateSpriteLook(1, 0);
+      const night = voxels.whiteBalance.value.toArray();
+      expect(night).toEqual(vehicleBalanceGain(hd.settings.gradeBalance, 0.4, CINEMATIC.gradeBalance).toArray());
+      expect(Math.abs(Math.log(night[2]! / night[1]!))).toBeLessThan(Math.abs(Math.log(day[2]! / day[1]!)));
+      expect([voxels.exposure.value, voxels.topGain.value]).toEqual([CINEMATIC.exposure, CINEMATIC.topGain]);
+      frame.nightDisplay.value = 1;
+      frame.updateSpriteLook(1, 0);
+      expect(voxels.whiteBalance.value.toArray()).toEqual([1, 1, 1]);
+      // Airless maps: the grade keeps a neutral balance, so there is nothing to divide out; exposure and top gain stay.
+      frame.nightDisplay.value = 0;
+      frame.updateGrade(true);
+      frame.updateSpriteLook(1, 0);
+      expect(finish()).toEqual([CINEMATIC.exposure, CINEMATIC.topGain, 1, 1, 1]);
+      frame.updateGrade(false);
+      frame.updateSpriteLook(1, 0);
+      expect(voxels.whiteBalance.value.toArray()).toEqual(day);
+    } finally {
+      hd.nodes.dispose();
+    }
+  });
+});
+
 const model: VoxelModel = {
   id: 'HTNK',
   palette: 'unit',
@@ -262,12 +327,16 @@ function manifest(): VoxelProjectionManifest {
   };
 }
 
-/** The uniform nodes a material's fragment and vertex shaders read (no browser or device needed). */
-function uniformNodes(material: Material, nodes: AtmosphereNodes): unknown[] {
+/**
+ * The uniform nodes a material's fragment and vertex shaders read (no browser or device needed). `draw` replaces the
+ * drawn material (a water reflection twin's colour graph of `material`) on the same voxel geometry.
+ */
+function uniformNodes(material: Material, nodes: AtmosphereNodes, draw?: Material): unknown[] {
   const parts = buildVoxelGeometry(model, null, nodes);
   parts[0]!.material = material as never;
   const unit = instantiateVoxel([parts[0]!], material as never, nodes);
   const mesh = unit.root.children.find((o) => o instanceof Mesh && o.material === material) as Mesh;
+  if (draw) mesh.material = draw;
   const renderer = new WebGPURenderer({
     canvas: {
       width: 64,
@@ -291,36 +360,208 @@ function uniformNodes(material: Material, nodes: AtmosphereNodes): unknown[] {
   });
 }
 
+type VoxelKind = 'engine' | 'remaster' | 'projected';
+
+function voxelMaterial(kind: VoxelKind, nodes: AtmosphereNodes): Material {
+  const palette = new Uint8Array(768);
+  const texture = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
+  return kind === 'engine'
+    ? voxelMaterialFor(palette, nodes)
+    : kind === 'remaster'
+      ? voxelPbrMaterialFor(palette, nodes)
+      : voxelProjectedMaterialFor(palette, createVoxelProjectionPart(manifest(), 'body', texture(), texture()), nodes);
+}
+
+/**
+ * CPU value of a small TSL expression of constants and uniforms (the finish and gain selections below): enough node
+ * kinds to evaluate them exactly as written, and an error for anything else.
+ */
+function evaluate(node: unknown): number[] {
+  const n = node as Record<string, unknown> & {
+    value?: unknown;
+    node?: unknown;
+    aNode?: unknown;
+    bNode?: unknown;
+    cNode?: unknown;
+  };
+  if (n.isConstNode || n.isUniformNode) {
+    const v = n.value as number | { isColor?: boolean; r: number; g: number; b: number; toArray(): number[] };
+    if (typeof v === 'number') return [v];
+    return v.isColor ? [v.r, v.g, v.b] : v.toArray();
+  }
+  const width = (a: number[], b: number[]) => Math.max(a.length, b.length);
+  const at = (v: number[], i: number) => (v.length === 1 ? v[0]! : v[i]!);
+  const each = (args: number[][], f: (...x: number[]) => number) => {
+    const size = Math.max(...args.map((a) => a.length));
+    return Array.from({ length: size }, (_, i) => f(...args.map((a) => at(a, i))));
+  };
+  if (n.isSplitNode) {
+    const v = evaluate(n.node);
+    return [...(n.components as string)].map((c) => v['xyzw'.includes(c) ? 'xyzw'.indexOf(c) : 'rgba'.indexOf(c)]!);
+  }
+  if (n.isConvertNode) {
+    const v = evaluate(n.node);
+    const size = { float: 1, vec2: 2, vec3: 3, color: 3, vec4: 4 }[n.convertTo as string] ?? v.length;
+    return v.length === 1 ? Array<number>(size).fill(v[0]!) : v.slice(0, size);
+  }
+  if (n.isJoinNode) return (n.nodes as unknown[]).flatMap(evaluate);
+  if (n.isVarNode) return evaluate(n.node);
+  if (n.isOperatorNode) {
+    const a = evaluate(n.aNode);
+    const b = evaluate(n.bNode);
+    const f = { '*': (x: number, y: number) => x * y, '+': (x: number, y: number) => x + y }[n.op as string];
+    if (!f || width(a, b) < 1) throw new Error(`operator ${String(n.op)}`);
+    return each([a, b], f);
+  }
+  if (n.isMathNode) {
+    const [a, b, c] = [n.aNode, n.bNode, n.cNode].map((x) => (x ? evaluate(x) : []));
+    switch (n.method) {
+      case 'mix':
+        return each([a!, b!, c!], (x, y, t) => x * (1 - t) + y * t);
+      case 'smoothstep':
+        return each([a!, b!, c!], (e0, e1, x) => {
+          const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+          return t * t * (3 - 2 * t);
+        });
+      case 'step':
+        return each([a!, b!], (edge, x) => (x < edge ? 0 : 1));
+      case 'max':
+        return each([a!, b!], Math.max);
+      case 'dot':
+        return [a!.reduce((sum, x, i) => sum + x * b![i]!, 0)];
+    }
+  }
+  throw new Error(`cannot evaluate ${String((n as { type?: string }).type ?? Object.keys(n))}`);
+}
+
 describe('vehicle look gains in the voxel shaders', () => {
   it.each(['engine', 'remaster', 'projected'] as const)(
-    'the %s voxel material reads the voxel gains, never the sprite look gains',
+    'the %s voxel material reads the voxel gains, selected per drawn mesh against the scene gains',
     (kind) => {
       const nodes = new AtmosphereNodes();
       const look = spriteLookFor(nodes);
       const voxels = voxelLightingFor(nodes);
-      const palette = new Uint8Array(768);
-      const texture = () => nodes.own(new DataTexture(new Uint8Array(320 * 32 * 4), 320, 32));
-      const material =
-        kind === 'engine'
-          ? voxelMaterialFor(palette, nodes)
-          : kind === 'remaster'
-            ? voxelPbrMaterialFor(palette, nodes)
-            : voxelProjectedMaterialFor(
-                palette,
-                createVoxelProjectionPart(manifest(), 'body', texture(), texture()),
-                nodes,
-              );
-      const used = uniformNodes(material, nodes);
+      const used = uniformNodes(voxelMaterial(kind, nodes), nodes);
       // The exposure, white balance, top gain and AO power reach every voxel material; the sun and highlight gains
-      // every lit one.
-      expect(used).toContain(voxels.exposure);
-      expect(used).toContain(voxels.whiteBalance);
-      expect(used).toContain(voxels.topGain);
-      expect(used).toContain(voxels.aoPower);
-      expect(used).toContain(voxels.sunGain);
-      expect(used).toContain(voxels.specularSize);
-      for (const key of ['sunGain', 'specularSize', 'aoPower'] as const) expect(used).not.toContain(look[key]);
+      // every lit one. Each gain is the drawn mesh's choice (meshVehicleLook) between the vehicles' and the scene's.
+      for (const node of [voxels.exposure, voxels.whiteBalance, voxels.topGain, meshVehicleLook])
+        expect(used).toContain(node);
+      for (const key of ['sunGain', 'specularSize', 'aoPower'] as const) {
+        expect(used).toContain(voxels[key]);
+        expect(used).toContain(look[key]);
+      }
       nodes.dispose();
     },
   );
+
+  it.each(['engine', 'remaster', 'projected'] as const)(
+    "the %s voxel material's water reflection takes exposure and white balance, never the top gain",
+    (kind) => {
+      const nodes = new AtmosphereNodes();
+      const voxels = voxelLightingFor(nodes);
+      const material = voxelMaterial(kind, nodes);
+      const reflection = new MeshBasicNodeMaterial();
+      reflection.colorNode = voxelReflectionColour(material, uniform(new Matrix4()));
+      const used = uniformNodes(material, nodes, reflection);
+      for (const node of [voxels.exposure, voxels.whiteBalance, meshVehicleLook]) expect(used).toContain(node);
+      expect(used).not.toContain(voxels.topGain);
+      nodes.dispose();
+    },
+  );
+
+  it('darkens upward-facing surfaces by the top gain, leaves sides alone and finishes nothing in debug-neutral gains', () => {
+    const nodes = new AtmosphereNodes();
+    const voxels = voxelLightingFor(nodes);
+    const colour = vec3(0.4, 0.3, 0.2) as ShaderNode;
+    const finished = (normal: [number, number, number]) =>
+      evaluate(voxelLookFinish(colour, voxels, vec3(...normal) as ShaderNode));
+    try {
+      voxels.exposure.value = 1.04;
+      voxels.topGain.value = 0.75;
+      voxels.whiteBalance.value.setRGB(1, 1, 1);
+      const up = finished([0, 1, 0]);
+      const side = finished([1, 0, 0]);
+      const down = finished([0, -1, 0]);
+      const tilted = finished([0.6, 0.8, 0]);
+      [0.4, 0.3, 0.2].forEach((c, i) => {
+        expect(up[i]).toBeCloseTo(c * 1.04 * 0.75, 12);
+        expect(side[i]).toBeCloseTo(c * 1.04, 12);
+        expect(down[i]).toBeCloseTo(c * 1.04, 12);
+        // Between the start (n.y 0.6) and full weight (0.95): part of the gain.
+        expect(tilted[i]).toBeLessThan(c * 1.04);
+        expect(tilted[i]).toBeGreaterThan(c * 1.04 * 0.75);
+      });
+      // The reflection finish never applies the top gain.
+      expect(evaluate(voxelReflectionFinish(colour, voxels))).toEqual(side);
+      // Neutral gains (faithful branch, debug views) give the colour back exactly.
+      voxels.exposure.value = 1;
+      voxels.topGain.value = 1;
+      expect(finished([0, 1, 0])).toEqual(evaluate(colour));
+    } finally {
+      nodes.dispose();
+    }
+  });
+});
+
+describe("buildings' voxel turrets keep the scene's look", () => {
+  it('marks a building part on its meshes and their water twins; vehicles stay vehicles', () => {
+    const nodes = new AtmosphereNodes();
+    try {
+      const make = () => {
+        const parts = buildVoxelGeometry(model, null, nodes);
+        return instantiateVoxel(parts, voxelMaterialFor(new Uint8Array(768), nodes) as never, nodes).root;
+      };
+      const vehicle = make();
+      const turret = make();
+      turret.setBuildingPart(true);
+      expect(vehicle.buildingPart).toBe(false);
+      expect(turret.buildingPart).toBe(true);
+      const meshes = (root: VoxelUnit) => {
+        const all: Mesh[] = [];
+        root.traverse((o) => o instanceof Mesh && all.push(o));
+        return all;
+      };
+      // Every drawn mesh of the turret (parts, shadow, foam and reflection twins) reads 0, every vehicle mesh 1.
+      expect(meshes(turret).length).toBeGreaterThan(turret.partMeshes.length);
+      for (const mesh of meshes(turret)) expect(vehicleLookWeight(mesh)).toBe(0);
+      for (const mesh of meshes(vehicle)) expect(vehicleLookWeight(mesh)).toBe(1);
+      expect(vehicleLookWeight(null)).toBe(1);
+    } finally {
+      nodes.dispose();
+    }
+  });
+
+  it('gives a building turret mesh the scene gains and no finish, a vehicle mesh its own', () => {
+    const nodes = new AtmosphereNodes();
+    const look = spriteLookFor(nodes);
+    const voxels = voxelLightingFor(nodes);
+    const gains = voxelMeshGains(voxels, look);
+    const colour = vec3(0.4, 0.3, 0.2) as ShaderNode;
+    const up = vec3(0, 1, 0) as ShaderNode;
+    const weight = meshVehicleLook as unknown as { value: number };
+    try {
+      Object.assign(look.sunGain, { value: 1.25 });
+      Object.assign(look.specularSize, { value: 1.6 });
+      Object.assign(look.aoPower, { value: 1.5 });
+      voxels.sunGain.value = 0.7;
+      voxels.specularSize.value = 2.2;
+      voxels.aoPower.value = 0.5;
+      voxels.exposure.value = 1.04;
+      voxels.topGain.value = 0.75;
+      voxels.whiteBalance.value.setRGB(1.05, 1, 0.9);
+      weight.value = 0;
+      // Exactly the scene's values: the selection returns them unchanged, so the turret matches its sprite base.
+      expect([gains.sunGain, gains.specularSize, gains.aoPower].map((g) => evaluate(g)[0])).toEqual([1.25, 1.6, 1.5]);
+      expect(evaluate(voxelLookFinish(colour, voxels, up))).toEqual(evaluate(colour));
+      expect(evaluate(voxelReflectionFinish(colour, voxels))).toEqual(evaluate(colour));
+      weight.value = 1;
+      expect([gains.sunGain, gains.specularSize, gains.aoPower].map((g) => evaluate(g)[0])).toEqual([0.7, 2.2, 0.5]);
+      evaluate(voxelLookFinish(colour, voxels, up)).forEach((v, i) =>
+        expect(v).toBeCloseTo([0.4, 0.3, 0.2][i]! * [1.05, 1, 0.9][i]! * 1.04 * 0.75, 12),
+      );
+    } finally {
+      weight.value = 1;
+      nodes.dispose();
+    }
+  });
 });

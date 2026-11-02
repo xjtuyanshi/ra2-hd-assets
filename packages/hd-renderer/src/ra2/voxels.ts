@@ -17,7 +17,7 @@ import { silhouetteCode } from '../silhouette';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { SHADOW_COPIES, SILHOUETTE_FOOTPRINT, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
-import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor } from './vpl';
+import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor, type VoxelLookClass } from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
@@ -653,6 +653,8 @@ export class VoxelUnit extends Group {
   private readonly painterDepth = createPainterDepth();
   readonly nativeDepth = createVoxelNativeDepth();
   private readonly silhouetteSerial = nextSilhouetteSerial++;
+  /** Whose look this unit takes (vpl.ts meshVehicleLook), shared by its part meshes and read by their water twins. */
+  private readonly lookClass: VoxelLookClass = { building: false };
   private readonly translucentMaterials = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
   bodyOpacity = 1;
   /** Up vector the game draws this body with (world axes), when its host reports one; null = follow the ground. */
@@ -668,6 +670,7 @@ export class VoxelUnit extends Group {
   addSourceMesh(mesh: Mesh, turretOffset = 0): void {
     mesh.userData.painterDepth = this.painterDepth;
     mesh.userData.voxelNativeDepth = this.nativeDepth;
+    mesh.userData.voxelLookClass = this.lookClass;
     // Each part has an outline of its own for the frame's outline pass (silhouette.ts): a turret over its hull too.
     mesh.userData.silhouette = silhouetteCode(this.silhouetteSerial, this.partMeshes.length);
     this.partMeshes.push(mesh);
@@ -707,6 +710,19 @@ export class VoxelUnit extends Group {
 
   setPainterBias(bias: number): void {
     this.painterDepth.bias = VOXEL_CLEARANCE + bias;
+  }
+
+  /**
+   * Mark this model as a building's voxel turret: it then takes the scene's look gains like the sprite body it stands
+   * on, never the vehicles' own gains and finish (vpl.ts meshVehicleLook).
+   */
+  setBuildingPart(building: boolean): void {
+    this.lookClass.building = building;
+  }
+
+  /** Whether this model is a building's voxel turret (setBuildingPart). */
+  get buildingPart(): boolean {
+    return this.lookClass.building;
   }
 
   /** Additive camera-space bias of the original parts (clearance plus painter bias), world units. */

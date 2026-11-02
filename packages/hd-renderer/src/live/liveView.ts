@@ -3228,6 +3228,7 @@ export class LiveView {
         return;
       }
       visual.buildingTurret = this.voxelUnits.build(model, key, cacheKey);
+      this.voxelUnits.setBuildingPart(visual.buildingTurret);
       visual.root.add(visual.buildingTurret.root);
     }
     const unit = visual.buildingTurret;
