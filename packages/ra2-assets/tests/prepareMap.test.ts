@@ -124,6 +124,20 @@ function writeSpriteHd(dir: string, stem = 'sprites'): SpriteAtlasHdRef {
   return ref;
 }
 
+/** A dedicated 4x redraw page (python/sprite_hd_pages.py) over a 4x2 indexed library page. */
+function write4x(dir: string, page: number): SpriteAtlasHdRef {
+  const ref: SpriteAtlasHdRef = {
+    file: `sprites-${page}@4x.png`,
+    remap: `sprites-${page}@4x-remap.png`,
+    scale: 4,
+    width: 16,
+    height: 8,
+  };
+  png(join(dir, ref.file), ref.width, ref.height, sourceTime);
+  png(join(dir, ref.remap), ref.width, ref.height, sourceTime);
+  return ref;
+}
+
 interface SyntheticLibrary {
   version: number;
   theater: string;
@@ -275,6 +289,21 @@ describe('prepare-map planning', () => {
     const plan = planPrepareMap({ ...options, steps: ['library', 'library-sprites'], force: true });
     expect(plan[0]).toMatchObject({ step: 'library', action: 'skip' });
     expect(plan[1]).toMatchObject({ step: 'library-sprites', action: 'run', pages: [1, 2, 3] });
+  });
+
+  it('never schedules a library page published at another scale, even when it looks stale by 2x rules', () => {
+    const { options } = fixture();
+    const dir = writeLibrary(options.cacheDir, 4);
+    const file = join(dir, 'library.json');
+    const library = readJson<SyntheticLibrary>(file);
+    library.spriteAtlasesHd = [writeSpriteHd(dir, 'sprites-0'), null, writeSpriteHd(dir, 'sprites-2'), write4x(dir, 3)];
+    writeJson(file, library);
+    // The 4x page is older than its source atlas: by the 2x freshness rules it would be rebuilt (and hd:sprites
+    // refuses that), so the planner must leave it to its packer.
+    const newer = new Date('2020-01-03T00:00:00Z');
+    utimesSync(join(dir, 'sprites-3.png'), newer, newer);
+    const plan = planPrepareMap({ ...options, steps: ['library-sprites'] });
+    expect(plan[0]).toMatchObject({ step: 'library-sprites', action: 'run', pages: [1] });
   });
 
   it('rejects a missing unselected dependency without launching a runner', async () => {
@@ -500,6 +529,21 @@ describe('prepare-map execution', () => {
     expect(readJson<SyntheticLibrary>(file).spriteAtlasesHd[0]).toEqual(first);
     expect(readFileSync(join(dir, first!.file))).toEqual(firstOutput);
     expect(planPrepareMap({ ...options, steps: ['library-sprites'] })[0]).toMatchObject({ action: 'skip' });
+  });
+
+  it('prepares a fresh map on a library holding a 4x page without touching that page (real runners)', async () => {
+    // Regression: the 2x-only freshness check marked the 4x page stale, so the real library-sprites runner asked
+    // upscaleSprites for it explicitly and preparing any new map failed with "holds a 4x HD page".
+    const { options } = fixture();
+    const dir = writeLibrary(options.cacheDir, 3);
+    const file = join(dir, 'library.json');
+    const library = readJson<SyntheticLibrary>(file);
+    library.spriteAtlasesHd = [writeSpriteHd(dir, 'sprites-0'), writeSpriteHd(dir, 'sprites-1'), write4x(dir, 2)];
+    writeJson(file, library);
+    const before = readFileSync(file, 'utf8');
+    const log = await prepareMap({ ...options, steps: ['library-sprites'] });
+    expect(log.steps[0]).toMatchObject({ step: 'library-sprites', status: 'skipped' });
+    expect(readFileSync(file, 'utf8')).toBe(before);
   });
 
   it('records failed steps and retries them rather than publishing a successful log', async () => {

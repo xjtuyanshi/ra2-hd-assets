@@ -190,6 +190,16 @@ function hdFresh(
 }
 
 /**
+ * A library page whose HD pair is published at a scale other than 2 is a dedicated redraw page (e.g. 4x infantry,
+ * python/sprite_hd_pages.py). hd:sprites only writes 2x and refuses an explicit request for such a page, so this
+ * workflow never schedules it: it is neither stale nor rebuildable here, and its owner (the packer and its install
+ * receipts) keeps it current. Without this, preparing any new map on a library holding one failed at library-sprites.
+ */
+function publishedElsewhere(ref: SpriteAtlasHdRef | null | undefined): boolean {
+  return !!ref && ref.scale !== 2;
+}
+
+/**
  * This pipeline reuses x4plus, whose supported requested scales are 1..4. A request that does not fit 16384 px per
  * side becomes the largest fitting fractional scale (terrainScale.ts), not a smaller integer.
  */
@@ -313,9 +323,10 @@ function planStep(
         : { ...result, reason: `extract ${m.theater} type library` };
     if (!library) return { ...result, reason: 'requires library extraction; page indices resolved afterwards' };
     result.pages = library.spriteAtlases.flatMap((source, page) =>
-      !changed.has('library') &&
-      hdFresh(dir, source, library.spriteAtlasesHd?.[page], library.palettes) &&
-      compatible(state, `library-sprites:${m.theater}:${page}`, spriteInputs(library, page))
+      publishedElsewhere(library.spriteAtlasesHd?.[page]) ||
+      (!changed.has('library') &&
+        hdFresh(dir, source, library.spriteAtlasesHd?.[page], library.palettes) &&
+        compatible(state, `library-sprites:${m.theater}:${page}`, spriteInputs(library, page)))
         ? []
         : [page],
     );

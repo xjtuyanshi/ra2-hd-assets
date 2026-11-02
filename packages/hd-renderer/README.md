@@ -1155,8 +1155,8 @@ The following offline sprite contracts still assume 2x:
 - `ra2-assets/src/node/spriteHdCache.ts`, `outputRef`: `@2x` filenames, `scale: 2` and doubled dimensions.
 - `ra2-assets/src/node/spriteHd.ts`, `scatterBatch` / `upscaleSpriteAtlas`: 4x inference is reduced to 2x; frame
   dimensions, destination offsets, page allocation and shadow clearing use doubled indexed coordinates.
-- `ra2-assets/src/node/prepareMap.ts`, `hdFresh`: freshness requires scale 2 and doubled dimensions. A 4x page is
-  considered stale by this preparation workflow.
+- `ra2-assets/src/node/prepareMap.ts`, `hdFresh`: freshness requires scale 2 and doubled dimensions. A library page
+  published at another scale is never scheduled by `library-sprites` (`publishedElsewhere`): its packer owns it.
 - `ra2-assets/python/sprite_normals.py`: map `Cache` and output require 2x, and classifier/assist geometry and pixel
   radii use `SCALE = 2`. Library inputs use their declared scale, then classify at 2x and output 1x or 2x. Its
   `@2x-normals` filenames do not constrain texture resolution.
