@@ -78,15 +78,19 @@ def area_down(alpha: np.ndarray, scale: int) -> np.ndarray:
     return alpha[:h * scale, :w * scale].reshape(h, scale, w, scale).mean(axis=(1, 3))
 
 
-def frame_metrics(indexed: np.ndarray, alpha: np.ndarray, paint: np.ndarray, rgb: np.ndarray, scale: int) -> dict:
+def frame_metrics(indexed: np.ndarray, alpha: np.ndarray, paint: np.ndarray, rgb: np.ndarray, scale: int,
+                  exclude: tuple[int, ...] = ()) -> dict:
     """Registration of a page frame against the original frame (both cropped to the frame rectangle).
 
     iou/cover use the HD alpha area-averaged to game px (> 0.5) against the original's opaque pixels; cover is the
     share of the original's pixels the page covers (holes there would show the ground through the soldier).
+    `exclude`: indices whose pixels the page deliberately draws translucent (e.g. a contact-shadow footprint painted
+    with one palette index); their game px count for neither side of iou/cover.
     house_agree: share of the original's house pixels that carry paint weight > 0.5 in the page.
     paint_grey: mean |r-g|+|g-b| of the page's painted texels (0 = the grey encoding the renderer decodes)."""
-    orig = indexed > 0
-    hd = area_down(alpha.astype(np.float32) / 255, scale) > 0.5
+    excluded = np.isin(indexed, exclude) if exclude else np.zeros(indexed.shape, bool)
+    orig = (indexed > 0) & ~excluded
+    hd = (area_down(alpha.astype(np.float32) / 255, scale) > 0.5) & ~excluded
     inter, union = (orig & hd).sum(), (orig | hd).sum()
     house = (indexed >= HOUSE_FIRST) & (indexed <= HOUSE_LAST)
     painted_game = area_down(paint.astype(np.float32) / 255, scale) > 0.5
@@ -156,7 +160,8 @@ def shelf_pack(sizes: list[tuple[int, int]], gutter: int, max_side: int) -> tupl
 class Plan:
     """Validated input: accepted frames with their pixels, rejected frames with reasons."""
 
-    def __init__(self, library_dir: Path, frames_index: Path, *, min_iou: float, min_cover: float):
+    def __init__(self, library_dir: Path, frames_index: Path, *, min_iou: float, min_cover: float,
+                 exclude: tuple[int, ...] = ()):
         self.library_dir = library_dir
         self.library = json.loads((library_dir / 'library.json').read_text(encoding='utf-8'))
         normals_path = library_dir / 'normals.json'
@@ -199,7 +204,8 @@ class Plan:
                 s = self.scale
                 fx, fy = (frame['offset'][0] - ox) * s, (frame['offset'][1] - oy) * s
                 crop = _window(colour, fx, fy, w * s, h * s)
-                metrics = frame_metrics(indexed, crop[..., 3], _window(paint, fx, fy, w * s, h * s), crop, s)
+                metrics = frame_metrics(indexed, crop[..., 3], _window(paint, fx, fy, w * s, h * s), crop, s,
+                                        exclude)
                 record.update(metrics=metrics)
                 reasons = []
                 if metrics['iou'] < min_iou:
@@ -386,6 +392,9 @@ def main(argv=None) -> int:
     parser.add_argument('--receipt', type=Path, help='receipt path for --farm installs (must be new)')
     parser.add_argument('--min-iou', type=float, default=0.8)
     parser.add_argument('--min-cover', type=float, default=0.9)
+    parser.add_argument('--exclude-index', type=int, action='append', default=[], metavar='INDEX',
+                        help='indexed colour left out of the iou/cover registration (repeatable), e.g. a footprint '
+                             'the pages draw translucent on purpose')
     parser.add_argument('--gutter', type=int, default=4, help='indexed px between frames (half of it is bled art)')
     parser.add_argument('--max-side', type=int, default=8192, help='largest HD page side in texels')
     parser.add_argument('--validate-only', action='store_true')
@@ -394,7 +403,8 @@ def main(argv=None) -> int:
         parser.error('give exactly one of --out and --farm')
     if args.farm is not None and not (args.rel and args.receipt):
         parser.error('--farm needs --rel and --receipt')
-    plan = Plan(args.library, args.frames, min_iou=args.min_iou, min_cover=args.min_cover)
+    plan = Plan(args.library, args.frames, min_iou=args.min_iou, min_cover=args.min_cover,
+                exclude=tuple(args.exclude_index))
     if args.validate_only:
         json.dump({'accepted': [{k: i[k] for k in ('sprite', 'frame', 'metrics')} for i in plan.accepted],
                    'fallback': plan.rejected}, sys.stdout, indent=1)

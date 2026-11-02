@@ -155,3 +155,22 @@ def test_shelf_pack_spills_to_more_pages_without_overlap():
             if q == p:
                 assert x + w + 4 <= a or a + c + 4 <= x or y + h + 4 <= b or b + d + 4 <= y
         boxes[len(boxes)] = (p, x, y, w, h)
+
+
+def test_excluded_index_leaves_registration_but_still_counts_elsewhere():
+    """A footprint painted with one index (drawn translucent on purpose) must not fail the coverage gate."""
+    indexed = np.zeros((4, 4), np.uint8)
+    indexed[:2] = 40                    # body
+    indexed[2:] = 12                    # footprint
+    alpha = np.zeros((4 * S, 4 * S), np.uint8)
+    alpha[:2 * S] = 255                 # body covered
+    alpha[2 * S:] = 90                  # footprint at ~0.35, as the 2x pages carry it
+    paint = np.zeros_like(alpha)
+    rgb = np.zeros((4 * S, 4 * S, 4), np.uint8)
+    plain = packer.frame_metrics(indexed, alpha, paint, rgb, S)
+    assert plain['cover'] == 0.5
+    kept = packer.frame_metrics(indexed, alpha, paint, rgb, S, (12,))
+    assert kept['cover'] == 1.0 and kept['iou'] == 1.0
+    alpha[0, :] = 0
+    alpha[:S, :] = 0                    # a body hole still fails
+    assert packer.frame_metrics(indexed, alpha, paint, rgb, S, (12,))['cover'] == 0.5

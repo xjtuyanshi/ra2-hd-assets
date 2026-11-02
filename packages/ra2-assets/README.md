@@ -426,6 +426,8 @@ with `python/sprite_hd_pages.py`, which never edits an existing page:
   > 0.5) with the original's opaque pixels (`--min-iou`, default 0.8), and `cover`, the share of the original's pixels
   > the page covers (`--min-cover`, default 0.9). `house_agree` and `paint_grey` (painted texels must be grey) are
   > reported. Failing or missing frames keep their current page: 2x is the fallback per type and per frame.
+  `--exclude-index N` (repeatable) leaves the pixels of an indexed colour out of both measures: e.g. the infantry
+  contact-shadow footprint (unit-palette index 12), which the pages draw translucent like the 2x pages do.
 - Output: new pages under content names `sprites-hd<scale>x-<sha>.png` (indexed, a byte-exact copy of each accepted
   frame's indexed pixels), `…@<scale>x.png` / `…@<scale>x-remap.png`, and `…@<scale>x-normals.png` when the moved
   frames have material data (copied from `normals.json` at the source pages' material scale). Frames sharing a source
