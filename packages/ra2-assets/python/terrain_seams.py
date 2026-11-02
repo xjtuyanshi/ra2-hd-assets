@@ -18,15 +18,16 @@ shows a seam:
 
 tone    per chunk of `chunk` rows, |mean(D) right - mean(D) left| over `half` px on each side of every column
         boundary (D = luminance of the re-detail minus the reference), averaged over the chunks where both windows are
-        land. Tone drift between independently generated tiles or bands appears as a step at the same column in many
-        chunks; texture noise averages out.
+        land, as a mean that drops the largest 10 % (a content edge along the boundary). Tone drift between
+        independently generated tiles or bands appears as a step at the same column in many chunks; texture noise
+        averages out.
 detail  mean high-pass energy of the re-detail in a 2*`line` px line at each boundary. A cross-fade between two
         independent generations, or a pasted band edge, lowers (or raises) fine detail in a thin line.
 
 Both profiles are divided by the median of the same profile 12-48 px away on both sides (the tone profile by at
 least TONE_FLOOR); the detail ratio is also inverted so that a dip scores like a peak. Rows are the same computation on
-the transposed images. Boundaries with fewer than `min_chunks` usable chunks (map corners, mostly water) are not
-scored. Measured numbers are in the queue QA notes (build 12, XMP32S8); planted seams of the kinds above fail against
+the transposed images. Boundaries with fewer than `min_chunks` usable chunks (1024 px of land along the line; map
+corners, mostly water) are not scored. Measured numbers are in the queue QA notes (build 12, XMP32S8); planted seams of the kinds above fail against
 the queue's unchanged limit of 1.8.
 """
 
@@ -129,7 +130,7 @@ def _windows(sums: np.ndarray, counts: np.ndarray, start: np.ndarray, stop: np.n
 
 
 def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chunk: int = 64, half: int = 8,
-                    line: int = 2, min_chunks: int = 8,
+                    line: int = 2, min_chunks: int = 16, trim: float = 0.1,
                     tone_floor: float = TONE_FLOOR) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(tone ratio, detail ratio, scored) for the boundary left of every column. See the module docstring."""
     H, W = diff.shape
@@ -148,7 +149,16 @@ def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chun
     ok = (ln >= full) & (rn >= full)
     count = ok.sum(0)
     scored = count >= min_chunks
-    tone = np.where(ok, np.abs(rs / np.maximum(rn, 1) - ls / np.maximum(ln, 1)), 0).sum(0) / np.maximum(count, 1)
+    # Trimmed mean over the usable chunks: drop the largest `trim` share (at least one) so that a single content edge
+    # lying along the boundary (a cliff face, a shoreline) cannot carry a column whose land is only a few chunks long.
+    steps = np.where(ok, np.abs(rs / np.maximum(rn, 1) - ls / np.maximum(ln, 1)), -1.0)
+    steps.sort(0)
+    drop = np.where(count > 0, np.maximum(1, np.floor(count * trim)).astype(int), 0)
+    keep = count - drop
+    rank = np.arange(steps.shape[0])[:, None]
+    first = steps.shape[0] - count  # usable steps sit at the end after sorting (unusable ones are -1)
+    sel = (rank >= first[None, :]) & (rank < (first + keep)[None, :])
+    tone = np.where(sel, steps, 0).sum(0) / np.maximum(keep, 1)
     le, lc = _windows(SE, N, np.clip(x - line, 0, W), np.clip(x + line, 0, W))
     okl = ok & (lc >= chunk * 2 * line * 0.9)
     detail = np.where(okl, le / np.maximum(lc, 1), 0).sum(0) / np.maximum(okl.sum(0), 1)
@@ -158,7 +168,8 @@ def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chun
     return tone_ratio, detail_ratio, scored
 
 
-def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndarray, **kw) -> dict:
+def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndarray, profiles: bool = False,
+                **kw) -> dict:
     """Column and row seam scores of a re-detail against a seam-free reference of the same size.
 
     `land` should already exclude transparent and water pixels and be eroded a few pixels, so that the alpha and
@@ -178,4 +189,6 @@ def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndar
     for name, profile in (("tone_col", tc), ("detail_col", dc), ("tone_row", tr), ("detail_row", dr)):
         out[name], out[name + "_at"] = peak(profile)
     out.update(scored_cols=int(sc.sum()), scored_rows=int(sr.sum()))
+    if profiles:
+        out["profiles"] = {"tone_col": tc, "detail_col": dc, "tone_row": tr, "detail_row": dr}
     return out
