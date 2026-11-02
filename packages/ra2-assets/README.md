@@ -559,7 +559,8 @@ tiles are gone), keeping the base's water pixels and alpha.
 
 `python/terrain_seams.py` scores tile and band seams of a result against a seam-free reference with the original's
 content (the edge-bled scale-1 composite upscaled with Lanczos) on eroded land: a tone-step profile (per 64-row chunk,
-the luminance-difference step across each column boundary, averaged over chunks) and a detail-line profile (fine
+the luminance-difference step across each column boundary, a mean over at least 16 land chunks that drops the largest
+10 %, so one cliff face or shoreline along the line cannot carry it) and a detail-line profile (fine
 high-pass energy in a 4 px line), each divided by the median of the profile 12-48 px away; rows use the transposed
 images. A per-pixel gradient of `|result - Real-ESRGAN|` is not a usable seam metric: on XMP32S8 it peaked on the map
 border's cell staircase and on the snow tiles' once-per-cell feature, and scored planted tile seams only 1.1-1.2.
