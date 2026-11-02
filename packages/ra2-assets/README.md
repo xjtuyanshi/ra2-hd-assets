@@ -545,7 +545,29 @@ Defaults: `--gen-scale 4 --hybrid-alpha 1 --hybrid-sigma 4 --strength 0.6 --cont
 prompts. `--blend` limits each tile cross-fade to a band centred in the overlap, so the edge-anchored last row and
 column do not average two generations over most of a tile. Omit `--region` for the whole map (about 160 tiles of
 roughly 37 s on an M5 Pro for XMP29U2). `--dry-run` replaces diffusion with identity for pipeline checks; post-processing
-options (`--blend`, colour sigmas, `--margin`) reuse the cached tiles, so they can be changed without the GPU.
+options (`--blend`, colour sigmas, `--margin`, `--speckle-guard`) reuse the cached tiles, so they can be changed without
+the GPU.
+
+`--speckle-guard` (off by default) handles original tiles that are a high-contrast speckle at the pixel scale, such as
+the snow theatre's snow/grass mix: their 1-3 px clusters sit at SDXL's latent cell size at 4x, and the model draws them
+as outlined, embossed loops that repeat once per cell (a wormy pattern judged at 1:1 on XMP32S8). Where the source has
+that texture (strong, dense sigma-1 luminance contrast much stronger than the sigma 4-12 structure), the result is
+replaced by the original upscaled with Lanczos. The thresholds are calibrated on the snow theatre only; on temperate
+XMP27T8 they would catch cliff tops and part of the grass, so enable the guard per map or theatre.
+`--guard-existing PATH` applies the guard to an already composed full-size result without diffusion (for maps whose
+tiles are gone), keeping the base's water pixels and alpha.
+
+`python/terrain_seams.py` scores tile and band seams of a result against a seam-free reference with the original's
+content (the edge-bled scale-1 composite upscaled with Lanczos) on eroded land: a tone-step profile (per 64-row chunk,
+the luminance-difference step across each column boundary, a mean over at least 16 land chunks that drops the largest
+10 %, so one cliff face or shoreline along the line cannot carry it) and a detail-line profile (fine
+high-pass energy in a 4 px line), each divided by the median of the profile 12-48 px away; rows use the transposed
+images. A per-pixel gradient of `|result - Real-ESRGAN|` is not a usable seam metric: on XMP32S8 it peaked on the map
+border's cell staircase and on the snow tiles' once-per-cell feature, and scored planted tile seams only 1.1-1.2.
+
+```bash
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_seams.py'
+```
 
 ## Tiled terrain, lake shores and cliff feet (Python)
 
