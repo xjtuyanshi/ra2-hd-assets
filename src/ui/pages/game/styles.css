@@ -67,6 +67,12 @@ canvas {
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
 }
+/* The game picture always stacks above the ambient side fill (positioned, z-index 0), so a stale fill clip can never
+   reach the picture, with or without the HD bridge (which raises #screen the same way). */
+#screen {
+  position: relative;
+  z-index: 1;
+}
 /* Pointer Lock hides the browser cursor. An amber outer border and four corner brackets provide a persistent, gently pulsing lock indicator without obscuring the frame. A top pill briefly says to press Esc to unlock, then fades after a few seconds. */
 #screen-frame {
   position: relative;
