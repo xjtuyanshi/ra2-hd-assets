@@ -56,14 +56,14 @@ describe('vehicle look gains', () => {
     const cinematic = LOOK_PRESETS.cinematic.settings;
     // The scene gains stay the approved terrain / building calibration.
     expect(cinematic).toMatchObject({ sunGain: 1.25, specularSize: 1.6, aoPower: 1.5 });
-    // Vehicles: the scene's sun weight and AO power, a much smaller highlight (1.1 instead of 1.6: glint intensity
-    // x1.21 instead of x2.56) and a small exposure that returns the hull median the wider glint used to supply.
-    expect(cinematic).toMatchObject({ vehicleSunGain: null, vehicleAoPower: null });
+    // Vehicles: the scene's sun weight and AO power and a much smaller highlight (1.1 instead of 1.6: glint intensity
+    // x1.21 instead of x2.56); no extra exposure (1.08 flattened the hull's contrast for no gain in the medians).
+    expect(cinematic).toMatchObject({ vehicleSunGain: null, vehicleAoPower: null, vehicleExposure: 1 });
     expect(vehicleLookGains(cinematic as HdSettings, true)).toEqual({
       sunGain: 1.25,
       specularSize: 1.1,
       aoPower: 1.5,
-      exposure: 1.08,
+      exposure: 1,
     });
     for (const preset of ['faithful', 'golden'] as const) {
       const settings = LOOK_PRESETS[preset].settings as HdSettings;
@@ -100,7 +100,7 @@ describe('vehicle look gains', () => {
       frame.lighting.update(16.5, 0);
       frame.updateSpriteLook(1, 0);
       expect([voxels.sunGain.value, voxels.specularSize.value, voxels.aoPower.value, voxels.exposure.value]).toEqual([
-        1.25, 1.1, 1.5, 1.08,
+        1.25, 1.1, 1.5, 1,
       ]);
       // Every numeric and colour uniform of the sprite look (terrain, buildings, infantry, relighting), bit for bit.
       const snapshot = () =>
