@@ -530,6 +530,12 @@ test('a failed first initialization that leaves system.reg is retried until its 
   await prepareWinePrefix(await wineConfiguration(env), dir, command, () => {});
   assert.equal(attempts, 2);
   assert.equal(JSON.parse(await readFile(join(prefix, '.ra2-native-prefix.json'), 'utf8')).winebootCompleted, true);
+  // After a restart macOS may renumber the volume; the same directory (same inode) stays the launcher's own.
+  const marker = join(prefix, '.ra2-native-prefix.json');
+  const owner = JSON.parse(await readFile(marker, 'utf8'));
+  await writeFile(marker, JSON.stringify({ ...owner, dev: owner.dev + 4 }) + '\n');
+  await prepareWinePrefix(await wineConfiguration(env), dir, command, () => {});
+  assert.equal(attempts, 2);
 });
 
 test('foreign files, symlink prefixes and copied ownership markers cannot be claimed', async (t) => {
@@ -540,6 +546,10 @@ test('foreign files, symlink prefixes and copied ownership markers cannot be cla
   const env = { RA2_NATIVE_WINE: process.execPath, RA2_NATIVE_WINE_PREFIX: prefix };
   await assert.rejects(wineConfiguration(env), /找不到已有的 Wine 文件夹/);
   await writeFile(join(prefix, '.ra2-native-prefix.json'), JSON.stringify({ version: 1, dev: 0, ino: 0 }));
+  await assert.rejects(wineConfiguration(env), /标记与目录不符/);
+  // A marker copied from another prefix keeps that prefix's inode, even when the device matches.
+  const { dev } = await lstat(prefix);
+  await writeFile(join(prefix, '.ra2-native-prefix.json'), JSON.stringify({ version: 1, dev, ino: 1 }));
   await assert.rejects(wineConfiguration(env), /标记与目录不符/);
   const alias = join(dir, 'alias');
   await symlink(prefix, alias, 'dir');

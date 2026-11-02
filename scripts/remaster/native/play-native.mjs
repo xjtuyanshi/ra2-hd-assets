@@ -331,7 +331,11 @@ async function inspectWinePrefix(prefix) {
     } catch (error) {
       throw new Error(`Wine 文件夹的启动器标记无法读取；为保留已有环境，不会修改：${prefix}。`, { cause: error });
     }
-    owned = owner?.version === 1 && owner.dev === info.dev && owner.ino === info.ino;
+    // The inode identifies the directory the marker was written for: a copied or moved-in marker sits in a directory
+    // with another inode. The device number is not compared: macOS renumbers APFS volumes across restarts (a prefix
+    // claimed as dev 16777230 read back as 16777234 after a reboot with the same inode), which locked owners out of
+    // their own prefix.
+    owned = owner?.version === 1 && owner.ino === info.ino;
     if (!owned) throw new Error(`Wine 文件夹的启动器标记与目录不符；不会修改：${prefix}。`);
   }
   return {
