@@ -60,7 +60,7 @@ export function voxelLookParams(params: URLSearchParams): {
  * Sandbox parameters of the enhanced look: ?look=faithful|golden|cinematic picks a preset (the enhanced presets also
  * move the hour to their afternoon unless ?time is given); single settings override it: ?relight= ?spec= ?glass= ?ao=
  * ?shfollow= ?shsoft= ?wetrefl= ?contrast= ?sunpath=fixed|arc ?adapt= ?vsheen= ?vsheencap= ?vao=;
- * voxel units' own gains: ?vsungain= ?vspecsize= ?vaopower= ?vexposure=. Call before HdRenderer.init().
+ * voxel units' own gains: ?vsungain= ?vspecsize= ?vaopower= ?vexposure= ?vgbal= ?vtop=. Call before HdRenderer.init().
  * Display grade: ?wbadapt= ?gbal=r,g,b ?gcon= ?glift= ?gsat= ?gshadow=r,g,b ?ghigh=r,g,b.
  */
 export function applyLookParams(hd: HdRenderer, params: URLSearchParams, state: RenderState): void {
@@ -108,6 +108,8 @@ export function applyLookParams(hd: HdRenderer, params: URLSearchParams, state: 
     ['vspecsize', 'vehicleSpecularSize'],
     ['vaopower', 'vehicleAoPower'],
     ['vexposure', 'vehicleExposure'],
+    ['vgbal', 'vehicleGradeBalance'],
+    ['vtop', 'vehicleTopGain'],
   ];
   const settings = hd.settings as unknown as Record<string, unknown>;
   for (const [param, key] of numbers) {

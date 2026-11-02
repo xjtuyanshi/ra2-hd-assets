@@ -32,6 +32,7 @@ import {
   positionWorld,
   roughness,
   sRGBTransferEOTF,
+  smoothstep,
   step,
   texture,
   uniform,
@@ -98,6 +99,28 @@ export const ENGINE_SPECULAR = 3;
  * world axes as (map x, -map y, up) and HD axes as (map x, up, map y) gives about (0.201, -0.362, 0.910). Checked per
  * pixel against captures of the original: a free light search lands within 6 degrees of it.
  */
+/** Up component of a voxel unit's normal where the top gain starts to apply, and where it applies in full. */
+const TOP_START = 0.6;
+const TOP_FULL = 0.95;
+
+/**
+ * The look's finish on a voxel unit's colour (every voxel material: engine look, remaster and projected redraws):
+ * exposure, white balance and the top gain on upward-facing surfaces (`normal`: world normal, y up). With every gain
+ * at 1 the colour is unchanged.
+ */
+export function voxelLookFinish(colour: ShaderNode, gains: VoxelLightingState, normal: ShaderNode): ShaderNode {
+  const top: ShaderNode = smoothstep(TOP_START, TOP_FULL, normal.y);
+  return colour
+    .mul(gains.exposure)
+    .mul(gains.whiteBalance)
+    .mul(mix(1, gains.topGain, top));
+}
+
+/** Water reflections of a voxel unit: exposure and white balance (they show its underside, so no top gain). */
+export function voxelReflectionFinish(colour: ShaderNode, gains: VoxelLightingState): ShaderNode {
+  return colour.mul(gains.exposure).mul(gains.whiteBalance);
+}
+
 export function derivedVoxelLight(out = new Vector3()): Vector3 {
   const [lx, ly, lz] = ENGINE_VOXEL_LIGHT;
   const m = ENGINE_VOXEL_VIEW;
@@ -166,6 +189,10 @@ export class VoxelLightingState {
   readonly aoPower = uniform(1);
   /** Linear gain on the finished voxel unit colour (HdSettings.vehicleExposure; 1 = none). */
   readonly exposure = uniform(1);
+  /** Per-channel gain on the finished voxel unit colour (HdRenderer vehicleBalanceGain; white = none). */
+  readonly whiteBalance = uniform(new Color(1, 1, 1));
+  /** Gain on upward-facing voxel surfaces (HdSettings.vehicleTopGain; 1 = none). */
+  readonly topGain = uniform(1);
   readonly lightDirection = uniform(derivedVoxelLight());
   loaded: LoadedTable | null = null;
   loading: Promise<boolean> | null = null;
@@ -480,7 +507,13 @@ function createGraph(
   // one graph, so a unit under the Iron Curtain compiles nothing.
   material.outputNode = Fn(() =>
     vec4(
-      applyObjectTint(output.rgb.mul(state.exposure), meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight),
+      applyObjectTint(
+        voxelLookFinish(output.rgb, state, normalWorld),
+        meshObjectTint.x,
+        meshObjectTint.y,
+        level,
+        look.unlitBaseLight,
+      ),
       output.a,
     ),
   )();
@@ -527,7 +560,7 @@ function createGraph(
     }
     // The exact source emissive term is a lower bound on its complete (nonnegative) lighting. Clamp to that
     // bound so darker source faces stay dark; direct sun/glints above never add radiance to the water twin.
-    return voxelReflectionAmbient(albedo, voxelFill, ceiling).mul(state.exposure);
+    return voxelReflectionFinish(voxelReflectionAmbient(albedo, voxelFill, ceiling), state);
   });
   return { prototype: material, lookup: lut, projection };
 }

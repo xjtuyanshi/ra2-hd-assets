@@ -745,7 +745,7 @@ Snow stays dry and ground weather excludes building foundations and steep cells.
 `hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and its suggested hour unless `hd-time` is given (authored dusk maps keep their own hour; night
 maps are day maps with night dressing and take it; `cinematic` is the approved look with medium cooling, whose
-vehicles take their own highlight size and exposure, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water
+vehicles take their own exposure, top gain and grade balance share, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water
 (on maps staged as dusk or night, water keeps the tone the map paints it in under either setting; see the water notes
 in `packages/hd-renderer/README.md`);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under

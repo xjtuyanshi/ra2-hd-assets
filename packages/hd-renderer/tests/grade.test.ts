@@ -169,9 +169,10 @@ describe('cinematic preset and sandbox parameters', () => {
           'shadowDarkness',
           'infantryShadow',
           'clarity',
-          // The vehicles' own highlight size and exposure (tests/vehicleLook.test.ts).
-          'vehicleSpecularSize',
+          // The vehicles' own exposure, grade balance share and top gain (tests/vehicleLook.test.ts).
           'vehicleExposure',
+          'vehicleGradeBalance',
+          'vehicleTopGain',
         ].includes(key) ||
         key in neutralGrade()
       )

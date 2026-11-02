@@ -224,6 +224,18 @@ export interface HdSettings extends CinematicGradeParams {
   vehicleAoPower: number | null;
   /** Linear gain on the finished voxel unit colour in an enhanced look (1 = none; the faithful branch keeps 1). */
   vehicleExposure: number;
+  /**
+   * Share of the display grade's colour balance (`gradeBalance`) that voxel units keep in an enhanced look: 1 = the
+   * same balance as everything else, 0 = the balance divided out of the finished voxel colour (a gain normalised to
+   * keep the Rec.709 luminance of grey, following the grade's airless and night fades, see vehicleBalanceGain). The
+   * faithful branch keeps 1. The split tones, contrast and saturation of the grade still apply.
+   */
+  vehicleGradeBalance: number;
+  /**
+   * Gain on the upward-facing surfaces of voxel units in an enhanced look (weighted by the up component of the
+   * normal, see ra2/vpl.ts voxelLookFinish); 1 = none, and the faithful branch keeps 1. Water reflections skip it.
+   */
+  vehicleTopGain: number;
 }
 
 /** Effective voxel unit gains of a look (see HdSettings.vehicleSunGain); `enhanced` is the look's enhanced branch. */
@@ -237,16 +249,48 @@ export function vehicleLookGains(
     | 'vehicleSpecularSize'
     | 'vehicleAoPower'
     | 'vehicleExposure'
+    | 'vehicleGradeBalance'
+    | 'vehicleTopGain'
   >,
   enhanced: boolean,
-): { sunGain: number; specularSize: number; aoPower: number; exposure: number } {
-  if (!enhanced) return { sunGain: 1, specularSize: 1, aoPower: 1, exposure: 1 };
+): {
+  sunGain: number;
+  specularSize: number;
+  aoPower: number;
+  exposure: number;
+  gradeBalance: number;
+  topGain: number;
+} {
+  if (!enhanced) return { sunGain: 1, specularSize: 1, aoPower: 1, exposure: 1, gradeBalance: 1, topGain: 1 };
   return {
     sunGain: settings.vehicleSunGain ?? settings.sunGain,
     specularSize: settings.vehicleSpecularSize ?? settings.specularSize,
     aoPower: settings.vehicleAoPower ?? settings.aoPower,
     exposure: settings.vehicleExposure,
+    gradeBalance: settings.vehicleGradeBalance,
+    topGain: settings.vehicleTopGain,
   };
+}
+
+/**
+ * The gain that leaves voxel units `share` of the display grade's colour balance. `balance` is the balance the
+ * grade applies (its uniform: 1 on airless maps) and `weight` the grade's share of the display (1 - night fade; 0
+ * when the pipeline has no grade). Per channel (b_i / luma(b))^((share - 1) * weight), normalised to keep the Rec.709
+ * luminance of grey: the grade normalises its balance the same way, so at share 0 the product is grey-neutral.
+ */
+export function vehicleBalanceGain(
+  balance: readonly [number, number, number],
+  weight: number,
+  share: number,
+  out: Color = new Color(),
+): Color {
+  const w = Math.min(1, Math.max(0, weight));
+  const level = 0.2126 * balance[0] + 0.7152 * balance[1] + 0.0722 * balance[2];
+  if (w <= 0 || share === 1 || !(level > 1e-6)) return out.setRGB(1, 1, 1);
+  const k = (share - 1) * w;
+  const g = balance.map((v) => Math.max(1e-6, v / level) ** k) as [number, number, number];
+  const grey = 0.2126 * g[0] + 0.7152 * g[1] + 0.0722 * g[2];
+  return out.setRGB(g[0] / grey, g[1] / grey, g[2] / grey);
 }
 
 /** Named looks, including the approved S2 direction with medium cooling (settings plus a suggested hour). */
@@ -271,6 +315,8 @@ type LookSettings = Partial<HdSettings> &
     | 'vehicleSpecularSize'
     | 'vehicleAoPower'
     | 'vehicleExposure'
+    | 'vehicleGradeBalance'
+    | 'vehicleTopGain'
   >;
 
 const GOLDEN_SETTINGS: LookSettings = {
@@ -301,6 +347,8 @@ const GOLDEN_SETTINGS: LookSettings = {
   vehicleSpecularSize: null,
   vehicleAoPower: null,
   vehicleExposure: 1,
+  vehicleGradeBalance: 1,
+  vehicleTopGain: 1,
   whiteAdapt: 0,
   mapTintAdapt: 0,
   mapSourcesByDay: 1,
@@ -337,6 +385,8 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       vehicleSpecularSize: null,
       vehicleAoPower: null,
       vehicleExposure: 1,
+      vehicleGradeBalance: 1,
+      vehicleTopGain: 1,
       whiteAdapt: 0,
       mapTintAdapt: 0,
       mapSourcesByDay: 1,
@@ -366,17 +416,25 @@ export const LOOK_PRESETS: Record<LookPreset, { settings: LookSettings; hour?: n
       // instead of the original's solid black blob: see INFANTRY_SHADOW_OPACITY for the measurements and the
       // owner's feedback.
       infantryShadow: INFANTRY_SHADOW_SOFT_OPACITY,
-      // Vehicles keep the scene's sun and AO power but not its highlight size. specularSize 1.6 was set on terrain
-      // and buildings; on the projected vehicle redraws it widens the camera glint and multiplies it by 2.56, which
-      // turned light top decks white at some facings (frozen same-moment pairs, owner's look, snow / temperate /
-      // lunar pads and the player's units at facing 0: HD/original hull p90 x1.13 median, up to x1.36 on a Lasher,
-      // light share +3 points, while the medians matched). 1.1 with a small exposure that returns the hull median
-      // the wider glint used to supply: hull median x0.99, dark share -0.1 points, p90 x0.96 over 148 pad and water
-      // cells; at facing 0 p90 x1.07 (max x1.20). Sun weight and AO power had no measurable effect on these numbers.
+      // Vehicles (voxel units) take the scene's sun, highlight size and AO power, minus the grade's cool balance and
+      // with dimmer tops. Frozen same-moment native / HD pairs under the owner's look with the chroma-restored redraw
+      // pages (19 states on Xroulette and DeepFrze snow, Unrepent temperate, MoonPatr lunar; 202 hull cells, 370 units
+      // split into faces by the voxel debug normals):
+      // - gradeBalance [0.955, 1, 1.085] put hull b* 1.7 below the original's (snow 2.4, temperate 1.8; lunar 0, where
+      //   airless maps skip the balance). It cools the whole scene alike (terrain -2.8, near buildings -5.2 against the
+      //   original), which this look keeps; vehicles drop the balance (vehicleGradeBalance 0): hull b* -1.7 -> -0.2.
+      // - The redraw pages carry an overhead light: top faces as bright as the engine-lit sides (median ratio 0.89 on
+      //   the page, 0.72 in the original, 0.83 drawn), so light decks read white (top p90 x1.06, Lasher x1.29) while
+      //   the lit sides stay dark (p50 x0.92). Highlight size 1.6 brightens the sides and the contrast (hull luma std
+      //   x0.93 -> x0.98, lit side p50 x0.99) and the top gain 0.75 takes the decks back (top p50 / p90 x0.99 / x1.04);
+      //   exposure 1.04 returns the hull median (x0.99, dark share +0.9 points, p90 x0.99).
+      // A highlight size of 1.1 without the top gain (the previous setting) kept the decks white and the hulls flat.
       vehicleSunGain: null,
-      vehicleSpecularSize: 1.1,
+      vehicleSpecularSize: null,
       vehicleAoPower: null,
-      vehicleExposure: 1.08,
+      vehicleExposure: 1.04,
+      vehicleGradeBalance: 0,
+      vehicleTopGain: 0.75,
       // L5 depth pass (scratchpad finallook5/light, metrics against the battle and park targets): the band-pass clarity
       // brings mid-scale local contrast to the battle target's (|blur2 - blur8| of L* 5.0 -> 5.7, target 5.7) without
       // pixel-scale grain; a gentler S-curve with a higher pivot lifts the too-dark mid-tones and deep-shade share
@@ -722,6 +780,8 @@ export class HdRenderer {
     vehicleSpecularSize: null,
     vehicleAoPower: null,
     vehicleExposure: 1,
+    vehicleGradeBalance: 1,
+    vehicleTopGain: 1,
   };
   /** Night presentation: map lights, HD lamps, windows, mist, night level (changeable at runtime). */
   readonly atmosphere: AtmosphereSettings = { ...DEFAULT_ATMOSPHERE_SETTINGS };
@@ -1928,6 +1988,14 @@ export class HdRenderer {
     voxels.specularSize.value = vehicles.specularSize;
     voxels.aoPower.value = vehicles.aoPower;
     voxels.exposure.value = vehicles.exposure;
+    voxels.topGain.value = vehicles.topGain;
+    const balance = this.gradeUniforms.gradeBalance.value;
+    vehicleBalanceGain(
+      [balance.x, balance.y, balance.z],
+      hasCinematicGrade(s) && s.debugView === 'none' ? 1 - this.nightDisplay.value : 0,
+      vehicles.gradeBalance,
+      voxels.whiteBalance.value,
+    );
     for (const pass of look.groundPasses) pass.visible = on;
     updateUnlitSpriteLook(look, s);
     if (!on) {

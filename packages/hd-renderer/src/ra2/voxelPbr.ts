@@ -47,7 +47,7 @@ import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrad
 import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookState } from './spriteLook';
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
-import { voxelLightingFor, type VoxelLightingState } from './vpl';
+import { voxelLightingFor, voxelLookFinish, voxelReflectionFinish, type VoxelLightingState } from './vpl';
 import { inheritSlotBinder, slotMaterial, textureSlot } from '../materialSlots';
 import { setSilhouette } from '../silhouette';
 import { applyObjectTint, meshObjectTint } from '../objectTint';
@@ -430,7 +430,13 @@ function createGraph(
   // The drawn unit's picture tint (objectTint.ts) on the finished colour: per-mesh data of this one graph.
   material.outputNode = Fn(() =>
     vec4(
-      applyObjectTint(output.rgb.mul(gains.exposure), meshObjectTint.x, meshObjectTint.y, level, look.unlitBaseLight),
+      applyObjectTint(
+        voxelLookFinish(output.rgb, gains, normalWorld),
+        meshObjectTint.x,
+        meshObjectTint.y,
+        level,
+        look.unlitBaseLight,
+      ),
       output.a,
     ),
   )();
@@ -482,7 +488,7 @@ function createGraph(
       // Keep the ambient attenuation on the ceiling, leaving headroom for the physical BRDF's Fresnel loss.
       .mul(VOXEL_REFLECTION_AMBIENT);
     const ambient: ShaderNode = hemisphere.mul(float(1).sub(surfaceMetalness(reflectedSurface)));
-    return voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor).mul(gains.exposure);
+    return voxelReflectionFinish(voxelReflectionAmbient(gradedSurface(reflectedSurface), ambient, diffuseFloor), gains);
   });
   return { prototype: material, lookup: lut };
 }
