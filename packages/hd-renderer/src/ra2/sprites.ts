@@ -25,11 +25,14 @@ import {
   cameraNear,
   clamp,
   cos,
+  dFdx,
+  dFdy,
   exp,
   float,
   floor,
   attribute,
   length,
+  log2,
   max,
   min,
   mix,
@@ -65,7 +68,7 @@ import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
 import { bindUnlitSpriteMaterial } from './unlitSprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
-import { type HdAtlas, type Ra2Cache } from './cache';
+import { hdSupersampled, type HdAtlas, type Ra2Cache } from './cache';
 import { mapLightAt, srgbScale } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT, SPRITE_DECAL_LIFT_ROWS } from './cardDepth';
@@ -297,10 +300,20 @@ export function cardPush(frame: SpriteFrame): number {
   return below * Math.sqrt(3) + 0.03;
 }
 
+/** Explicit-LOD taps of the supersampled HD minification, in pixels from the centre (HD_SUPERSAMPLE_ABOVE_SCALE). */
+const HD_SUPERSAMPLE_TAPS: readonly (readonly [number, number])[] = [
+  [-0.25, -0.25],
+  [0.25, -0.25],
+  [-0.25, 0.25],
+  [0.25, 0.25],
+];
+
 /** What changes a sprite layer's shader (as opposed to the data it draws). */
 interface SpriteGraphFeatures {
   /** HD colour page and house-paint mask (else the indexed page through the palette). */
   hd: boolean;
+  /** The HD pair is minified with supersampled taps (pages above HD_SUPERSAMPLE_ABOVE_SCALE). */
+  hdSupersample: boolean;
   /** The HD page's house-paint saturation; below 1 it adds nodes. */
   paintSaturation: number;
   windows: boolean;
@@ -693,8 +706,33 @@ class SpriteGraph {
           litAlpha = edge.toVar();
           art = vec4(lit.add(litGlow), litAlpha);
         } else {
-          const hdArt: ShaderNode = texture(hdColour, atlasUv);
-          const hdPaint: ShaderNode = texture(hdRemap, atlasUv).r;
+          let hdArt: ShaderNode;
+          let hdPaint: ShaderNode;
+          if (!features.hdSupersample) {
+            hdArt = texture(hdColour, atlasUv);
+            hdPaint = texture(hdRemap, atlasUv).r;
+          } else {
+            // See HD_SUPERSAMPLE_ABOVE_SCALE. The footprint is measured in HD texels; colour is averaged weighted by
+            // alpha (the pages hold straight alpha, so a transparent tap must not pull its bled colour in).
+            const dx: ShaderNode = dFdx(atlasUv).toVar();
+            const dy: ShaderNode = dFdy(atlasUv).toVar();
+            const hdSize: ShaderNode = atlasSize.mul(this.hdScale);
+            const footprint: ShaderNode = max(length(dx.mul(hdSize)), length(dy.mul(hdSize)));
+            const lod: ShaderNode = max(log2(max(footprint, 1e-6)).sub(1), 0).toVar();
+            const rgb: ShaderNode = vec3(0).toVar();
+            const alpha: ShaderNode = float(0).toVar();
+            const paintSum: ShaderNode = float(0).toVar();
+            for (const [sx, sy] of HD_SUPERSAMPLE_TAPS) {
+              const at: ShaderNode = atlasUv.add(dx.mul(sx)).add(dy.mul(sy));
+              const tap: ShaderNode = texture(hdColour, at).level(lod).toVar();
+              rgb.addAssign(tap.rgb.mul(tap.a));
+              alpha.addAssign(tap.a);
+              paintSum.addAssign(texture(hdRemap, at).level(lod).r);
+            }
+            const taps = HD_SUPERSAMPLE_TAPS.length;
+            hdArt = vec4(rgb.div(max(alpha, 1e-5)), alpha.div(taps));
+            hdPaint = paintSum.div(taps);
+          }
           const sourcePaint: ShaderNode = indexedHousePaint.mul(step(15.5, index)).mul(step(index, 31.5));
           const paint: ShaderNode = max(hdPaint, sourcePaint);
           // House paint was written as grey(i) = 255 - (i - 16) * 15 in sRGB; invert it to a fractional remap index and
@@ -1034,6 +1072,7 @@ function spriteGraphFor(cache: Ra2Cache, features: SpriteGraphFeatures): SpriteG
   if (!graphs) spriteGraphs.set(cache, (graphs = new Map()));
   const key = [
     features.hd ? `hd${features.paintSaturation < 1 ? features.paintSaturation : ''}` : 'indexed',
+    features.hdSupersample ? 'supersample' : '',
     features.windows ? 'windows' : '',
     features.materials ? 'materials' : '',
     objectId(features.capture),
@@ -1150,8 +1189,11 @@ export class SpriteLayer {
 
     // The shader is the graph's, shared by every layer with the same features: this layer brings its instance
     // buffers (attributes of its geometry, read by name) and its pages (bound to the graph's slots before each draw).
+    // Use colour-atlas pixels, not material pixels: material sidecars may have a different resolution.
+    const hdScale = hd ? ((hd.color.image as { width?: number } | null)?.width ?? atlas.width) / atlas.width : 1;
     const graph = spriteGraphFor(cache, {
       hd: !!hd,
+      hdSupersample: hdSupersampled(hd, hdScale),
       paintSaturation: hd ? (hd.paintSaturation ?? 1) : 1,
       windows: !!windows,
       materials: !!materials,
@@ -1181,8 +1223,6 @@ export class SpriteLayer {
     if (capture) geometry.setAttribute('spriteCaptureCode', new InterleavedBufferAttribute(flags, 1, 8));
     geometry.setAttribute('spriteNative', new InterleavedBufferAttribute(flags, 4, nativeOffset));
     geometry.setAttribute('spriteNativeOffset', new InterleavedBufferAttribute(flags, 4, nativeOffset + 4));
-    // Use colour-atlas pixels, not material pixels: material sidecars may have a different resolution.
-    const hdScale = hd ? ((hd.color.image as { width?: number } | null)?.width ?? atlas.width) / atlas.width : 1;
     const bind = (): void => {
       graph.atlasPage.value = atlas.texture;
       (graph.atlasSize.value as Vector2).set(atlas.width, atlas.height);

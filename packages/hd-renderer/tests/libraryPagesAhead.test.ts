@@ -214,7 +214,7 @@ describe('atlas pages fetched ahead of their first use', () => {
   it('lists the looks its HD pages can have without loading one', async () => {
     const { lib, requested } = await library();
     // Three HD pages, none with a material page or a lit-window mask in this library: one look.
-    expect(lib.hdPageLooks()).toEqual([{ paintSaturation: 1, materials: false, windows: false }]);
+    expect(lib.hdPageLooks()).toEqual([{ paintSaturation: 1, materials: false, windows: false, supersample: false }]);
     expect(requested()).toEqual([]);
   });
 

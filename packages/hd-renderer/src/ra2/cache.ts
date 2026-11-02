@@ -213,6 +213,10 @@ export interface Ra2CacheOptions {
 export interface HdAtlasRef {
   file: string;
   remap: string;
+  /**
+   * HD texels per indexed texel (an integer, 2 for the stock pages). UVs never use it: the page covers exactly the
+   * indexed page's layout. Pages above 2 are minified with a supersampled filter (see HD_SUPERSAMPLE_ABOVE_SCALE).
+   */
   scale: number;
   width: number;
   height: number;
@@ -220,10 +224,27 @@ export interface HdAtlasRef {
   paintSaturation?: number;
 }
 
+/**
+ * HD pages of a scale above this are minified with four explicit-LOD taps per pixel instead of one
+ * trilinear sample (ra2/sprites.ts). A 4x page at the 2.5 device px per game px view has 1.6 page texels per device pixel: trilinear
+ * filtering then takes about two thirds of its colour from the box-filtered first mip, which is a 2x page, so most of
+ * the extra resolution never reached the screen. Four taps at mip 0 (a quarter pixel from the centre along the
+ * screen axes, each covering half the pixel's footprint) approximate an area filter of the footprint instead, and move
+ * to coarser mips only when the footprint exceeds two texels. The stock 2x pages keep their single sample (their
+ * shader is unchanged).
+ */
+export const HD_SUPERSAMPLE_ABOVE_SCALE = 2;
+/** Whether an HD pair takes the supersampled minification (its declared scale, else the measured one). */
+export function hdSupersampled(hd: Pick<HdAtlas, 'scale'> | null, measuredScale: number): boolean {
+  return !!hd && (hd.scale ?? measuredScale) > HD_SUPERSAMPLE_ABOVE_SCALE;
+}
+
 /** Loaded HD page textures and its optional house-paint grade. */
 export interface HdAtlas {
   color: Texture;
   remap: Texture;
+  /** HdAtlasRef.scale; absent means 2. It selects the minification filter only (see HD_SUPERSAMPLE_ABOVE_SCALE). */
+  scale?: number;
   /** House-paint saturation, 0..1; absent means 1 (no additional shader nodes). */
   paintSaturation?: number;
 }
@@ -311,7 +332,7 @@ export async function loadHdAtlas(base: string, ref: HdAtlasRef, upload?: PageUp
     throw failed.reason;
   }
   const [color, remap] = pages.map((page) => (page as PromiseFulfilledResult<Texture>).value) as [Texture, Texture];
-  return { color, remap, paintSaturation: ref.paintSaturation ?? 1 };
+  return { color, remap, paintSaturation: ref.paintSaturation ?? 1, scale: ref.scale };
 }
 
 /**

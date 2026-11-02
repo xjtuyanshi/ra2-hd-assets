@@ -152,8 +152,13 @@ export interface SpriteAtlasHdRef extends AtlasRef {
   file: string;
   /** Single-channel soft house-remap mask, matching the colour atlas dimensions. */
   remap: string;
-  /** Frame rectangles and atlas dimensions are exactly twice their indexed source values. */
-  scale: 2;
+  /**
+   * HD texels per indexed texel, an integer of at least 2: the page has exactly `scale` times the indexed page's
+   * dimensions and the same layout, so every frame rectangle maps to `scale` times itself. `hd:sprites` writes 2;
+   * higher-resolution redraws (e.g. 4x infantry, python/sprite_hd_pages.py) live on pages of their own, which a sprite
+   * entry's frames reference frame by frame, so 2x stays the fallback per type and per frame.
+   */
+  scale: number;
   /** House-paint saturation in linear light, 0..1; absent means 1. Preserves Rec.709 luminance. */
   paintSaturation?: number;
 }

@@ -12,6 +12,7 @@ import {
 import {
   addPalette,
   fetchOptionalJson,
+  hdSupersampled,
   loadHdAtlas,
   loadMaskTexture,
   readPalettePng,
@@ -32,6 +33,15 @@ export const LIBRARY_PALETTE_PREFIX = 'lib:';
 type Pending = 'loading' | 'ahead' | 'failed';
 
 /** An indexed atlas page as the sprite layers take it. */
+/** One distinct shader look of the library's HD pages (LiveLibrary.hdPageLooks). */
+export interface HdPageLook {
+  paintSaturation: number;
+  materials: boolean;
+  windows: boolean;
+  /** The page's scale is above HD_SUPERSAMPLE_ABOVE_SCALE (ra2/cache.ts); absent means false. */
+  supersample?: boolean;
+}
+
 export interface IndexedPage {
   texture: Texture;
   width: number;
@@ -372,20 +382,21 @@ export class LiveLibrary {
   /**
    * The distinct looks the HD layers of this library's pages can have, read from the library's own records without
    * loading a page: house-paint saturation, whether a compatible material page exists, whether a lit-window mask
-   * exists. Each is a shader graph of its own (ra2/sprites.ts SpriteGraph); a view builds them before it is shown
+   * exists, whether the page's scale takes the supersampled minification. Each is a shader graph of its own (ra2/sprites.ts SpriteGraph); a view builds them before it is shown
    * (LiveView.warmStandIns).
    */
-  hdPageLooks(): { paintSaturation: number; materials: boolean; windows: boolean }[] {
+  hdPageLooks(): HdPageLook[] {
     const refs = (this.library as TypeLibrary & { spriteAtlasesHd?: (HdAtlasRef | null)[] }).spriteAtlasesHd ?? [];
-    const looks = new Map<string, { paintSaturation: number; materials: boolean; windows: boolean }>();
+    const looks = new Map<string, HdPageLook>();
     refs.forEach((ref, index) => {
       if (!ref) return;
       const look = {
         paintSaturation: ref.paintSaturation ?? 1,
         materials: this.hasMaterialsPage(index),
         windows: this.hasWindowsPage(index),
+        supersample: hdSupersampled({ scale: ref.scale }, 2),
       };
-      looks.set(`${look.paintSaturation}|${look.materials}|${look.windows}`, look);
+      looks.set(`${look.paintSaturation}|${look.materials}|${look.windows}|${look.supersample}`, look);
     });
     return [...looks.values()];
   }

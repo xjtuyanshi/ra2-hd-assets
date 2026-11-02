@@ -1131,9 +1131,27 @@ SpriteLayer uses `atlasUv = (frame.rect.xy + frameUV * frame.rect.zw) / indexedA
 material sampling. The coverage and edge-filter distances are intentionally in original indexed pixels, and the
 material shader has no colour-atlas texel-size uniform. A correctly aligned 4x colour/remap page therefore renders
 with the same UVs and geometry, including a 1x material page, subject to the device's texture-size/memory limits.
-`HdAtlasRef.scale` is not used to transform UVs. The following offline sprite contracts still assume 2x:
+`HdAtlasRef.scale` is not used to transform UVs; it selects the minification filter only. A page above 2x
+(`HD_SUPERSAMPLE_ABOVE_SCALE`, `ra2/cache.ts`) is a shader graph of its own: its colour and house-paint mask are read
+with four explicit-LOD taps a quarter pixel from the centre along the screen axes, colour averaged by alpha, at mip
+`max(0, log2(footprint in HD texels) - 1)`. A 4x page at the owner's 2.5 device px per game px has 1.6 texels per
+device pixel; one trilinear sample there takes about two thirds of its colour from the box-filtered first mip, which is
+the 2x page again. 2x pages keep their single sample and unchanged shader. Everything else (the 1x indexed coverage and
+edge, house-index taps, the fringe limit, materials, windows, shadows, depth, occlusion, selection, capture) is keyed by
+the frame rectangle in indexed texels and is the same at any scale. `LiveLibrary.hdPageLooks()` reports
+`supersample` per look, and `LiveView.warmStandIns` builds those graphs (`page-hd<saturation>-ss`) before a view is shown.
 
-- `ra2-assets/src/manifest.ts`: `SpriteAtlasHdRef.scale` is the literal type `2`; library/map contracts inherit it.
+Higher-resolution art enters a library on pages of its own (`ra2-assets/python/sprite_hd_pages.py`): the redrawn
+frames of a sprite are moved to a new indexed page (a byte-exact copy of their indexed pixels) with an HD pair at the
+new scale, and only those frames' `page`/`rect` change. The infantry shadow frames (`sprite.shadows`) stay on their
+shadow page; frames without a redraw, or whose redraw fails the packer's registration check, keep their 2x page, so
+2x is the fallback per type and per frame. One sprite drawn from two pages is two layers, like any sprite spread over
+pages.
+
+The following offline sprite contracts still assume 2x:
+
+- `ra2-assets/src/manifest.ts`: `SpriteAtlasHdRef.scale` is any integer of at least 2; `hd:sprites` writes 2 and
+  leaves a library page published at another scale alone (an explicit `--pages` request for it is an error).
 - `ra2-assets/src/node/spriteHdCache.ts`, `outputRef`: `@2x` filenames, `scale: 2` and doubled dimensions.
 - `ra2-assets/src/node/spriteHd.ts`, `scatterBatch` / `upscaleSpriteAtlas`: 4x inference is reduced to 2x; frame
   dimensions, destination offsets, page allocation and shadow clearing use doubled indexed coordinates.

@@ -63,7 +63,12 @@ function filtered(red = false): Texture {
   texture.magFilter = texture.minFilter = LinearFilter;
   return texture;
 }
-const hdAtlas = (paintSaturation = 1): HdAtlas => ({ color: filtered(), remap: filtered(true), paintSaturation });
+const hdAtlas = (paintSaturation = 1, scale?: number): HdAtlas => ({
+  color: filtered(),
+  remap: filtered(true),
+  paintSaturation,
+  ...(scale ? { scale } : {}),
+});
 
 function cache(): Ra2Cache {
   const atlas = new DataTexture(new Uint8Array(256 * 4 * 4), 256, 4);
@@ -85,7 +90,7 @@ function cache(): Ra2Cache {
   } as unknown as Ra2Cache;
 }
 
-type Look = { paintSaturation: number; materials: boolean; windows: boolean };
+type Look = { paintSaturation: number; materials: boolean; windows: boolean; supersample?: boolean };
 
 /** The view's own warm-up and layer selection over real sprite layers; pages and masks arrive when the test says. */
 function view(options: { night?: boolean; materials?: boolean; looks?: Look[] } = {}) {
@@ -290,6 +295,29 @@ describe('the final layers of a library page draw with shaders built behind the 
         Object.keys(passes(live.standInWarm.get('page-hd1-materials')!)[pass]!.geometry.attributes).sort(),
       ),
     );
+  });
+
+  it('warms the supersampled graph of pages above 2x and builds a 4x page layer with it', () => {
+    const { live, pages, hd } = view({ looks: [PLAIN, { ...PLAIN, supersample: true }], materials: false });
+    live.warmStandIns();
+    expect([...live.standInWarm.keys()]).toEqual([
+      'page',
+      'cells',
+      'page-hd1',
+      'cells-hd1',
+      'page-hd1-ss',
+      'cells-hd1-ss',
+    ]);
+    const plain = keys(live.standInWarm.get('page-hd1')!);
+    const supersampled = keys(live.standInWarm.get('page-hd1-ss')!);
+    expect(supersampled).not.toEqual(plain);
+    pages.set(3, indexedPage(4096));
+    hd.set(3, hdAtlas(1, 4));
+    expect(keys(live.pageLayer(3)!)).toEqual(supersampled);
+    pages.set(5, indexedPage(4096));
+    // A declared 2x page (and one without a declared scale) keeps the single-sample shader.
+    hd.set(5, hdAtlas(1, 2));
+    expect(keys(live.pageLayer(5)!)).toEqual(plain);
   });
 
   it("builds the HD layer of an overlay or smudge page with the warm cell layers' shaders", () => {

@@ -40,7 +40,7 @@ import type { WindowBuilding } from '../ra2/nightDressing';
 import { sequenceFrame } from '../../../ra2-assets/src/art';
 import type { MapObject, SpriteFrame, VoxelModel } from '../../../ra2-assets/src/manifest';
 import type { TheaterId } from '../../../ra2-assets/src/theater';
-import { addHousePalettes, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
+import { addHousePalettes, HD_SUPERSAMPLE_ABOVE_SCALE, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
 import {
   assignPainterBias,
@@ -1234,10 +1234,23 @@ export class LiveView {
           captured(new SpriteLayer(this.cache, [], 1, page, null, page.texture, material, depth)),
         );
     }
-    for (const paintSaturation of new Set(looks.map((look) => look.paintSaturation))) {
-      const hd: HdAtlas = { color: textures.colour, remap: textures.mask, paintSaturation };
-      const mine = looks.filter((look) => look.paintSaturation === paintSaturation);
-      const key = `hd${paintSaturation}`;
+    // One graph family per house-paint saturation and minification filter (pages above 2x are supersampled).
+    const families = new Map<string, { paintSaturation: number; supersample: boolean }>();
+    for (const look of looks) {
+      const supersample = !!look.supersample;
+      families.set(`${look.paintSaturation}|${supersample}`, { paintSaturation: look.paintSaturation, supersample });
+    }
+    for (const { paintSaturation, supersample } of families.values()) {
+      const hd: HdAtlas = {
+        color: textures.colour,
+        remap: textures.mask,
+        paintSaturation,
+        ...(supersample ? { scale: HD_SUPERSAMPLE_ABOVE_SCALE * 2 } : {}),
+      };
+      const mine = looks.filter(
+        (look) => look.paintSaturation === paintSaturation && !!look.supersample === supersample,
+      );
+      const key = `hd${paintSaturation}${supersample ? '-ss' : ''}`;
       add(`page-${key}`, (page) => captured(new SpriteLayer(this.cache, [], 1, page, hd, null, null, depth)));
       add(`cells-${key}`, (page) => occluder(new SpriteLayer(this.cache, [], 1, page, hd)));
       const materials = materialsWanted && mine.some((look) => look.materials);
