@@ -15,3 +15,7 @@ docs/remaster/research/
 # Native-host third-party sources retain upstream formatting.
 packages/native-host/third_party/
 packages/native-host/build/
+
+# Third-party licence texts and model cards are kept verbatim; generated backup manifest.
+backup/LICENSES/
+backup/env-build12.manifest.json

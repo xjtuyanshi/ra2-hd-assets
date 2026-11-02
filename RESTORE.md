@@ -2,13 +2,19 @@
 
 This private repository is the owner's personal backup. `main` is the Build 12 code
 (`2c0ff27`) plus this file. The HD farm and the native-host build outputs are assets of
-the release `farm-build12-20261102`. Nothing here is an original game file: no MIX, EXE
-or DLL from the game, no INI, no maps, no Wine prefix, no model weights. Keep the
+the release `farm-build12-20261102`. The free Wine, Real-ESRGAN and the diffusion model
+weights are assets of the release `env-build12-20261102`. Nothing here is an original game
+file: no MIX, EXE or DLL from the game, no INI, no maps, no Wine prefix. Keep the
 repository private.
 
+**For a complete, step-by-step setup with checks (written for an AI coding agent), use
+[AI_SETUP.md](AI_SETUP.md).** It also covers Wine, models, Python environments,
+confirming HD and troubleshooting.
+
 本仓库是机主的私人备份。`main` 是第 12 版代码（`2c0ff27`）加上本文件。高清缓存与本机组件构建结果放在
-发布 `farm-build12-20261102` 的附件中。这里没有任何原版游戏文件（无游戏 MIX/EXE/DLL、INI、地图、
-Wine 环境、模型权重）。请保持仓库为私有。
+发布 `farm-build12-20261102` 的附件中；免费 Wine、Real-ESRGAN 与扩散模型权重在发布
+`env-build12-20261102` 中。这里没有任何原版游戏文件（无游戏 MIX/EXE/DLL、INI、地图）和 Wine 环境（prefix）。
+请保持仓库为私有。完整的分步安装与检查见 [AI_SETUP.md](AI_SETUP.md)。
 
 ## 发布附件 / Release assets
 
@@ -52,12 +58,13 @@ folders under `gameres/s2x/build12/redraw/`, and the `.realise.lock` work files'
 - Free Wine: project Gcenx macOS_Wine_builds, tag `11.0_1`, asset
   `wine-stable-11.0_1-osx64.tar.xz`, sha256
   `b50dc50ec7f41d58b115a6b685d4d1315ba3c797bd3aa0f49213f2703cb82388` (reports `wine-11.0`).
-  Download it yourself from that project's GitHub releases, check the sha256, and unpack
-  it so that `Wine Stable.app` is in `~/ra2-hd/wine/`. It is not re-uploaded here.
-  免费 Wine：Gcenx macOS_Wine_builds 项目 `11.0_1` 版的 `wine-stable-11.0_1-osx64.tar.xz`，自行下载、核对
-  sha256 后解压到 `~/ra2-hd/wine/`。
-- Google Chrome; Node (v26 used here); pnpm 11.24.0 (`corepack enable`, the version comes
-  from `package.json`); `zstd`, `python3` and `gh` (e.g. `brew install zstd python gh`);
+  An unmodified copy is in the release `env-build12-20261102` (restore it with
+  `restore_env.py`, see [AI_SETUP.md](AI_SETUP.md) step 7); check the sha256 and unpack it
+  so that `Wine Stable.app` is in `~/ra2-hd/wine/`.
+  免费 Wine：Gcenx macOS_Wine_builds 项目 `11.0_1` 版的 `wine-stable-11.0_1-osx64.tar.xz`，原样副本在发布
+  `env-build12-20261102` 中（见 AI_SETUP.md 第 7 步），核对 sha256 后解压到 `~/ra2-hd/wine/`。
+- Google Chrome; Node (v26 used here); pnpm 11.24.0 (`brew install pnpm`; pnpm switches to
+  the version in `package.json`, Node 26 no longer ships corepack); `zstd`, `python3` and `gh` (e.g. `brew install zstd python gh`);
   `gh auth login` with the account that owns this repository.
 - Disk: about 60 GiB for the farm, plus 2 GiB per chunk being restored (streaming) or
   another 60 GiB if you download every chunk first.
@@ -82,7 +89,6 @@ mkdir -p ~/ra2-hd && cd ~/ra2-hd
 gh repo clone xjtuyanshi/ra2-hd-assets code
 cd code
 git config core.hooksPath scripts/git-hooks
-corepack enable
 pnpm install --frozen-lockfile
 mkdir -p packages/native-host/build
 gh release download farm-build12-20261102 --repo xjtuyanshi/ra2-hd-assets \
