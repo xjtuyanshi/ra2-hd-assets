@@ -606,6 +606,29 @@ XMP27T8 they would catch cliff tops and part of the grass, so enable the guard p
 `--guard-existing PATH` applies the guard to an already composed full-size result without diffusion (for maps whose
 tiles are gone), keeping the base's water pixels and alpha.
 
+Temperate grass and sand need different settings from the defaults. On XMP27T8 (build 12) `--hybrid-alpha 1.8
+--strength 0.65` with the default prompt (which names pebbles and cracks) drew grass and sand as pebbles or scales
+outlined by a crack network at 1:1. Crop trials (256 source px, original | Real-ESRGAN | old | new at 1:1 and 3x) showed
+three causes: the prompt words, the amplified micro-texture (the original's pixel speckle becomes cell-sized blobs),
+and the fine structure colour match, which on busy grass (many pixels near strong source edges) stamps the source pixel
+grid back as a checkerboard. Settings judged clean there: `--hybrid-alpha 0.6 --strength 0.45 --control 0.8
+--guidance 6.5 --steps 30 --structure-color-sigma 0`, a prompt that names short grass with fine blades, fine-grained
+sand and sandstone cliffs, and a negative prompt that names pebbles, gravel, scales, cracks, mosaic, cells, grid and
+checkerboard. Stronger texture (alpha 0.9-1.2 or strength 0.5) brought the blobs back; strength 0.4-0.6 without any
+re-added texture, or a heavier negative list, smoothed grass below Real-ESRGAN. The theatre-specific prompts are queue
+configuration, not defaults here.
+
+`python/terrain_cells.py` detects that pebble/scale look against a reference without invented cells (the Real-ESRGAN
+base), per 256 px block of land: a block counts as cell texture when both its fraction of thin dark lines (sigma 1.2
+luminance Hessian valleys) and its blob-band energy (`|G(1) - G(3)|`) exceed the reference's by 1.25 and 1.2. The old
+XMP27T8 result had 86 % such blocks over bands 0-1; ESRGAN-level grass and sand stay near 1.0 on both ratios.
+`plant_cells` makes a synthetic pebble field for tests and for a positive control. It is calibrated on temperate maps
+only: Real-ESRGAN flattens open snow, so snow re-detail scores high without being pebbly.
+
+```bash
+python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_cells.py'
+```
+
 `python/terrain_seams.py` scores tile and band seams of a result against a seam-free reference with the original's
 content (the edge-bled scale-1 composite upscaled with Lanczos) on eroded land: a tone-step profile (per 64-row chunk,
 the luminance-difference step across each column boundary, a mean over at least 16 land chunks that drops the largest
