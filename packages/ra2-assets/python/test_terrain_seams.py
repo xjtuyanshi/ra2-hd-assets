@@ -56,6 +56,25 @@ class SeamMetricTests(unittest.TestCase):
         s = ts.seam_scores(out, self.ref, ts.erode(land, 4))
         self.assertLess(max(s["tone_col"], s["tone_row"], s["detail_col"], s["detail_row"]), 1.8)
 
+    def test_content_step_shared_with_the_baseline_is_not_excess(self):
+        # The same 3-level step in a seam-free baseline (content both renderings share) and in the result.
+        base = self.out.copy() + np.random.default_rng(9).normal(0, 1, self.out.shape).astype(np.float32)
+        base[:, 512:] += 3
+        out = self.out.copy()
+        out[:, 512:] += 3
+        p_out = ts.seam_scores(out, self.ref, self.land, profiles=True)["profiles"]
+        self.assertGreaterEqual(p_out["tone_col"][510:515].max(), 1.8)
+        p_vs = ts.seam_scores(out, base, self.land, profiles=True)["profiles"]
+        excess, _ = ts.content_excess(p_out, p_vs, "col")
+        self.assertLess(excess, 0.5)
+        # An extra 2.5-level step that the baseline does not have is excess, where it is.
+        out[:, 300:] += 2.5
+        p_out = ts.seam_scores(out, self.ref, self.land, profiles=True)["profiles"]
+        p_vs = ts.seam_scores(out, base, self.land, profiles=True)["profiles"]
+        excess, at = ts.content_excess(p_out, p_vs, "col")
+        self.assertGreater(excess, 2.0)
+        self.assertLessEqual(abs(at - 300), 3)
+
     def test_erode_and_bleed(self):
         mask = np.zeros((9, 9), bool)
         mask[2:7, 2:7] = True

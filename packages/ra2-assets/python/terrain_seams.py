@@ -131,8 +131,9 @@ def _windows(sums: np.ndarray, counts: np.ndarray, start: np.ndarray, stop: np.n
 
 def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chunk: int = 64, half: int = 8,
                     line: int = 2, min_chunks: int = 16, trim: float = 0.1,
-                    tone_floor: float = TONE_FLOOR) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(tone ratio, detail ratio, scored) for the boundary left of every column. See the module docstring."""
+                    tone_floor: float = TONE_FLOOR, levels: bool = False) -> tuple[np.ndarray, ...]:
+    """(tone ratio, detail ratio, scored) for the boundary left of every column, plus the tone step itself in 8-bit
+    luminance levels when `levels` is set. See the module docstring."""
     H, W = diff.shape
     n = H // chunk
     if n == 0:
@@ -165,6 +166,8 @@ def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chun
     tone_ratio = local_ratio(tone, scored, floor=tone_floor)
     detail_ratio = local_ratio(detail, scored)
     detail_ratio = np.maximum(detail_ratio, np.where(detail_ratio > 0, 1 / np.maximum(detail_ratio, 1e-6), 0))
+    if levels:
+        return tone_ratio, detail_ratio, scored, np.where(scored, tone, 0.0)
     return tone_ratio, detail_ratio, scored
 
 
@@ -178,9 +181,9 @@ def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndar
     diff = lum - luminance(reference_rgb)
     energy = np.abs(lum - binomial_blur(lum))
     land = np.asarray(land, bool)
-    tc, dc, sc = column_profiles(diff, energy, land, **kw)
-    tr, dr, sr = column_profiles(np.ascontiguousarray(diff.T), np.ascontiguousarray(energy.T),
-                                 np.ascontiguousarray(land.T), **kw)
+    tc, dc, sc, lc = column_profiles(diff, energy, land, levels=True, **kw)
+    tr, dr, sr, lr = column_profiles(np.ascontiguousarray(diff.T), np.ascontiguousarray(energy.T),
+                                     np.ascontiguousarray(land.T), levels=True, **kw)
 
     def peak(profile):
         return (float(profile.max()), int(profile.argmax())) if profile.size else (0.0, -1)
@@ -190,5 +193,30 @@ def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndar
         out[name], out[name + "_at"] = peak(profile)
     out.update(scored_cols=int(sc.sum()), scored_rows=int(sr.sum()))
     if profiles:
-        out["profiles"] = {"tone_col": tc, "detail_col": dc, "tone_row": tr, "detail_row": dr}
+        out["profiles"] = {"tone_col": tc, "detail_col": dc, "tone_row": tr, "detail_row": dr,
+                           "tone_col_level": lc, "tone_row_level": lr}
     return out
+
+
+def content_excess(result_profiles: dict, versus_baseline_profiles: dict, axis: str, limit: float = 1.8,
+                   near: int = 3) -> tuple[float, int]:
+    """Tone step (8-bit levels) of the result against a seam-free baseline at the boundaries where the result's tone
+    ratio against the reference reaches `limit`.
+
+    `result_profiles` are seam_scores(result, reference, profiles=True)["profiles"]; `versus_baseline_profiles` are
+    seam_scores(result, baseline, profiles=True)["profiles"] with the baseline (e.g. Real-ESRGAN of the same map) as
+    the reference. Why: on busy temperate grass the original tiles' own cell edges give tone-ratio peaks of 2.3-2.9
+    for Real-ESRGAN itself (XMP27T8 x 4800-9600, build 12), and a faithful re-detail reproduces them at the same
+    columns. Content both renderings share cancels in result - baseline; a tiling or band seam does not. The largest
+    step within +-`near` px of each peak is taken. Returns (step, position); (0.0, -1) when no boundary reaches the
+    limit."""
+    ratio = result_profiles[f"tone_{axis}"]
+    level = versus_baseline_profiles[f"tone_{axis}_level"]
+    n = level.size
+    padded = np.pad(level, near, mode="edge")
+    local = np.max(np.stack([padded[i:i + n] for i in range(2 * near + 1)]), 0)
+    step = np.where(ratio >= limit, local, -np.inf)
+    if not np.isfinite(step).any():
+        return 0.0, -1
+    i = int(np.argmax(step))
+    return float(step[i]), i

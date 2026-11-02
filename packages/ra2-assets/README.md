@@ -636,6 +636,12 @@ the luminance-difference step across each column boundary, a mean over at least 
 high-pass energy in a 4 px line), each divided by the median of the profile 12-48 px away; rows use the transposed
 images. A per-pixel gradient of `|result - Real-ESRGAN|` is not a usable seam metric: on XMP32S8 it peaked on the map
 border's cell staircase and on the snow tiles' once-per-cell feature, and scored planted tile seams only 1.1-1.2.
+On busy temperate grass the original tiles' own cell edges give tone-ratio peaks of 2.7-2.9 for Real-ESRGAN itself,
+which has no tiles, and a faithful re-detail peaks at the same columns. `content_excess` therefore reports, at the
+boundaries where the ratio reaches the limit, the result's tone step against a seam-free baseline (Real-ESRGAN of the
+same map, via `seam_scores(result, baseline, profiles=True)`): content both renderings share cancels there, a seam
+does not. That step has a texture floor of about one level on temperate grass, so it separates seams of roughly 1.5
+levels or more from content.
 
 ```bash
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_seams.py'
