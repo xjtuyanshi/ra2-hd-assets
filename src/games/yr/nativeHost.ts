@@ -2,6 +2,7 @@ import type { GuestMemory } from '../../vm86/win32';
 import type { NativeGamePolicy, NativeHostFollowRule, NativeHostMetadata, NativeHostRange } from '../nativeHost';
 import type { GuestMemoryAccessor } from '../shared/memoryAccessor';
 import { createYrCommandStateReaderFrom } from './commandState';
+import { YR_SHELL_SURFACE } from './shellSurface';
 import { YR_EFFECTS_GLOBALS, YR_EFFECTS_OFFSETS } from './effectsReader';
 import { YR_BEAMS_GLOBALS } from './beamsReader';
 import { YR_MIND_CONTROL_GLOBALS, YR_MIND_CONTROL_LIMITS, YR_MIND_CONTROL_OFFSETS } from './mindControlLinkReader';
@@ -356,7 +357,7 @@ export function createYrNativeHostPolicy(
   return {
     ranges: YR_NATIVE_RANGES,
     rules: YR_NATIVE_FOLLOW_RULES,
-    menuSurface: { width: 800, height: 600 },
+    menuSurface: YR_SHELL_SURFACE,
     additionalRanges: () => [...cells(), ...houses()],
     createRenderReader: () =>
       createYrRenderStateReader(memory, 0x100000000, hash, accessor, { battlefieldOverlays: true }),

@@ -55,6 +55,7 @@ import { type GameSource } from '../../../games/source';
 import { clearCachedGameFiles, loadCustomMapFiles } from '../../../adapter/cachedGameFiles';
 import { createVmRuntimeCallbacks } from './vmPageRuntimeCallbacks';
 import { createNativeCursorFrames } from './nativeCursorFrames';
+import { installAmbientFill, type AmbientFill } from './ambientFill';
 import { createVmPageToolbarActions } from './vmPageToolbarActions';
 import {
   DEFAULT_VIEW_CHOICE,
@@ -126,6 +127,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
   movieSkip.set(null);
   activeNativeViewportAbort?.abort();
   activeNativeViewportAbort = null;
+  /** Ambient side fill beside the game's fixed-size front end (see ambientFill.ts); owned by this page's renderer. */
+  let ambientFill: AmbientFill | null = null;
   // Release the old presentation and size listeners before switching sessions so resize callbacks cannot retain prior closures.
   activeTrainingCleanup?.();
   activeHdCleanup?.();
@@ -154,7 +157,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       {
         fillStage: () => true,
         devicePixelBacking: () => hdBridgeRequested,
-        onFit: (width, height, scale, fillScale) =>
+        onFit: (width, height, scale, fillScale) => {
           toolbar.setDisplayScale(
             width,
             height,
@@ -163,7 +166,10 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
             resolutionViewScale(activeResolutionChoice) !== null ? requestedResolution : null,
             activeDisplayScale,
             nativeArea !== null && JSON.stringify(nativeArea) !== JSON.stringify(readArea()),
-          ),
+          );
+          // onFit runs before the fit writes the canvas's new CSS box; measure once this fit has finished.
+          queueMicrotask(() => ambientFill?.relayout());
+        },
       },
     );
     refitActiveCanvas = fit;
@@ -262,6 +268,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
       effects.publishStatus(frameRenderer.upscaleStatus);
       presentedFrames++;
       for (const listener of menuFrameListeners) listener();
+      // Same task as the draw: the WebGL drawing buffer is still readable here.
+      ambientFill?.presented();
       toolbar.recordPresentedFrame();
       feelTelemetry?.frame('original', presenter.frameVersion);
       if (!nativeCursor) feelTelemetry?.pointerDrawn();
@@ -288,6 +296,33 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     publish: (value) => upscaleStatus.set(value),
   });
   const scheduleRender = () => presenter.schedule();
+  if (new URLSearchParams(window.location.search).get('ambient-fill') !== '0')
+    ambientFill = installAmbientFill({
+      screen: canvas,
+      signals: () => {
+        // The submitted original picture, not an enhanced one: model output has its own size.
+        const frame = presenter.frame;
+        return {
+          shellSurface: gameSource?.game.shellSurface ?? null,
+          matchSurface: requestedResolution,
+          frame: frame
+            ? {
+                width: frame.width,
+                height: frame.height,
+                matchPicture: frame.matchGeneration !== undefined || frame.overlayJournal !== undefined,
+              }
+            : null,
+          battleActive: hdCleanup?.battleActive?.() ?? false,
+          released: runtimeReleased || exitHandled,
+        };
+      },
+      overlays: () => {
+        const menus = canvas.parentElement?.querySelector<HTMLCanvasElement>('#hd-menus');
+        return menus && menus.style.display !== 'none' ? [menus] : [];
+      },
+      frameVersion: () => presenter.frameVersion,
+      requestRedraw: () => presenter.invalidate(),
+    });
   activeToolbarCleanup?.();
   const toolbar = installRuntimeToolbar(
     {
@@ -486,6 +521,8 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
     nativeCursorFrames.dispose();
     nativeCursor?.destroy();
     nativeCursor = null;
+    ambientFill?.destroy();
+    ambientFill = null;
     effects.stop();
     presenter.destroy();
   };
@@ -611,6 +648,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
 
   const releaseRuntime = async (preserveFullscreen = false) => {
     runtimeReleased = true;
+    ambientFill?.update();
     runtimeNotice.set(null);
     menuAbort.abort();
     window.clearInterval(resizeTimer);

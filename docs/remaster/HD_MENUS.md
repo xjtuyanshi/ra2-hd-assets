@@ -120,6 +120,28 @@ Inspect every button/state and highest-risk child route, including real list-end
 Measure unchanged native hit positions, animation, menu response and same-scene game speed on current code.
 Source/build checks do not establish real-browser acceptance; unobserved routes/states remain UNVERIFIED.
 
+## Ambient side fill
+
+YR 1.001 draws every front-end screen on a hard-coded 800x600 surface (0x6BD99C/0x6BD9A6, 0x789A0F..0x789A34),
+so the 4:3 picture stays at full height on wider screens. Instead of black bars, the stage beside it shows the
+picture's own outer strips mirrored outward, blurred and darkened toward the screen edge (mock-up option B1).
+Mechanism: `src/graphics/ambientFill.ts` (activation policy, geometry, low-resolution drawing), with no game knowledge.
+Page side: `src/ui/pages/game/ambientFill.ts` owns one canvas, inserted first in `#screen-frame`, and its destruction.
+Game policy: `SupportedGame.shellSurface` (YR: `src/games/yr/shellSurface.ts`, shared with the native host's
+`menuSurface`); the session's match surface is the requested resolution. Games without a shell surface never show it.
+It shows only while the presented original picture has the shell size and the match surface is known and different.
+Battle state, battle-only picture data or a match surface equal to the shell hide it at once, without a fade:
+it must never sit beside, over or under a running match. Leaving the shell for another video mode fades it out
+(250 ms) without new samples; any canvas move during that fade ends it at once. Returning fades in (400 ms)
+after the first fresh sample. Reduced motion removes both transitions.
+Presentation only: pointer-events none, an even-odd clip path keeps it out of the game canvas rect, and the canvas
+rect, pointer mapping and hit testing do not change. It samples the game canvas plus the visible `#hd-menus` layer
+right after a presentation in the same animation frame (the WebGL buffer is not preserved), at most every 100 ms
+while pictures change and every second otherwise; a skipped final picture asks for one more presentation.
+The picture maps to a 144-pixel-high buffer (about 230x144 on a 1.594:1 screen); one canvas blur and the browser's
+bilinear enlargement soften it. During a match a presentation costs one visibility check; nothing is sampled.
+`?ambient-fill=0` turns it off for comparison.
+
 ## Remaining screens and required data
 
 | Order | Screen or popup family                                                            | Additional data/art needed                                                                 |

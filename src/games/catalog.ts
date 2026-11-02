@@ -11,6 +11,7 @@ import { RA2_SHIM_PROFILE } from './ra2/profile';
 import { RA2_RUNTIME_HOOKS } from './ra2/runtimeHooks';
 import { YR_SHIM_PROFILE } from './yr/profile';
 import { YR_RUNTIME_HOOKS } from './yr/runtimeHooks';
+import { YR_SHELL_SURFACE } from './yr/shellSurface';
 
 export type SupportedGameId = 'ra2' | 'yr';
 
@@ -47,6 +48,11 @@ export interface SupportedGame {
    * "add to the selection" command. Absent: the repeat applies to the whole frame.
    */
   buildStripWidth?: number;
+  /**
+   * The fixed size of the game's own front-end surface (menus, films, loading and score screens) when it differs from
+   * the match's video mode. Pictures of this size get the page's presentation-only ambient side fill; absent: never.
+   */
+  shellSurface?: Readonly<{ width: number; height: number }>;
   /**
    * Practice lessons of this game (development builds only; resolves to an empty list otherwise). Loaded on demand so
    * production bundles do not carry them.
@@ -108,6 +114,7 @@ export const SUPPORTED_GAMES: readonly SupportedGame[] = [
     title: '尤里的復仇',
     executable: 'gamemd.exe',
     buildStripWidth: 168,
+    shellSurface: YR_SHELL_SURFACE,
     loadTrainingLessons: async () =>
       import.meta.env.DEV ? (await import('./yr/training/lessons')).YR_TRAINING_LESSONS : [],
     loadHotkeySheet: async () => (await import('./yr/hotkeys')).YR_HOTKEY_SHEET,
