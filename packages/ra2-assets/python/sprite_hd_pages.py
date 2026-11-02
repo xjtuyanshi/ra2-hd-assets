@@ -30,7 +30,8 @@ rectangle feeds the gutter only (the renderer clips the art to the original's co
 Writes into `--out` (must be new): the pages under content names, library.json (and normals.json when a material page
 was built), receipt.json. `--farm ROOT --rel _library/<theater>` instead installs into a copy-on-write farm through
 cache_farm (pages hard-linked, JSON patched under its lock, never writing through a symlink into the base cache); the
-patch refuses when a frame changed since validation.
+patch refuses when a frame changed since validation. `--farm ROOT --rel ... --uninstall RECEIPT...` undoes such
+installs surgically (see `uninstall`): later edits of the library (other installs, map preparation) stay.
 """
 
 from __future__ import annotations
@@ -382,10 +383,162 @@ def receipt(plan: Plan, records: list[dict], new_pages: list[int], files: dict[s
     }
 
 
+class UninstallError(ValueError):
+    """The library no longer holds an install's pages as written, or removing them would break another edit."""
+
+
+def _digest(entry) -> str:
+    return hashlib.sha256(json.dumps(entry, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def _receipt_files(receipts: list[dict]) -> dict[str, str]:
+    return {name: digest for r in receipts for name, digest in r['files'].items()}
+
+
+def uninstall(library: dict, receipts: list[dict], *, library_dir: Path | None = None,
+              normals: dict | None = None) -> dict:
+    """Remove the pages of farm installs (their receipts) from `library` (and `normals`) in place.
+
+    Surgical: only what the receipts added is undone; every later edit of the library stays. Pages are found by
+    their content-named atlas file (indices may have moved since the install) and must still equal the receipt's
+    records (canonical-JSON sha256). A frame still pointing at its receipt rectangle gets its original page and rect
+    back; with `library_dir` the original rectangle's indexed pixels must equal the installed page's byte-exact copy
+    (proving the original page index still names the same art). Frames edited since the install are left alone, but
+    nothing may still draw from a removed page. Later pages move down; that is refused for a page the map
+    preparation upscales itself (scale 2 or no HD page: its prepare state is keyed by page index)."""
+    atlases, hd_refs = library['spriteAtlases'], library['spriteAtlasesHd']
+    if len(hd_refs) != len(atlases):
+        raise UninstallError('spriteAtlasesHd no longer matches spriteAtlases')
+    by_file = {a.get('file'): i for i, a in enumerate(atlases)}
+    remove: dict[int, dict] = {}
+    index_maps = []
+    for r in receipts:
+        index_map = {}
+        for page in r['pages']:
+            i = by_file.get(page['atlas']['file'])
+            if i is None:
+                raise UninstallError(f"page {page['atlas']['file']} is not in the library (already removed?)")
+            if _digest(atlases[i]) != _digest(page['atlas']) or _digest(hd_refs[i]) != _digest(page['hd']):
+                raise UninstallError(f"page {i} ({page['atlas']['file']}) changed since the install")
+            remove[i] = page
+            index_map[page['index']] = i
+        index_maps.append(index_map)
+    indexed: dict[str, np.ndarray] = {}
+
+    def pixels(page: int) -> np.ndarray:
+        name = atlases[page]['file']
+        if name not in indexed:
+            indexed[name] = _grey(_relative(library_dir, name))
+        return indexed[name]
+
+    restored, kept = 0, []
+    for r, index_map in zip(receipts, index_maps):
+        for item in r['accepted']:
+            frames = library['sprites'].get(item['sprite'], {}).get('frames', [])
+            frame = frames[item['frame']] if item['frame'] < len(frames) else None
+            current = index_map[item['newPage']]
+            if frame is None or frame.get('page', 0) != current or list(frame['rect']) != item['newRect']:
+                kept.append({'sprite': item['sprite'], 'frame': item['frame']})
+                continue
+            page, rect = item['page'], list(item['rect'])
+            if page in remove or not 0 <= page < len(atlases):
+                raise UninstallError(f"{item['sprite']} frame {item['frame']}: original page {page} is gone")
+            if library_dir is not None:
+                (x, y, w, h), (nx, ny, _, _) = rect, item['newRect']
+                if not np.array_equal(pixels(page)[y:y + h, x:x + w], pixels(current)[ny:ny + h, nx:nx + w]):
+                    raise UninstallError(f"{item['sprite']} frame {item['frame']}: page {page} no longer holds "
+                                         'the original art at its receipt rectangle')
+            frame['page'], frame['rect'] = page, rect
+            restored += 1
+    removed = sorted(remove)
+    users = sorted({f"{key} {kind} {n}" for key, sprite in library['sprites'].items()
+                    for kind in ('frames', 'shadows') for n, frame in enumerate(sprite.get(kind) or [])
+                    if frame.get('page', 0) in remove})
+    if users:
+        raise UninstallError(f"{len(users)} frames still draw from the removed pages, e.g. {users[:3]}")
+    shifted = [i for i in range(removed[0] + 1, len(atlases)) if i not in remove] if removed else []
+    unsafe = [i for i in shifted if not hd_refs[i] or hd_refs[i].get('scale', 2) == 2]
+    if unsafe:
+        raise UninstallError(f'pages {unsafe} would move down but are upscaled by map preparation (keyed by index)')
+
+    def renumber(i: int) -> int:
+        return i - sum(1 for r in removed if r < i)
+
+    for i in reversed(removed):
+        del atlases[i], hd_refs[i]
+    for sprite in library['sprites'].values():
+        for kind in ('frames', 'shadows'):
+            for frame in sprite.get(kind) or []:
+                if 'page' in frame:
+                    frame['page'] = renumber(frame['page'])
+    for t in library.get('types', {}).values():
+        if 'atlasPages' in t:
+            t['atlasPages'] = sorted({renumber(p) for p in t['atlasPages'] if p not in remove})
+    if normals is not None:
+        uninstall_normals(normals, removed)
+    return {'removedPages': removed, 'restoredFrames': restored, 'keptFrames': kept,
+            'movedPages': {i: renumber(i) for i in shifted}}
+
+
+def referenced_files(library: dict, normals: dict | None) -> set[str]:
+    names = {a.get('file') for a in library['spriteAtlases']}
+    for ref in library['spriteAtlasesHd']:
+        if ref:
+            names |= {ref.get('file'), ref.get('remap')}
+    for entry in ((normals or {}).get('pages') or {}).values():
+        names.add(entry.get('file'))
+    return {n for n in names if n}
+
+
+def _uninstall_farm(args) -> int:
+    import cache_farm
+    receipts = [json.loads(p.read_text(encoding='utf-8')) for p in args.uninstall]
+    directory = args.farm / args.rel
+    normals_path = directory / 'normals.json'
+    state = {}
+
+    def patch_library(library):
+        state['report'] = uninstall(library, receipts, library_dir=directory)
+        state['library'] = library
+
+    try:
+        cache_farm.patch_json(args.farm, f'{args.rel}/library.json', patch_library)
+    except UninstallError as error:
+        print(f'refused: {error}', file=sys.stderr)
+        return 5
+    report = state['report']
+    removed = report['removedPages']
+    normals = json.loads(normals_path.read_text(encoding='utf-8')) if normals_path.exists() else None
+    # Same lock order as the install (library, then normals); untouched unless it holds a removed or moved page.
+    if removed and any(int(k) >= removed[0] for k in ((normals or {}).get('pages') or {})):
+        cache_farm.patch_json(args.farm, f'{args.rel}/normals.json', lambda n: uninstall_normals(n, removed))
+        normals = json.loads(normals_path.read_text(encoding='utf-8'))
+    live = referenced_files(state['library'], normals)
+    deleted, left = 0, []
+    for name, digest in _receipt_files(receipts).items():
+        path = _relative(directory, name)
+        # Never a symlink into a base cache, never a file something still references or that changed since.
+        if name in live or path.is_symlink() or not path.is_file() or \
+                hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            left.append(name)
+            continue
+        path.unlink()
+        deleted += 1
+    report.update(deletedFiles=deleted, leftFiles=left)
+    print(json.dumps(report))
+    return 0
+
+
+def uninstall_normals(normals: dict, removed: list[int]) -> None:
+    gone = set(removed)
+    normals['pages'] = {str(int(k) - sum(1 for r in removed if r < int(k))): v
+                        for k, v in (normals.get('pages') or {}).items() if int(k) not in gone}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--library', type=Path, required=True, help='theater library directory (read only)')
-    parser.add_argument('--frames', type=Path, required=True, help='frame index JSON (see module docstring)')
+    parser.add_argument('--library', type=Path, help='theater library directory (read only)')
+    parser.add_argument('--frames', type=Path, help='frame index JSON (see module docstring)')
     parser.add_argument('--out', type=Path, help='new staging directory for pages, library.json, receipt.json')
     parser.add_argument('--farm', type=Path, help='copy-on-write farm root to install into (with --rel)')
     parser.add_argument('--rel', help='library directory inside the farm, e.g. _library/urban')
@@ -398,7 +551,16 @@ def main(argv=None) -> int:
     parser.add_argument('--gutter', type=int, default=4, help='indexed px between frames (half of it is bled art)')
     parser.add_argument('--max-side', type=int, default=8192, help='largest HD page side in texels')
     parser.add_argument('--validate-only', action='store_true')
+    parser.add_argument('--uninstall', type=Path, action='append', metavar='RECEIPT',
+                        help='with --farm/--rel: remove the pages these install receipts added, keeping every later '
+                             'library edit (repeatable; see uninstall())')
     args = parser.parse_args(argv)
+    if args.uninstall:
+        if args.farm is None or not args.rel:
+            parser.error('--uninstall needs --farm and --rel')
+        return _uninstall_farm(args)
+    if args.library is None or args.frames is None:
+        parser.error('--library and --frames are required')
     if (args.out is None) == (args.farm is None) and not args.validate_only:
         parser.error('give exactly one of --out and --farm')
     if args.farm is not None and not (args.rel and args.receipt):

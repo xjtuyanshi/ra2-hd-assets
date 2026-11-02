@@ -440,10 +440,19 @@ with `python/sprite_hd_pages.py`, which never edits an existing page:
   `--farm <root> --rel _library/<theater> --receipt <new file>` installs through `cache_farm` (pages hard-linked, JSON
   patched under its lock, never writing through a symlink into the base cache); the patch refuses when a frame changed
   after validation. `--validate-only` prints the per-frame metrics.
+- `--farm <root> --rel _library/<theater> --uninstall <receipt>` (repeatable) undoes farm installs surgically instead
+  of restoring a library.json backup, so later edits survive (map preparation refreshing a 2x page, other installs).
+  It finds each receipt page by its content-named file (indices may have moved), refuses when the page record no
+  longer equals the receipt, when a frame still draws from a removed page, when the original rectangle no longer holds
+  the byte-exact indexed art the receipt moved, or when a page that map preparation upscales itself (2x or no HD
+  page; its prepare state is keyed by page index) would have to move down. Frames edited after the install keep their
+  edit; later pages, `atlasPages` and `normals.json` keys are renumbered; the receipt's files are deleted only when
+  nothing references them, they are real files (never a link into a base cache) and their sha256 still matches.
 
 ```bash
 python3 -B packages/ra2-assets/python/sprite_hd_pages.py --library "$FARM/_library/urban" --frames "$PAGES/index.json" \
   --farm "$FARM" --rel _library/urban --receipt "$RECEIPT"
+python3 -B packages/ra2-assets/python/sprite_hd_pages.py --farm "$FARM" --rel _library/urban --uninstall "$RECEIPT"
 python3 -B -m pytest packages/ra2-assets/python/test_sprite_hd_pages.py -q
 ```
 

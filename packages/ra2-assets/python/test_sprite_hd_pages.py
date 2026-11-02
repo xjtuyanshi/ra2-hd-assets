@@ -1,5 +1,6 @@
 """Asset-free regressions of the per-frame higher-resolution page packer (sprite_hd_pages.py)."""
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -174,3 +175,112 @@ def test_excluded_index_leaves_registration_but_still_counts_elsewhere():
     alpha[0, :] = 0
     alpha[:S, :] = 0                    # a body hole still fails
     assert packer.frame_metrics(indexed, alpha, paint, rgb, S, (12,))['cover'] == 0.5
+
+
+def _farm_install(tmp_path, lib, pages, name):
+    farm = tmp_path / 'farm'
+    if not farm.exists():
+        (farm / '_library').mkdir(parents=True)
+        os.symlink(lib, farm / '_library' / 'urban')
+    receipt = tmp_path / f'{name}.json'
+    assert packer.main(['--library', str(farm / '_library' / 'urban'), '--frames', str(pages / 'index.json'),
+                        '--farm', str(farm), '--rel', '_library/urban', '--receipt', str(receipt)]) == 0
+    return farm, receipt
+
+
+def _uninstall(farm, *receipts):
+    return packer.main(['--farm', str(farm), '--rel', '_library/urban',
+                        *[a for r in receipts for a in ('--uninstall', str(r))]])
+
+
+def _second_index(tmp_path, pages):
+    """Another install over frame 2 (as a later vehicle or infantry install would add its own page)."""
+    other = tmp_path / 'pages2'
+    other.mkdir()
+    colour = np.zeros((2 * S, 3 * S, 4), np.uint8)
+    colour[...] = (9, 9, 9, 255)
+    write(other / 'c2.png', colour, 'RGBA')
+    (other / 'index.json').write_text(json.dumps({'scale': S, 'sprites': {'infantry:T': {'frames': {
+        '2': {'colour': 'c2.png', 'origin': [-1, -2]}}}}}))
+    return other
+
+
+def test_uninstall_is_surgical_and_keeps_later_edits(setup, tmp_path):
+    """Rollback removes only the receipt's pages: a later map-preparation edit and a later install survive."""
+    _, lib, pages, library = setup
+    farm, first = _farm_install(tmp_path, lib, pages, 'first')
+    installed = farm / '_library' / 'urban'
+    _, second = _farm_install(tmp_path, lib, _second_index(tmp_path, pages), 'second')
+    after = json.loads((installed / 'library.json').read_text())
+    assert [f['page'] for f in after['sprites']['infantry:T']['frames'][:3]] == [1, 1, 2]
+    # A later, unrelated edit (map preparation refreshing a 2x page, another tool's field).
+    after['spriteAtlasesHd'][0]['width'] = 32
+    after['spriteAtlasesHd'][0]['refreshed'] = True
+    after['unknown']['later'] = 1
+    (installed / 'library.json').write_text(json.dumps(after))
+    first_files = json.loads(first.read_text())['files']
+    assert _uninstall(farm, first) == 0
+    now = json.loads((installed / 'library.json').read_text())
+    assert now['spriteAtlasesHd'][0]['refreshed'] is True and now['unknown']['later'] == 1
+    frames = now['sprites']['infantry:T']['frames']
+    assert [(f['page'], f['rect']) for f in frames[:2]] == [(0, [1, 1, 2, 3])] * 2
+    assert frames[2]['page'] == 1 and len(now['spriteAtlases']) == 2      # the later install moved down
+    assert now['types']['T']['atlasPages'] == [0, 1]
+    assert not any((installed / name).exists() for name in first_files)
+    normals = json.loads((installed / 'normals.json').read_text())
+    assert set(normals['pages']) == {'0'}                                  # the first install's material page went
+    assert _uninstall(farm, second) == 0
+    final = json.loads((installed / 'library.json').read_text())
+    expected = copy.deepcopy(library)
+    expected['spriteAtlasesHd'][0]['refreshed'] = True
+    expected['unknown']['later'] = 1
+    assert final == expected
+    assert sorted(p.name for p in installed.iterdir() if not p.is_symlink()) == ['.library.json.lock',
+                                                                                  '.normals.json.lock',
+                                                                                  'library.json', 'normals.json']
+    assert json.loads((lib / 'library.json').read_text()) == library        # the base cache was never written
+
+
+def test_uninstall_refuses_what_it_cannot_undo_cleanly(setup, tmp_path):
+    _, lib, pages, _ = setup
+    farm, first = _farm_install(tmp_path, lib, pages, 'first')
+    installed = farm / '_library' / 'urban'
+    edited = json.loads((installed / 'library.json').read_text())
+    pristine = copy.deepcopy(edited)
+    # A later frame drawing from the installed page (e.g. another install reusing it) must not lose its page.
+    edited['sprites']['infantry:T']['frames'][3] = {'rect': [1, 1, 2, 3], 'offset': [0, 0], 'page': 1}
+    (installed / 'library.json').write_text(json.dumps(edited))
+    assert _uninstall(farm, first) == 5
+    assert json.loads((installed / 'library.json').read_text()) == edited
+    # A page the map preparation upscales itself (2x, keyed by index) must not move down.
+    moved = copy.deepcopy(pristine)
+    moved['spriteAtlases'].append({'file': 'sprites-0.png', 'width': 16, 'height': 8})
+    moved['spriteAtlasesHd'].append(None)
+    (installed / 'library.json').write_text(json.dumps(moved))
+    assert _uninstall(farm, first) == 5
+    # The installed page record changed since the install.
+    changed = copy.deepcopy(pristine)
+    changed['spriteAtlasesHd'][1]['scale'] = 2
+    (installed / 'library.json').write_text(json.dumps(changed))
+    assert _uninstall(farm, first) == 5
+    # The original page no longer holds the art the receipt moved (indices shifted under it).
+    (installed / 'library.json').write_text(json.dumps(pristine))
+    blank = np.zeros((8, 16), np.uint8)
+    os.unlink(installed / 'sprites-0.png')
+    write(installed / 'sprites-0.png', blank, 'L')
+    assert _uninstall(farm, first) == 5
+    assert json.loads((installed / 'library.json').read_text()) == pristine
+
+
+def test_uninstall_keeps_frames_edited_after_the_install(setup, tmp_path):
+    _, lib, pages, library = setup
+    farm, first = _farm_install(tmp_path, lib, pages, 'first')
+    installed = farm / '_library' / 'urban'
+    edited = json.loads((installed / 'library.json').read_text())
+    edited['sprites']['infantry:T']['frames'][1] = {'rect': [6, 1, 3, 2], 'offset': [-1, -2], 'page': 0}
+    (installed / 'library.json').write_text(json.dumps(edited))
+    assert _uninstall(farm, first) == 0
+    now = json.loads((installed / 'library.json').read_text())
+    assert now['sprites']['infantry:T']['frames'][1] == edited['sprites']['infantry:T']['frames'][1]
+    assert now['sprites']['infantry:T']['frames'][0] == library['sprites']['infantry:T']['frames'][0]
+    assert len(now['spriteAtlases']) == 1
