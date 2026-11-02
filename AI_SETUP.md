@@ -50,7 +50,9 @@ A copy of the manifest is committed as [backup/env-build12.manifest.json](backup
 
 The environment release is uploaded after the farm release finishes (queued on the
 owner's original machine on 2026-11-02; farm ETA about 24 h, environment about 4 h more at
-~0.7 MiB/s). Before step 6, confirm the uploads are complete:
+~0.7 MiB/s). Before step 6 (farm, 32 chunks) and before step 7 (environment, 6 chunks), confirm the
+uploads are complete; each restore step downloads `SHA256SUMS` again right before it
+restores:
 
 ```sh
 gh release view farm-build12-20261102 -R xjtuyanshi/ra2-hd-assets --json assets --jq '[.assets[].name|select(test("part[0-9]+"))]|length'   # 32
@@ -156,7 +158,8 @@ mkdir -p ~/ra2-hd/code/packages/native-host/build
 cp ddraw.dll ra2launch.exe ~/ra2-hd/code/packages/native-host/build/
 ```
 
-Expected digests: `ddraw.dll` `90ca96e594af9b51618de4b00826f42ade578f603500b89d88a7d3004a238653`,
+This `SHA256SUMS` may be a snapshot taken while the farm upload was still running; it is
+downloaded again in step 6. Expected digests: `ddraw.dll` `90ca96e594af9b51618de4b00826f42ade578f603500b89d88a7d3004a238653`,
 `ra2launch.exe` `66c709c02d53ea5607b1d655ce92625bea1e831c48aa134c9f9fc6e0164dcb45`.
 
 Only if those assets are unavailable, rebuild (needs mingw-w64 and Go):
@@ -167,8 +170,14 @@ first launch in step 11 is its real check.
 
 ## 6. Restore the HD farm (chunk by chunk)
 
+Do not start until the release shows all 32 farm chunks (see step 1; the command prints
+`32`), then download `SHA256SUMS` again, because the copy from step 5 may predate the
+last chunks:
+
 ```sh
+gh release view farm-build12-20261102 -R xjtuyanshi/ra2-hd-assets --json assets --jq '[.assets[].name|select(test("part[0-9]+"))]|length'   # must print 32
 cd ~/ra2-hd/dl
+gh release download farm-build12-20261102 -R xjtuyanshi/ra2-hd-assets --clobber -p SHA256SUMS
 FARM=~/ra2-hd/farm/hd-cache-play12
 for n in $(seq -w 0 31); do
   f=hd-cache-play12.part$n.tar.zst
@@ -187,9 +196,13 @@ at the uplink's speed; 60 GiB takes hours.
 
 ## 7. Restore Wine, Real-ESRGAN and the models (chunk by chunk)
 
+Do not start until the environment release shows all 6 chunks; `SHA256SUMS` is
+downloaded here, right before restoring, so it lists every chunk.
+
 ```sh
 mkdir -p ~/ra2-hd/dl-env && cd ~/ra2-hd/dl-env
 R=env-build12-20261102
+gh release view $R -R xjtuyanshi/ra2-hd-assets --json assets --jq '[.assets[].name|select(test("part[0-9]+"))]|length'   # must print 6
 gh release download $R -R xjtuyanshi/ra2-hd-assets --clobber \
   -p SHA256SUMS -p env-build12.manifest.json -p restore_env.py
 shasum -a 256 -c SHA256SUMS --ignore-missing                       # manifest + script OK
@@ -226,7 +239,11 @@ printf '%s\n' "$WINE" > ~/ra2-hd/code/gameres/wine-free/wine-path   # default fo
 Keep `bin/`, `lib/` and `share/` of the app together; do not move single files out of it.
 The `.tar.xz` can be deleted after the check (it stays in the release).
 
-Place the tools where the code expects them (`<code>/gameres/tools/...`):
+Place the tools where the code expects them (`<code>/gameres/tools/...`). Run
+`restore_env.py ... --finish` once, before this move: afterwards the `mv` takes the two
+folders out of `~/ra2-hd/env`, where the manifest expects them, so a second `--finish`
+would report them missing. If it must be re-run, first move the folders back
+(`mv ~/ra2-hd/code/gameres/tools/{realesrgan,diffusion} ~/ra2-hd/env/gameres/tools/`).
 
 ```sh
 mkdir -p ~/ra2-hd/code/gameres/tools
@@ -256,24 +273,26 @@ Check: the last line is `models OK (mps=True)` (offline load of the three models
 same way `rematerialize.py` loads them; about 15 s, ~10 GB RAM). `mps=False` means the
 GPU backend is unavailable and diffusion would fall back to a very slow CPU path.
 
-8b. Plain `python3` packages for the other asset tools in `packages/ra2-assets/python/`
+8b. System-Python packages for the other asset tools in `packages/ra2-assets/python/`
 (NumPy, Pillow, OpenCV), pinned in
 [backup/python/system-python-requirements.txt](backup/python/system-python-requirements.txt).
 They were installed into Homebrew Python 3.14 on the Build 12 machine:
 
 ```sh
-/opt/homebrew/bin/python3 -m pip install --break-system-packages -r ~/ra2-hd/code/backup/python/system-python-requirements.txt
-python3 -c "import numpy, PIL, cv2; print(numpy.__version__, PIL.__version__, cv2.__version__)"   # check: 2.5.2 12.3.0 5.0.0
+PY=/opt/homebrew/bin/python3   # explicit interpreter; the bare `python3` on PATH may differ
+$PY -m pip install --break-system-packages -r ~/ra2-hd/code/backup/python/system-python-requirements.txt
+$PY -c "import numpy, PIL, cv2; print(numpy.__version__, PIL.__version__, cv2.__version__)"   # check: 2.5.2 12.3.0 5.0.0
 ```
 
 8c. Real-ESRGAN check (runs on the GPU through Vulkan/MoltenVK, no network):
 
 ```sh
 cd ~/ra2-hd/code/gameres/tools/realesrgan
+PY=/opt/homebrew/bin/python3   # same interpreter as 8b
 T=~/ra2-hd/dl-env
-python3 -c "import sys; from PIL import Image; Image.new('RGB',(32,32),(90,140,60)).save(sys.argv[1])" $T/esr-in.png
+$PY -c "import sys; from PIL import Image; Image.new('RGB',(32,32),(90,140,60)).save(sys.argv[1])" $T/esr-in.png
 ./realesrgan-ncnn-vulkan -i $T/esr-in.png -o $T/esr-out.png -n realesrgan-x4plus -s 4 -m models
-python3 -c "import sys; from PIL import Image; print(Image.open(sys.argv[1]).size)" $T/esr-out.png   # check: (128, 128)
+$PY -c "import sys; from PIL import Image; print(Image.open(sys.argv[1]).size)" $T/esr-out.png   # check: (128, 128)
 ```
 
 Neither environment is needed just to play; they are needed to prepare new maps or
@@ -288,7 +307,15 @@ restores the original afterwards.
 
 ```sh
 ls ~/ra2-hd/game/YURI/gamemd.exe ~/ra2-hd/game/YURI/Blowfish.dll && echo game-ok
+echo "7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6  $HOME/ra2-hd/game/YURI/gamemd.exe" | shasum -a 256 -c -
 ```
+
+The supported `gamemd.exe` is Yuri's Revenge 1.001 with sha256
+`7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6` (the digest of both
+the owner's play copy and the development copy on the original machine). A different
+digest is reported to the owner, not treated as fatal: the launcher's own version check
+in step 10 decides whether the page supports that build, and the file is never patched or
+replaced.
 
 ## 10. Launcher path check
 
@@ -393,15 +420,15 @@ from `gameres/s2x/backup/` (logs in `work/upload.log` and `env/work/upload.log`)
 
 本文件是给 AI 编程助手的新 Mac（Apple Silicon）安装手册，机主可同时阅读。按顺序执行，每一步都有检查，检查不通过就停下。
 
-1. 发布 `farm-build12-20261102` 存高清缓存（32 块）、原生组件 `ddraw.dll`/`ra2launch.exe` 和启动器；发布 `env-build12-20261102` 存免费 Wine 11.0（原样的上游压缩包）、Real-ESRGAN 程序与模型、SDXL 扩散模型及许可证（6 块）。环境附件在高清缓存上传完成后才开始上传，开始前先确认块数分别为 32 和 6。
+1. 发布 `farm-build12-20261102` 存高清缓存（32 块）、原生组件 `ddraw.dll`/`ra2launch.exe` 和启动器；发布 `env-build12-20261102` 存免费 Wine 11.0（原样的上游压缩包）、Real-ESRGAN 程序与模型、SDXL 扩散模型及许可证（6 块）。环境附件在高清缓存上传完成后才开始上传；第 6、7 步各自在恢复前确认块数分别为 32 和 6，并重新下载 `SHA256SUMS`。
 2. 需要至少 85 GiB 可用空间；逐块下载、恢复、删除，不要一次下载全部。
 3. 用 Homebrew 安装 gh、node@26、pnpm（仓库固定 11.24.0）、zstd、xz、python@3.14、uv、Google Chrome；Rosetta、`gh auth login`、sudo 等由机主本人执行。
 4. 克隆本仓库到 `~/ra2-hd/code`，`pnpm install --frozen-lockfile`。
 5. 下载并核对 `ddraw.dll`、`ra2launch.exe`，放入 `packages/native-host/build/`。
 6. 用 `restore_farm.py` 逐块恢复高清缓存，最后应显示 `13301 farm paths checked, 0 problems`。
-7. 用 `restore_env.py` 按顺序逐块恢复环境包，最后应显示 `54 files checked, 0 problems`；解压 Wine 到 `~/ra2-hd/wine`（`wine --version` 为 `wine-11.0`），把 `realesrgan`、`diffusion` 移到 `code/gameres/tools/`。
-8. 用 uv 按 `backup/python/diffusion-requirements.txt` 重建扩散虚拟环境（Python 3.12.13），`check_models.py` 应输出 `models OK (mps=True)`；系统 python3 按 `system-python-requirements.txt` 安装 NumPy、Pillow、OpenCV。仅玩游戏不需要这两个环境。
-9. 游戏副本必须由机主从自己的安装复制到 `~/ra2-hd/game/YURI`，绝不下载。
+7. 用 `restore_env.py` 按顺序逐块恢复环境包，最后应显示 `54 files checked, 0 problems`；解压 Wine 到 `~/ra2-hd/wine`（`wine --version` 为 `wine-11.0`），`--finish` 只在移动之前运行一次；把 `realesrgan`、`diffusion` 移到 `code/gameres/tools/` 后如需重跑，要先把两个文件夹移回 `~/ra2-hd/env/gameres/tools/`。
+8. 用 uv 按 `backup/python/diffusion-requirements.txt` 重建扩散虚拟环境（Python 3.12.13），`check_models.py` 应输出 `models OK (mps=True)`；系统 python3 按 `system-python-requirements.txt` 安装 NumPy、Pillow、OpenCV。仅玩游戏不需要这两个环境。解释器使用显式路径 `/opt/homebrew/bin/python3`。
+9. 游戏副本必须由机主从自己的安装复制到 `~/ra2-hd/game/YURI`，绝不下载；受支持的 `gamemd.exe`（YR 1.001）sha256 为 `7b8a0685…db94b6`，不一致只报告、不视为致命。
 10. `launcher-build12.command --check` 最后一行应为「路径检查通过……」。
 11. 首次启动会创建独立 Wine 环境（约 1 分钟），在 Chrome 中点「全屏开始」；记录在 `packages/native-host/build/play-*/`。
 12. 确认高清：画面明显更清晰、无洋红/粉色块；按 `\` 能在高清与原版之间切换；没有「高清画面未启用/加载失败」提示；控制台 `__hdBridge.presentation.mode` 为 `'hd'`。最终以机主真实对局为准。
