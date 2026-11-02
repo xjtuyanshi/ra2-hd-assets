@@ -273,6 +273,10 @@ export class NativeCore {
   private command: ReaderSlot<GameCommandState> = { reader: null, previous: null, error: null };
   private frame: ReaderSlot<GameFrameCounters> = { reader: null, previous: null, error: null };
   private passthrough: RenderPassthroughControl | null = null;
+  /** See repaintAttachedBattlefield; failed attempts are retried a bounded number of times. */
+  private battlefieldRepaint: 'owed' | 'pending' | 'done' = 'owed';
+  private battlefieldRepaintFailures = 0;
+  private battlefieldRepaintAt: number | null = null;
   private undo: NativeWrite[] = [];
   private readonly allocations = new Map<number, number>();
   private operationTail: Promise<unknown> = Promise.resolve();
@@ -826,6 +830,8 @@ export class NativeCore {
       if (this.options.pageCursor !== undefined && this.hello.surface.width > 0 && this.hello.surface.height > 0)
         await this.readCurrentPointer(this.hello.surface.width, this.hello.surface.height);
       this.running = true;
+      // Attached to a running match: ask for the repaint before the first HD state read, which can take seconds.
+      this.repaintAttachedBattlefield();
       this.mirrorWatchdog = setInterval(() => this.checkMirrorHealth(), 250);
       this.status('running', '已连接本机游戏');
       this.requestNextFrame();
@@ -1305,6 +1311,7 @@ export class NativeCore {
     this.renderPending++;
     try {
       const result = await this.read(this.render, () => this.policy!.createRenderReader());
+      if (result?.map) this.repaintAttachedBattlefield();
       if (result) {
         this.cadence.renderHandoffs++;
         if (this.cadenceHandoffFrame !== result.frame) {
@@ -1363,26 +1370,7 @@ export class NativeCore {
       if (!this.running || !this.policy || !this.options.renderPassthrough) return false;
       if (!this.passthrough && flags === 0) return true;
       if (flags !== 0 && (!this.hasCurrentMirror() || this.recovering)) return false;
-      if (!this.passthrough) {
-        await this.preparePolicy();
-        this.passthrough = await runNativeTransaction(
-          this.memory,
-          (transaction) => this.policy!.installPassthrough(transaction, transaction.reserve),
-          {
-            ...this.host,
-            commit: async (writes) => {
-              if (!writes.length) return;
-              await this.connection.batch(writes);
-              this.undo = writes.map((write) => ({
-                address: write.address,
-                expected: write.bytes.slice(),
-                bytes: write.expected.slice(),
-              }));
-            },
-          },
-        );
-      }
-      if (!this.passthrough) return false;
+      if (!(await this.installPassthrough())) return false;
       return runNativeTransaction(
         this.memory,
         (transaction) => this.passthrough!.set(transaction, this.recovering ? 0 : flags),
@@ -1391,6 +1379,65 @@ export class NativeCore {
     });
     this.passthroughTail = pending.catch(() => undefined);
     return pending;
+  }
+  private async installPassthrough(): Promise<boolean> {
+    if (!this.passthrough) {
+      await this.preparePolicy();
+      this.passthrough = await runNativeTransaction(
+        this.memory,
+        (transaction) => this.policy!.installPassthrough(transaction, transaction.reserve),
+        {
+          ...this.host,
+          commit: async (writes) => {
+            if (!writes.length) return;
+            await this.connection.batch(writes);
+            this.undo = writes.map((write) => ({
+              address: write.address,
+              expected: write.bytes.slice(),
+              bytes: write.expected.slice(),
+            }));
+          },
+        },
+      );
+    }
+    return !!this.passthrough;
+  }
+  /**
+   * Once per connection, as soon as it is attached to a complete game image (else at the first battlefield it reads):
+   * have the game repaint its whole tactical view. A page
+   * reload attaches a new client to a running match; the previous client's terrain passthrough had skipped the
+   * game's terrain-cache maintenance, and the agent's disconnect teardown restores the original entry sites without a
+   * repaint. The original picture then copies that stale cache (the key colour, or terrain from an earlier view
+   * position) for as long as the HD view prepares. Nothing else changes: the gates installed for the request stay
+   * inert with every category off, exactly as after the HD view is switched off. The guest takes the request at its
+   * next battle frame start, so one made in a menu waits for the next match, where it costs one ordinary full redraw.
+   */
+  private repaintAttachedBattlefield(): void {
+    if (this.battlefieldRepaint !== 'owed' || !this.options.renderPassthrough) return;
+    this.battlefieldRepaint = 'pending';
+    const pending = this.passthroughTail.then(async () => {
+      if (!this.running || !this.policy || !this.hasCurrentMirror()) return false;
+      // Without the game thread (a menu attachment) the gates cannot be installed yet; a later battlefield can.
+      if (!(await this.installPassthrough())) return this.metadata.gameThreadId > 0 ? null : false;
+      return runNativeTransaction(
+        this.memory,
+        (transaction) => this.passthrough!.repaint?.(transaction) ?? null,
+        this.host,
+      );
+    });
+    this.passthroughTail = pending.catch(() => undefined);
+    void pending.then(
+      (done) => {
+        // Not requested yet (no complete mirror): the next battlefield read asks again. An executable without the
+        // validated passthrough sites cannot be repainted from here, and is not asked again.
+        this.battlefieldRepaint = done === false ? 'owed' : 'done';
+        if (done) this.battlefieldRepaintAt = performance.timeOrigin + performance.now();
+      },
+      (error) => {
+        this.battlefieldRepaint = ++this.battlefieldRepaintFailures < 3 ? 'owed' : 'done';
+        console.warn('[native] battlefield repaint request failed', error);
+      },
+    );
   }
 
   /** Called only after the presenter ACK, so hidden pages naturally backpressure native picture capture. */
@@ -1518,6 +1565,7 @@ export class NativeCore {
         awaitingLogicMirror: !this.policyPrepared || !this.memory.complete,
         mirrorMisses: this.memory.misses,
         renderHealth: { unreadableSinceEpochMs: this.unreadableSinceEpochMs },
+        battlefieldRepaint: { state: this.battlefieldRepaint, requestedAtEpochMs: this.battlefieldRepaintAt },
         lastReaderError: this.render.error ?? this.command.error ?? this.frame.error,
         readerErrors: { render: this.render.error, command: this.command.error, performance: this.frame.error },
         stateReadMs: this.stateReadMs,

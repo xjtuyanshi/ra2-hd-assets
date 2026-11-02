@@ -56,6 +56,14 @@ export interface RenderPassthroughControl {
    * view). False when the flags cannot be applied.
    */
   set(memory: GuestMemory, flags: number): boolean;
+  /**
+   * Request one full repaint of the tactical view at the next frame boundary without changing the categories. A host
+   * that attaches to a game another client drove uses it: that client's terrain passthrough skipped the game's own
+   * terrain-cache maintenance, and a disconnect that restores the original entry sites does not repaint, so the
+   * original picture would otherwise copy the stale cache (key colour, or terrain from another view position) until
+   * the game itself redraws everything. Optional; false when the request cannot be made.
+   */
+  repaint?(memory: GuestMemory): boolean;
   read(memory: GuestMemory): RenderPassthroughStats;
 }
 

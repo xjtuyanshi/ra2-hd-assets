@@ -96,6 +96,19 @@ describe('YR 1.001 原生叠加层直通补丁', () => {
     expect(control.set(memory, -1)).toBe(false);
   });
 
+  it('接管运行中的对局：只请求一次整屏重绘，不改类别开关', () => {
+    const { memory, reserve } = imageWithOriginals();
+    const result = installYrTacticalPassthrough(memory, reserve);
+    if (!result.ok) throw new Error(result.reason);
+    const { gates, control } = result;
+    const request = gates.data + GATE_DATA.user + 12;
+    expect(control.repaint?.(memory)).toBe(true);
+    expect(readU32(memory, request)).toBe(1);
+    expect(control.read(memory)).toMatchObject({ flags: 0, applied: 0 });
+    expect(readGateSwitches(memory, gates, 'pending')).toEqual([]);
+    expect(readGateSwitches(memory, gates)).toEqual([]);
+  });
+
   it('特效列表：寿命/移除/释放所在的 EBolt、RadBeam 列表压制运行，LineTrail 只跳过单条绘制，纯绘制列表整体跳过', () => {
     const byName = new Map(YR_PASSTHROUGH_GATES.map((gate) => [gate.name, gate]));
     const call = (address: number, target: number) => ({ kind: 'call', address, target });

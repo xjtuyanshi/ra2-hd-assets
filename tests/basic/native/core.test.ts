@@ -2122,4 +2122,102 @@ describe('native core session and presenter lifecycle', () => {
     agent.mirror(4, [{ address: 0x1000, bytes: agent.initial }], 2);
     await flush();
   });
+  describe('battlefield repaint after attaching', () => {
+    function withControl(options: Partial<NativeCoreOptions>) {
+      const test = setup({}, options);
+      const factory = vi.mocked(test.policyFactory).getMockImplementation()!;
+      const setFlags = vi.fn((_memory: GuestMemory, _flags: number) => true);
+      const repaintCalls = vi.fn((_memory: GuestMemory) => true);
+      const install = vi.fn(() => ({
+        supported: 7,
+        keyRgb565: 0xf81f,
+        configAddress: 0x1000,
+        set: setFlags,
+        repaint: repaintCalls,
+        read: () => ({ flags: 0, applied: 0, counters: {} }),
+      }));
+      vi.mocked(test.policyFactory).mockImplementation((...args) => ({
+        ...factory(...args),
+        installPassthrough: install,
+      }));
+      return { ...test, setFlags, repaint: repaintCalls, install };
+    }
+    const battle = { name: 'test' } as unknown as GameRenderState['map'];
+
+    it('asks a running match once per connection to repaint what a previous client may have left stale', async () => {
+      const { core, agent, mode, setFlags, repaint, install } = withControl({ renderPassthrough: true });
+      mode.map = battle;
+      const start = core.start();
+      agent.hello();
+      await start;
+      await flush();
+      // Attached to a complete image: requested at once, before the first HD state read.
+      expect(install).toHaveBeenCalledOnce();
+      expect(repaint).toHaveBeenCalledOnce();
+      // No category is switched on and the original picture keeps every pixel the game draws.
+      expect(setFlags).not.toHaveBeenCalled();
+      expect((await core.getDiagnostics('sample')).native).toMatchObject({
+        battlefieldRepaint: { state: 'done', requestedAtEpochMs: expect.any(Number) },
+      });
+      expect((await core.getRenderState())?.map).toBe(battle);
+      const next = agent.initial.slice();
+      next[0] = 8;
+      agent.mirror(2, [{ address: 0x1000, bytes: next }]);
+      await core.getRenderState();
+      await flush();
+      expect(repaint).toHaveBeenCalledOnce();
+      // The installed gates serve the HD view's later requests without a second installation.
+      expect(await core.setTacticalPassthrough(7)).toBe(true);
+      expect(install).toHaveBeenCalledOnce();
+      expect(setFlags.mock.calls.at(-1)?.[1]).toBe(7);
+    });
+
+    it('waits for a complete image when attached at a menu, then asks at the first battlefield', async () => {
+      const { core, agent, mode, repaint, install } = withControl({ renderPassthrough: true });
+      agent.modal = true;
+      agent.threadId = 0;
+      agent.mirrorOnHook = false;
+      const start = core.start();
+      agent.hello();
+      await start;
+      await flush();
+      expect(core.memory.complete).toBe(false);
+      expect(install).not.toHaveBeenCalled();
+      agent.modal = false;
+      agent.threadId = 77;
+      mode.map = battle;
+      agent.mirror(100, [{ address: 0x1000, bytes: agent.initial }], 2);
+      expect((await core.getRenderState())?.map).toBe(battle);
+      await flush();
+      expect(install).toHaveBeenCalledOnce();
+      expect(repaint).toHaveBeenCalledOnce();
+    });
+
+    it('leaves the game untouched without passthrough support and does not retry an executable it cannot patch', async () => {
+      const plain = withControl({});
+      plain.mode.map = battle;
+      const start = plain.core.start();
+      plain.agent.hello();
+      await start;
+      await plain.core.getRenderState();
+      await flush();
+      expect(plain.install).not.toHaveBeenCalled();
+
+      const unpatched = withControl({ renderPassthrough: true });
+      unpatched.install.mockReturnValue(null as never);
+      unpatched.mode.map = battle;
+      const second = unpatched.core.start();
+      unpatched.agent.hello();
+      await second;
+      await unpatched.core.getRenderState();
+      await flush();
+      const next = unpatched.agent.initial.slice();
+      next[0] = 8;
+      unpatched.agent.mirror(2, [{ address: 0x1000, bytes: next }]);
+      await unpatched.core.getRenderState();
+      await flush();
+      expect(unpatched.install).toHaveBeenCalledOnce();
+      expect(unpatched.repaint).not.toHaveBeenCalled();
+    });
+  });
 });

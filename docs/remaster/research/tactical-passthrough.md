@@ -250,7 +250,8 @@ around `cx`/`cy`, frozen at progress 0.5. `bprogress=0..1` selects a different l
 - Map-placed tile animations are AnimClass objects and follow the effects category.
 - Object and layer draws, and the EBolt and RadBeam lists, still run with only their pixel output removed (selection
   registration, visibility flags, effect ageing and removal). Skipped outright are the terrain passes (they maintain
-  the Tile cache, which the frame never shows while terrain is on; switching off repaints it), the ore glints, the
+  the Tile cache, which the frame never shows while terrain is on; switching off repaints it, and so does the
+  control's `repaint` request, which the native host sends after a client that left terrain on disconnected), the ore glints, the
   IonBlast, Spotlight and laser lists and the per-trail LineTrail draw. None of these keeps simulation state, but not
   all of them only draw, so with passthrough on the process differs from a native run in these ways (each of them
   also varies natively with what is on screen or with the frame rate):

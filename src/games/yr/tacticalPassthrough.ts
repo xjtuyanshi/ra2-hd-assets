@@ -386,6 +386,12 @@ function createControl(gates: InstalledGates, userBase: number): RenderPassthrou
       if (flags !== previous) memory.write_memory(new Uint8Array(le32(1)), userBase + WORD.redrawRequest * 4);
       return true;
     },
+    repaint(memory) {
+      // The redraw:request stub latches the (unchanged) switches and calls GScreenClass::MarkNeedsRedraw(1) at the
+      // next frame start, which redraws the whole terrain cache DSurface::Tile.
+      memory.write_memory(new Uint8Array(le32(1)), userBase + WORD.redrawRequest * 4);
+      return true;
+    },
     read(memory) {
       const words = readUserWords(memory, userBase);
       return {
