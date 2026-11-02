@@ -18,6 +18,7 @@ import {
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
 import * as uiAssetsModule from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdMenus } from '../../src/ui/pages/game/hdMenus';
+import { menuSliderParts, menuSliderPlateFactor, menuSliderPlatePixels } from '../../src/ui/pages/game/hdMenuSlider';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
 import { identifyYrHdMenu, yrMenuText } from '../../src/games/yr/hdMenus';
@@ -2493,5 +2494,248 @@ describe('HD setup complete geometry and popup fallback', () => {
     const hiddenRows = setup();
     hiddenRows.controls.push({ ...control(1902, 'ComboBox'), visible: false });
     expect(identifyYrHdMenu(hiddenRows)).toBe('setup');
+  });
+  it('redraws reviewed sliders and disabled shell buttons only when the manifest opts in', async () => {
+    const snapshot = setup();
+    for (const control of snapshot.controls) {
+      control.text = 'A';
+      if (control.items) control.items = ['A'];
+      if (control.slider) control.slider.valueText = 'A';
+    }
+    snapshot.controls.find(({ id }) => id === 1696)!.edit = {
+      caret: 0,
+      firstVisible: 0,
+      caretVisible: false,
+      caretColor: 0xffff00,
+    };
+    // The observed set-up geometry: a 22-pixel control, 12x22 thumb, plate right of the groove.
+    const slider = snapshot.controls.find(({ id }) => id === 1321)!;
+    slider.rect = { x: 404, y: 286, width: 129, height: 22 };
+    slider.slider = {
+      min: 0,
+      max: 6,
+      value: 5,
+      valueText: 'A',
+      groove: { x: 404, y: 286, width: 79, height: 22 },
+      thumb: { x: 459, y: 286, width: 12, height: 22 },
+    };
+    const disabled = snapshot.controls.find(({ id }) => id === 1450)!;
+    disabled.rect = { x: 644, y: 283, width: 156, height: 42 };
+    disabled.enabled = false;
+    const buttons = { normal: 'plate.png', hover: 'plate.png', pressed: 'plate.png', disabled: 'plate.png' };
+    let manifest: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (url: string) => ({
+      ok: true,
+      json: async () =>
+        url.endsWith('menus.json')
+          ? {
+              version: 1,
+              strings: 'strings.json',
+              fontMetrics: 'font.json',
+              controlSkin: 'vector-v1',
+              main: { shell: 'shell.png', buttons },
+              setup: { background: 'setup.png', buttons },
+              themes: {},
+              ...manifest,
+            }
+          : url.endsWith('font.json')
+            ? { version: 1, lineHeight: 17, spacing: 1, glyphs: { 65: [7, 0, 4, 7, 9] } }
+            : {},
+      blob: async () => new Blob(),
+    }));
+    vi.stubGlobal('createImageBitmap', async () => ({ close: vi.fn() }));
+    const surfaces: { width: number; height: number; put: unknown[] }[] = [];
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        put: unknown[] = [];
+        constructor(
+          public width: number,
+          public height: number,
+        ) {
+          surfaces.push(this);
+        }
+        getContext() {
+          return { putImageData: (...args: unknown[]) => this.put.push(args) };
+        }
+      },
+    );
+    vi.stubGlobal(
+      'ImageData',
+      class {
+        constructor(
+          public data: Uint8ClampedArray,
+          public width: number,
+          public height: number,
+        ) {}
+      },
+    );
+    const { ctx, calls } = recording();
+    // The renderer's device transform: 800x600 drawn into a 1200x900 canvas.
+    (ctx as unknown as { getTransform: () => object }).getTransform = () => ({
+      a: 1.5,
+      b: 0,
+      c: 0,
+      d: 1.5,
+      e: 0,
+      f: 0,
+    });
+    const canvas = {
+      style: {} as Record<string, string>,
+      dataset: {} as Record<string, string>,
+      width: 0,
+      height: 0,
+      setAttribute: vi.fn(),
+      getContext: () => ctx,
+      remove: vi.fn(),
+    };
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('document', { createElement: () => canvas, pointerLockElement: null });
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal('window', Object.assign(new EventTarget(), { devicePixelRatio: 1.5, setTimeout: () => 0 }));
+    const screen = Object.assign(new EventTarget(), {
+      offsetLeft: 0,
+      offsetTop: 0,
+      clientWidth: 800,
+      clientHeight: 600,
+      parentElement: { appendChild: vi.fn() },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
+    });
+    const paint = async () => {
+      const menus = await startHdMenus({
+        screen: screen as unknown as HTMLCanvasElement,
+        vm: { getMenuSnapshot: async () => structuredClone(snapshot) } as unknown as Parameters<
+          typeof startHdMenus
+        >[0]['vm'],
+        side: () => 0,
+        pageCursorAvailable: () => true,
+        frameSize: () => ({ width: 800, height: 600 }),
+        pictureGeneration: () => 1,
+      });
+      await settle();
+      while (frames.length) frames.shift()!(0);
+      expect([canvas.style.display, canvas.dataset.fallback]).toEqual(['block', undefined]);
+      menus?.dispose();
+    };
+    const cleared = (x: number, y: number) =>
+      calls.some(({ name, args }) => name === 'clearRect' && args[0] === x - 3 && args[1] === y - 3);
+    try {
+      // Older manifests keep both complete original controls.
+      await paint();
+      expect(cleared(404, 286)).toBe(true);
+      expect(cleared(644, 283)).toBe(true);
+      expect(surfaces).toEqual([]);
+
+      calls.length = 0;
+      manifest = { sliderSkin: 'vector-v1', disabledButtonSkin: 'caption-v1' };
+      await paint();
+      expect(cleared(404, 286)).toBe(false);
+      expect(cleared(644, 283)).toBe(false);
+      // One device-resolution plate (48x22 source pixels at 1.5) placed at its device box.
+      expect(surfaces.map(({ width, height }) => [width, height])).toEqual([[73, 33]]);
+      expect(calls.some(({ name, args }) => name === 'drawImage' && args[0] === surfaces[0] && args[1] === 727)).toBe(
+        true,
+      );
+      // The thumb and both bevel lines are drawn in source pixels at the native rectangles.
+      expect(calls.some(({ name, args }) => name === 'fillRect' && args.join() === '459,286,12,22')).toBe(true);
+      expect(
+        calls.some(
+          ({ name, args, style }) =>
+            name === 'fillRect' && args.join() === '402,284,132,1' && style.fillStyle === '#a5bec6',
+        ),
+      ).toBe(true);
+      // The disabled plate is the unfiltered art with the source's dark caption.
+      const plate = calls.find(({ name, args }) => name === 'drawImage' && args[1] === 644 && args[2] === 283)!;
+      expect(plate.style.filter).toBeUndefined();
+      const captions = calls.filter(({ name, style }) => name === 'fillText' && style.fillStyle === '#4a0000');
+      expect(captions.length).toBeGreaterThan(0);
+
+      // A disabled or differently shaped slider keeps the original control.
+      calls.length = 0;
+      surfaces.length = 0;
+      slider.enabled = false;
+      await paint();
+      expect(cleared(404, 286)).toBe(true);
+      slider.enabled = true;
+      slider.slider!.thumb!.height = 20;
+      calls.length = 0;
+      await paint();
+      expect(cleared(404, 286)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('HD menu slider skin', () => {
+  const slider = (thumbX = 459): MenuControlSnapshot => ({
+    hwnd: 7,
+    parent: 1,
+    id: 1321,
+    className: 'msctls_trackbar32',
+    style: 0,
+    text: '',
+    textComplete: true,
+    rect: { x: 404, y: 286, width: 129, height: 22 },
+    visible: true,
+    enabled: true,
+    focused: false,
+    pressed: false,
+    slider: {
+      min: 0,
+      max: 6,
+      value: 5,
+      valueText: '5',
+      groove: { x: 404, y: 286, width: 79, height: 22 },
+      thumb: { x: thumbX, y: 286, width: 12, height: 22 },
+    },
+  });
+  it('accepts only the observed set-up geometry and places the plate right of the divider', () => {
+    expect(menuSliderParts(slider())?.plate).toEqual({ x: 485, y: 286, width: 48, height: 22 });
+    expect(menuSliderParts(slider(404))).not.toBeNull();
+    expect(menuSliderParts(slider(471))).not.toBeNull();
+    for (const change of [
+      (c: MenuControlSnapshot) => (c.enabled = false),
+      (c: MenuControlSnapshot) => (c.slider!.thumb = undefined),
+      (c: MenuControlSnapshot) => (c.slider!.thumb!.x = 472),
+      (c: MenuControlSnapshot) => (c.slider!.thumb!.width = 14),
+      (c: MenuControlSnapshot) => (c.rect.height = 24),
+      (c: MenuControlSnapshot) => (c.slider!.groove!.x = 405),
+      (c: MenuControlSnapshot) => (c.slider!.groove!.width = 118),
+    ]) {
+      const control = slider();
+      change(control);
+      expect(menuSliderParts(control)).toBeNull();
+    }
+  });
+  it('darkens the plate rim continuously, keeps the flat interior and corners as measured', () => {
+    expect(menuSliderPlateFactor(24, 11, 48, 22)).toBe(1);
+    // The outermost source pixels sit near a quarter of the flat colour.
+    expect(menuSliderPlateFactor(0.5, 11, 48, 22)).toBeGreaterThan(0.25);
+    expect(menuSliderPlateFactor(0.5, 11, 48, 22)).toBeLessThan(0.35);
+    expect(menuSliderPlateFactor(0.5, 0.5, 48, 22)).toBeLessThan(0.3);
+    let previous = 1;
+    for (let u = 24; u >= 0; u -= 0.25) {
+      const factor = menuSliderPlateFactor(u, 11, 48, 22);
+      expect(factor).toBeLessThanOrEqual(previous + 1e-9);
+      previous = factor;
+    }
+    const pixels = menuSliderPlatePixels({ x: 485, y: 286, width: 48, height: 22 }, 4.3, 4.3);
+    expect([pixels.x, pixels.y, pixels.width, pixels.height]).toEqual([2085, 1229, 207, 96]);
+    const at = (column: number, row: number) =>
+      Array.from(pixels.data.subarray((row * pixels.width + column) * 4, (row * pixels.width + column) * 4 + 4));
+    expect(at(103, 48)).toEqual([88, 0, 0, 255]);
+    // Fractional device edges are partly covered rather than snapped.
+    expect(at(0, 48)[3]).toBeGreaterThan(0);
+    expect(at(0, 48)[3]).toBeLessThan(255);
+    expect(at(1, 48)[3]).toBe(255);
   });
 });
