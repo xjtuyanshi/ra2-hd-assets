@@ -177,6 +177,85 @@ def bleed(rgba: np.ndarray) -> np.ndarray:
     return remat.fill_transparent_rgb(rgba)
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Speckle guard (opt-in, --speckle-guard).
+#
+# Some original tiles are a high-contrast speckle at the pixel scale with no larger structure, e.g. the snow/grass mix
+# of the snow theatre (XMP32S8, build 12). Their features are 1-3 source pixels, i.e. 4-12 px at the 4x generation
+# scale, right at SDXL's 8 px latent cell. The tile ControlNet turns each cluster into an outlined, embossed loop, and
+# because the original tile repeats once per cell, the map shows a regular wormy pattern that is not in the original
+# (judged at 1:1 against the original on XMP32S8; open snow, rock speckle, roads and cliffs were faithful). Where the
+# source has that texture, the re-detail is replaced by the original itself upscaled with Lanczos: faithful speckle
+# with sharper edges than Real-ESRGAN, and no invented shapes.
+#
+# The classification uses only luminance statistics of the source: strong fine-scale (sigma 1) contrast, covering most
+# pixels (not a thin marking line), and much stronger than the large-scale (sigma 4-12) structure. Measured on XMP32S8
+# (Lab L, source pixels): snow/grass mix fine 7.1-7.9, fine/(large+0.5) 2.3-2.9, dense fraction 0.65-0.73; cliffs
+# ratio 1.1 (p90 1.6); roads 0.7; rock speckle on snow fine 4.3; open snow fine 1.2. About 10 % of XMP32S8's land is
+# guarded. It is calibrated on the snow theatre only: on temperate XMP27T8 the same thresholds catch cliff tops and
+# parts of the darker grass while leaving the rest, which would make grass patchy, so callers enable it per map.
+
+SPECKLE_FINE = (4.5, 6.0)  # smoothstep range of the sigma-1 high-pass RMS (Lab L)
+SPECKLE_RATIO = (1.7, 2.2)  # smoothstep range of fine / (large-scale band RMS + 0.5)
+SPECKLE_DENSE = (0.4, 0.55)  # smoothstep range of the local fraction of pixels with |sigma-1 high-pass| > 3
+SPECKLE_DILATE = 6  # source pixels: also cover the transition cells at patch borders
+
+
+def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    t = np.clip((x - lo) / (hi - lo), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def _max_filter(a: np.ndarray, radius: int) -> np.ndarray:
+    out = np.asarray(a, np.float32).copy()
+    h, w = out.shape
+    padded = np.pad(out, ((0, 0), (radius, radius)), mode="edge")
+    for shift in range(2 * radius + 1):
+        out = np.maximum(out, padded[:, shift:shift + w])
+    padded = np.pad(out, ((radius, radius), (0, 0)), mode="edge")
+    for shift in range(2 * radius + 1):
+        out = np.maximum(out, padded[shift:shift + h])
+    return out
+
+
+def speckle_weight(source_rgba: np.ndarray) -> np.ndarray:
+    """Scale-1 weight in [0, 1] of the pixel-scale speckle texture that diffusion turns into a wormy pattern."""
+    rgb = bleed(source_rgba)
+    lum = srgb_to_lab(rgb)[..., 0]
+    b1, b4, b12 = (remat.gaussian_blur(lum, s) for s in (1.0, 4.0, 12.0))
+    fine = np.sqrt(remat.gaussian_blur((lum - b1) ** 2, 6.0))
+    large = np.sqrt(remat.gaussian_blur((b4 - b12) ** 2, 8.0))
+    dense = remat.gaussian_blur((np.abs(lum - b1) > 3).astype(np.float32), 6.0)
+    weight = _smoothstep(fine, *SPECKLE_FINE) * _smoothstep(fine / (large + 0.5), *SPECKLE_RATIO) \
+        * _smoothstep(dense, *SPECKLE_DENSE)
+    weight = remat.gaussian_blur(_max_filter(weight, SPECKLE_DILATE), 2.0)
+    return np.clip(weight, 0, 1) * (np.asarray(source_rgba)[..., 3] > 0)
+
+
+def speckle_guard(result: np.ndarray, source: np.ndarray, box: tuple[int, int, int, int], scale: int,
+                  pad: int = 64) -> tuple[np.ndarray, float]:
+    """Blend `result` (RGB float, the base-scale crop of source pixels box = sx0, sy0, sx1, sy1) towards the Lanczos
+    upscale of the original where the source is pixel-scale speckle. The weight and the Lanczos image are computed on a
+    padded source crop so band edges see the same values as a whole-map run. Returns (blended, guarded fraction)."""
+    sx0, sy0, sx1, sy1 = box
+    px0, py0 = max(0, sx0 - pad), max(0, sy0 - pad)
+    px1, py1 = min(source.shape[1], sx1 + pad), min(source.shape[0], sy1 + pad)
+    crop = np.asarray(source[py0:py1, px0:px1])
+    weight = speckle_weight(crop)
+    lz_rgb = np.rint(bleed(crop)).clip(0, 255).astype(np.uint8)
+    lz = np.asarray(Image.fromarray(lz_rgb).resize((crop.shape[1] * scale, crop.shape[0] * scale), Image.LANCZOS),
+                    np.float32)
+    up = np.asarray(Image.fromarray(weight.astype(np.float32), mode="F").resize(
+        (crop.shape[1] * scale, crop.shape[0] * scale), Image.BILINEAR), np.float32)
+    ys = slice((sy0 - py0) * scale, (sy1 - py0) * scale)
+    xs = slice((sx0 - px0) * scale, (sx1 - px0) * scale)
+    w = np.clip(up[ys, xs], 0, 1)[..., None]
+    blended = np.asarray(result, np.float32) * (1 - w) + lz[ys, xs] * w
+    opaque = source[sy0:sy1, sx0:sx1, 3] > 0
+    guarded = float((weight[sy0 - py0:sy1 - py0, sx0 - px0:sx1 - px0] > 0.5)[opaque].mean()) if opaque.any() else 0.0
+    return blended, guarded
+
+
 def centred_tile_weights(tile: remat.Tile, blend: int) -> np.ndarray:
     """Tile weights whose cross-fade is at most `blend` pixels wide, centred in each overlap.
 
@@ -241,8 +320,52 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--structure-color-sigma", type=float, default=0.5,
                    help="finer Lab colour-match sigma (source pixels) on markings/kerbs outside flat ground; 0 = off")
     p.add_argument("--water-feather", type=float, default=3.0)
+    p.add_argument("--speckle-guard", action=argparse.BooleanOptionalAction, default=False,
+                   help="replace the re-detail with the Lanczos-upscaled original on pixel-scale speckle textures "
+                        "(see speckle_guard; calibrated on the snow theatre). Post-processing only: cached tiles are "
+                        "reused")
+    p.add_argument("--guard-existing", type=Path,
+                   help="no diffusion: apply the speckle guard to this existing full-size re-detail (same size as "
+                        "--base) over the whole map and write --output; water pixels and alpha come from --base")
     p.add_argument("--dry-run", action="store_true", help="identity diffusion (pipeline check without a GPU)")
     return p
+
+
+def guard_existing(args: argparse.Namespace, directory: Path, base: np.ndarray, source: np.ndarray, scale: int,
+                   water: np.ndarray | None) -> Path:
+    """Repair an already composed re-detail without the GPU (its tiles may be gone): speckle guard over the whole map,
+    in horizontal strips to bound memory, then the base's water pixels and alpha exactly as run() keeps them."""
+    existing = np.asarray(Image.open(args.guard_existing).convert("RGB"))
+    if existing.shape[:2] != base.shape[:2]:
+        raise ValueError(f"{args.guard_existing} is {existing.shape[1]}x{existing.shape[0]}; --base is "
+                         f"{base.shape[1]}x{base.shape[0]}")
+    out = base.copy()
+    sh = source.shape[0]
+    strip = 512
+    guarded_px = opaque_px = 0
+    for sy0 in range(0, sh, strip):
+        sy1 = min(sh, sy0 + strip)
+        y0, y1 = sy0 * scale, min(base.shape[0], sy1 * scale)
+        part, frac = speckle_guard(existing[y0:y1].astype(np.float32), source, (0, sy0, source.shape[1], sy1), scale)
+        n = int((source[sy0:sy1, :, 3] > 0).sum())
+        guarded_px += frac * n
+        opaque_px += n
+        crop_base = base[y0:y1]
+        if water is not None:
+            part = remat.preserve_water(part, crop_base[..., :3].astype(np.float32), water[y0:y1], args.water_feather)
+        opaque = crop_base[..., 3] > 0
+        rgb = crop_base[..., :3].copy()
+        rgb[opaque] = np.rint(part[opaque]).clip(0, 255).astype(np.uint8)
+        out[y0:y1, :, :3] = rgb
+    print(f"Speckle guard: {guarded_px / max(opaque_px, 1) * 100:.1f} % of the opaque source pixels", flush=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=args.output.parent, suffix=".tmp", delete=False) as handle:
+        tmp = Path(handle.name)
+    Image.fromarray(out).save(tmp, format="PNG")
+    tmp.chmod(0o644)
+    tmp.replace(args.output)
+    print(f"Wrote {args.output}", flush=True)
+    return args.output
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -274,6 +397,9 @@ def run(args: argparse.Namespace) -> Path:
         w_img = Image.open(remat.map_path(directory, ref["waterMask"]))
         if w_img.size == (base.shape[1], base.shape[0]):
             water = np.asarray(w_img.convert("L")).astype(np.float32) / 255
+    if args.guard_existing:
+        args.speckle_guard = True
+        return guard_existing(args, directory, base, source, scale, water)
 
     H, W = base.shape[:2]
     if args.region:
@@ -376,6 +502,9 @@ def run(args: argparse.Namespace) -> Path:
         flat = flat_ground_mask(bleed(src_rgba)).repeat(scale, 0).repeat(scale, 1).astype(np.float32)
         flat = remat.gaussian_blur(flat, scale / 2)[..., None]
         matched = matched * flat + fine * (1 - flat)
+    if args.speckle_guard:
+        matched, guarded = speckle_guard(matched, source, (sx0, sy0, sx1, sy1), scale)
+        print(f"Speckle guard: {guarded * 100:.1f} % of the opaque source pixels", flush=True)
     crop_base = base[y0:y1, x0:x1]
     if water is not None:
         matched = remat.preserve_water(matched, crop_base[..., :3].astype(np.float32), water[y0:y1, x0:x1],
