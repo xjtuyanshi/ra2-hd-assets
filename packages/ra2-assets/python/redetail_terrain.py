@@ -37,6 +37,10 @@ import time
 import numpy as np
 from PIL import Image
 
+# Whole-map terrain pages of large maps exceed Pillow's default decompression-bomb limit (XMP17T6 at 2x with bleed is
+# about 199 Mpx); these are our own trusted intermediates, so the limit is lifted for this tool.
+Image.MAX_IMAGE_PIXELS = None
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rematerialize as remat  # noqa: E402
 
