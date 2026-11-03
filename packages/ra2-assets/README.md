@@ -606,6 +606,19 @@ XMP27T8 they would catch cliff tops and part of the grass, so enable the guard p
 `--guard-existing PATH` applies the guard to an already composed full-size result without diffusion (for maps whose
 tiles are gone), keeping the base's water pixels and alpha.
 
+`--dark-floor K` (off by default) lifts every pixel whose luma (Rec. 709 weights on sRGB values) is more than K levels
+below the darker of the Lanczos-upscaled original and the Real-ESRGAN base at that pixel, with one gain on all three
+channels so hue and saturation stay; other pixels are unchanged. On temperate XDeath (build 12) the re-detail had turned
+the original's small dark grass pixels into near-black 3-5 px dots that the low-frequency colour match cannot see (the
+darkest 0.2 % luma of 256 px land blocks averaged 82.9 for the Lanczos original, 78.6 for Real-ESRGAN and 71.8 for the
+re-detail, with blocks down to 48), which also tripped the QA cell check. `--dark-floor 4` brought the block average to
+84.3 with no block more than 3 levels below the reference, kept the grass detail at 1:1 and 3x, and cut the cell-block
+fraction from 0.167 to 0.025. It also removes some high-pass energy (QA detail vs Real-ESRGAN 1.02 to 0.89 there), so
+watch the detail floor. The Real-ESRGAN reference is the manifest's `terrainMap.file` when it has the size of `--base`
+(chained bands pass the previous band as `--base`), else `--base`; `--dark-floor-reference` overrides it, which is
+needed when the staged map's effective terrain is already a re-detail. `--dark-floor-existing PATH` applies the floor to
+an already composed full-size result without diffusion, like `--guard-existing` (with which it combines).
+
 Temperate grass and sand need different settings from the defaults. On XMP27T8 (build 12) `--hybrid-alpha 1.8
 --strength 0.65` with the default prompt (which names pebbles and cracks) drew grass and sand as pebbles or scales
 outlined by a crack network at 1:1. Crop trials (256 source px, original | Real-ESRGAN | old | new at 1:1 and 3x) showed

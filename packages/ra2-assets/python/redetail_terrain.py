@@ -260,6 +260,74 @@ def speckle_guard(result: np.ndarray, source: np.ndarray, box: tuple[int, int, i
     return blended, guarded
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Dark floor (opt-in, --dark-floor K).
+#
+# On temperate XDeath (build 12) the re-detail turned the original's small dark grass pixels into near-black 3-5 px
+# dots: the darkest 0.2 % luma of 256 px land blocks averaged 82.9 for the Lanczos-upscaled original, 78.6 for the
+# Real-ESRGAN base and 71.8 for the re-detail, with blocks down to 48 where both references stay above 85. The colour
+# match only restores low-frequency colour, so these isolated dots survive it. The floor lifts every pixel whose luma
+# (Rec. 709 weights on the sRGB values) is below min(Lanczos original, Real-ESRGAN base) - K at that pixel, by a gain
+# on all three channels so its hue and saturation stay; pixels at or above the floor are unchanged. Both references
+# are needed: the Lanczos original keeps the original's own dark pixels (cliff shadows, holes), and Real-ESRGAN's
+# sharper edges can be darker than Lanczos ringing at strong structures.
+
+DARK_FLOOR_LUMA = np.array([0.2126, 0.7152, 0.0722], np.float32)
+
+
+def luma(rgb: np.ndarray) -> np.ndarray:
+    return np.asarray(rgb, np.float32)[..., :3] @ DARK_FLOOR_LUMA
+
+
+def apply_dark_floor(result: np.ndarray, floor: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Lift `result` (RGB, any dtype) to at least luma `floor` (per pixel) with a hue-keeping gain.
+
+    Returns (RGB float32, lifted mask). A near-black pixel (luma < 0.5) has no usable hue and becomes grey at the floor.
+    """
+    rgb = np.asarray(result, np.float32)[..., :3]
+    y = luma(rgb)
+    lift = y < floor
+    gain = np.where(lift, floor / np.maximum(y, 0.5), 1.0).astype(np.float32)
+    out = rgb * gain[..., None]
+    grey = lift & (y < 0.5)
+    if grey.any():
+        out[grey] = floor[grey][:, None]
+    return np.clip(out, 0, 255), lift
+
+
+def dark_floor_reference(source: np.ndarray, esrgan: np.ndarray, box: tuple[int, int, int, int], scale: int,
+                         pad: int = 16) -> np.ndarray:
+    """Per-pixel luma min(Lanczos upscale of the original, Real-ESRGAN base) for the base-scale crop of source pixels
+    box = (sx0, sy0, sx1, sy1); `esrgan` is that crop of the Real-ESRGAN base. The Lanczos image is computed on a padded
+    source crop so band edges see the same values as a whole-map run."""
+    sx0, sy0, sx1, sy1 = box
+    px0, py0 = max(0, sx0 - pad), max(0, sy0 - pad)
+    px1, py1 = min(source.shape[1], sx1 + pad), min(source.shape[0], sy1 + pad)
+    crop = np.asarray(source[py0:py1, px0:px1])
+    lz_rgb = np.rint(bleed(crop)).clip(0, 255).astype(np.uint8)
+    lz = np.asarray(Image.fromarray(lz_rgb).resize((crop.shape[1] * scale, crop.shape[0] * scale), Image.LANCZOS),
+                    np.float32)
+    lz = lz[(sy0 - py0) * scale:(sy1 - py0) * scale, (sx0 - px0) * scale:(sx1 - px0) * scale]
+    # A base may be one row taller or shorter than scale x source (run() accepts that); extra rows use Real-ESRGAN only.
+    ref = luma(esrgan)
+    h, w = min(lz.shape[0], ref.shape[0]), min(lz.shape[1], ref.shape[1])
+    ref[:h, :w] = np.minimum(ref[:h, :w], luma(lz[:h, :w]))
+    return ref
+
+
+def dark_floor(result: np.ndarray, source: np.ndarray, esrgan: np.ndarray, box: tuple[int, int, int, int],
+               scale: int, k: float, opaque: np.ndarray | None = None) -> tuple[np.ndarray, float]:
+    """Apply the dark floor (reference minus `k` luma levels) to `result`, the base-scale crop of source box `box`
+    (same height and width as the `esrgan` crop). Returns (RGB float32, lifted fraction of the `opaque` pixels, default
+    all)."""
+    if np.shape(result)[:2] != np.shape(esrgan)[:2]:
+        raise ValueError(f"dark floor: result {np.shape(result)[:2]} and reference {np.shape(esrgan)[:2]} differ")
+    floor = dark_floor_reference(source, esrgan, box, scale) - float(k)
+    out, lift = apply_dark_floor(result, floor)
+    mask = np.ones(lift.shape, bool) if opaque is None else np.asarray(opaque, bool)
+    return out, float(lift[mask].mean()) if mask.any() else 0.0
+
+
 def centred_tile_weights(tile: remat.Tile, blend: int) -> np.ndarray:
     """Tile weights whose cross-fade is at most `blend` pixels wide, centred in each overlap.
 
@@ -331,37 +399,60 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--guard-existing", type=Path,
                    help="no diffusion: apply the speckle guard to this existing full-size re-detail (same size as "
                         "--base) over the whole map and write --output; water pixels and alpha come from --base")
+    p.add_argument("--dark-floor", type=float, metavar="K",
+                   help="lift pixels whose luma is more than K levels below min(Lanczos-upscaled original, Real-ESRGAN "
+                        "base) with a hue-keeping gain (see 'Dark floor'; off by default; calibrated on temperate "
+                        "XDeath). Post-processing only: cached tiles are reused")
+    p.add_argument("--dark-floor-reference",
+                   help="Real-ESRGAN base for --dark-floor, a file in the map directory (default: the manifest's "
+                        "terrainMap.file when it has the size of --base, else --base itself)")
+    p.add_argument("--dark-floor-existing", type=Path,
+                   help="no diffusion: apply --dark-floor (required) to this existing full-size re-detail (same size "
+                        "as --base) over the whole map and write --output; water pixels and alpha come from --base. "
+                        "Combines with --speckle-guard (guard first)")
     p.add_argument("--dry-run", action="store_true", help="identity diffusion (pipeline check without a GPU)")
     return p
 
 
-def guard_existing(args: argparse.Namespace, directory: Path, base: np.ndarray, source: np.ndarray, scale: int,
-                   water: np.ndarray | None) -> Path:
-    """Repair an already composed re-detail without the GPU (its tiles may be gone): speckle guard over the whole map,
-    in horizontal strips to bound memory, then the base's water pixels and alpha exactly as run() keeps them."""
-    existing = np.asarray(Image.open(args.guard_existing).convert("RGB"))
+def post_existing(args: argparse.Namespace, existing_path: Path, base: np.ndarray, source: np.ndarray, scale: int,
+                  water: np.ndarray | None, floor_ref: np.ndarray | None) -> Path:
+    """Repair an already composed re-detail without the GPU (its tiles may be gone): the speckle guard (when
+    args.speckle_guard) and then the dark floor (when floor_ref is given) over the whole map, in horizontal strips to
+    bound memory, then the base's water pixels and alpha exactly as run() keeps them."""
+    existing = np.asarray(Image.open(existing_path).convert("RGB"))
     if existing.shape[:2] != base.shape[:2]:
-        raise ValueError(f"{args.guard_existing} is {existing.shape[1]}x{existing.shape[0]}; --base is "
+        raise ValueError(f"{existing_path} is {existing.shape[1]}x{existing.shape[0]}; --base is "
                          f"{base.shape[1]}x{base.shape[0]}")
     out = base.copy()
     sh = source.shape[0]
     strip = 512
-    guarded_px = opaque_px = 0
+    guarded_px = lifted_px = opaque_px = 0
     for sy0 in range(0, sh, strip):
         sy1 = min(sh, sy0 + strip)
         y0, y1 = sy0 * scale, min(base.shape[0], sy1 * scale)
-        part, frac = speckle_guard(existing[y0:y1].astype(np.float32), source, (0, sy0, source.shape[1], sy1), scale)
+        part = existing[y0:y1].astype(np.float32)
+        box = (0, sy0, source.shape[1], sy1)
         n = int((source[sy0:sy1, :, 3] > 0).sum())
-        guarded_px += frac * n
-        opaque_px += n
+        if args.speckle_guard:
+            part, frac = speckle_guard(part, source, box, scale)
+            guarded_px += frac * n
         crop_base = base[y0:y1]
+        if floor_ref is not None:
+            opaque_hd = crop_base[..., 3] > 0
+            part, lifted = dark_floor(part, source, floor_ref[y0:y1], box, scale, args.dark_floor, opaque_hd)
+            lifted_px += lifted * int(opaque_hd.sum())
+        opaque_px += n
         if water is not None:
             part = remat.preserve_water(part, crop_base[..., :3].astype(np.float32), water[y0:y1], args.water_feather)
         opaque = crop_base[..., 3] > 0
         rgb = crop_base[..., :3].copy()
         rgb[opaque] = np.rint(part[opaque]).clip(0, 255).astype(np.uint8)
         out[y0:y1, :, :3] = rgb
-    print(f"Speckle guard: {guarded_px / max(opaque_px, 1) * 100:.1f} % of the opaque source pixels", flush=True)
+    if args.speckle_guard:
+        print(f"Speckle guard: {guarded_px / max(opaque_px, 1) * 100:.1f} % of the opaque source pixels", flush=True)
+    if floor_ref is not None:
+        print(f"Dark floor K={args.dark_floor:g}: lifted {lifted_px / max(opaque_px * scale * scale, 1) * 100:.2f} % "
+              "of the opaque pixels", flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=args.output.parent, suffix=".tmp", delete=False) as handle:
         tmp = Path(handle.name)
@@ -370,6 +461,25 @@ def guard_existing(args: argparse.Namespace, directory: Path, base: np.ndarray, 
     tmp.replace(args.output)
     print(f"Wrote {args.output}", flush=True)
     return args.output
+
+
+def load_floor_reference(args: argparse.Namespace, directory: Path, ref: dict, base: np.ndarray) -> np.ndarray:
+    """The Real-ESRGAN base (RGB) for the dark floor. In a staged map the manifest's terrainMap.file is the composite
+    the renderer draws today; chained queue bands pass the previous band's output as --base, so the manifest file is
+    the right reference there. A map whose effective terrain is already a re-detail needs --dark-floor-reference."""
+    name = args.dark_floor_reference or ref.get("file")
+    image = None
+    if name and remat.map_path(directory, name).exists():
+        image = np.asarray(Image.open(remat.map_path(directory, name)).convert("RGB"))
+        if image.shape[:2] != base.shape[:2]:
+            if args.dark_floor_reference:
+                raise ValueError(f"--dark-floor-reference {name} is {image.shape[1]}x{image.shape[0]}; --base is "
+                                 f"{base.shape[1]}x{base.shape[0]}")
+            image = None
+    elif args.dark_floor_reference:
+        raise ValueError(f"--dark-floor-reference {name} does not exist")
+    print(f"Dark floor K={args.dark_floor:g} against {name if image is not None else 'the --base image'}", flush=True)
+    return image if image is not None else np.ascontiguousarray(base[..., :3])
 
 
 def run(args: argparse.Namespace) -> Path:
@@ -401,9 +511,18 @@ def run(args: argparse.Namespace) -> Path:
         w_img = Image.open(remat.map_path(directory, ref["waterMask"]))
         if w_img.size == (base.shape[1], base.shape[0]):
             water = np.asarray(w_img.convert("L")).astype(np.float32) / 255
+    floor_ref = None
+    if args.dark_floor is not None:
+        floor_ref = load_floor_reference(args, directory, ref, base)
+    elif args.dark_floor_existing:
+        raise ValueError("--dark-floor-existing needs --dark-floor K")
+    if args.guard_existing and args.dark_floor_existing and args.guard_existing != args.dark_floor_existing:
+        raise ValueError("--guard-existing and --dark-floor-existing name different files")
     if args.guard_existing:
         args.speckle_guard = True
-        return guard_existing(args, directory, base, source, scale, water)
+    existing = args.guard_existing or args.dark_floor_existing
+    if existing:
+        return post_existing(args, existing, base, source, scale, water, floor_ref)
 
     H, W = base.shape[:2]
     if args.region:
@@ -510,6 +629,10 @@ def run(args: argparse.Namespace) -> Path:
         matched, guarded = speckle_guard(matched, source, (sx0, sy0, sx1, sy1), scale)
         print(f"Speckle guard: {guarded * 100:.1f} % of the opaque source pixels", flush=True)
     crop_base = base[y0:y1, x0:x1]
+    if floor_ref is not None:
+        matched, lifted = dark_floor(matched, source, floor_ref[y0:y1, x0:x1], (sx0, sy0, sx1, sy1), scale,
+                                     args.dark_floor, crop_base[..., 3] > 0)
+        print(f"Dark floor: lifted {lifted * 100:.2f} % of the opaque pixels", flush=True)
     if water is not None:
         matched = remat.preserve_water(matched, crop_base[..., :3].astype(np.float32), water[y0:y1, x0:x1],
                                        args.water_feather)

@@ -158,6 +158,88 @@ class SpeckleGuardTests(unittest.TestCase):
             self.assertFalse((root / "work").exists() and any((root / "work").iterdir()))
 
 
+class DarkFloorTests(unittest.TestCase):
+    def test_gain_lifts_only_pixels_below_the_floor_and_keeps_hue(self):
+        result = np.array([[[30, 60, 20], [120, 130, 110], [0, 0, 0]]], np.float32)
+        floor = np.full((1, 3), 80.0, np.float32)
+        out, lift = rt.apply_dark_floor(result, floor)
+        self.assertEqual(lift.tolist(), [[True, False, True]])
+        self.assertAlmostEqual(float(rt.luma(out[0, 0])), 80.0, places=3)
+        ratio = out[0, 0] / result[0, 0]
+        self.assertTrue(np.allclose(ratio, ratio[0]))  # one gain on all channels: hue and saturation kept
+        self.assertTrue((out[0, 1] == result[0, 1]).all())
+        self.assertTrue(np.allclose(out[0, 2], 80.0))  # black has no hue: grey at the floor
+
+    def test_reference_is_the_darker_of_lanczos_original_and_esrgan(self):
+        source = np.zeros((16, 16, 4), np.uint8)
+        source[..., :3] = 100
+        source[..., 3] = 255
+        source[8, 8, :3] = 40  # the original's own dark pixel
+        esrgan = np.full((32, 32, 3), 110, np.uint8)
+        esrgan[2:4, 2:4] = 70  # a darker Real-ESRGAN edge elsewhere
+        ref = rt.dark_floor_reference(source, esrgan, (0, 0, 16, 16), 2)
+        self.assertLess(ref[16:18, 16:18].max(), 80)  # dark source pixel stays allowed
+        self.assertAlmostEqual(float(ref[2, 2]), 70.0, places=3)
+        self.assertAlmostEqual(float(ref[28, 4]), 100.0, places=1)
+
+    def test_floor_removes_new_black_dots_and_keeps_original_dark_pixels(self):
+        source = textured_source(48, 40, seed=4)
+        lz = np.asarray(Image.fromarray(source[..., :3]).resize((96, 80), Image.LANCZOS), np.float32)
+        esrgan = np.rint(lz).astype(np.uint8)
+        result = lz.copy()
+        result[10:13, 10:13] *= 0.3  # invented near-black dot
+        out, lifted = rt.dark_floor(result, source, esrgan, (0, 0, 48, 40), 2, 4.0)
+        floor = rt.dark_floor_reference(source, esrgan, (0, 0, 48, 40), 2) - 4
+        self.assertGreaterEqual(float((rt.luma(out) - floor).min()), -1e-3)
+        self.assertTrue(np.allclose(out[40:, 40:], result[40:, 40:]))  # faithful pixels untouched
+        self.assertLess(lifted, 0.01)
+
+    def test_crop_matches_whole_map_values(self):
+        source = textured_source(48, 40, seed=6)
+        esrgan = np.random.default_rng(1).uniform(60, 200, (80, 96, 3)).astype(np.uint8)
+        result = np.random.default_rng(2).uniform(0, 255, (80, 96, 3)).astype(np.float32)
+        whole, _ = rt.dark_floor(result, source, esrgan, (0, 0, 48, 40), 2, 3.0)
+        part, _ = rt.dark_floor(result[20:60, 30:80], source, esrgan[20:60, 30:80], (15, 10, 40, 30), 2, 3.0)
+        self.assertLess(np.abs(part - whole[20:60, 30:80]).max(), 0.5)
+
+    def test_dark_floor_existing_writes_lifted_copy_and_keeps_water_and_alpha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "gameres/hd-cache/DRK"
+            directory.mkdir(parents=True)
+            source = np.zeros((48, 64, 4), np.uint8)
+            source[..., :3] = (90, 120, 60)
+            source[..., 3] = 255
+            source[0:3, 0:5, 3] = 0
+            Image.fromarray(source).save(directory / "terrain-map.png")
+            esrgan = np.asarray(Image.fromarray(source).resize((128, 96), Image.NEAREST)).copy()
+            esrgan[..., 3] = np.asarray(Image.fromarray(source[..., 3]).resize((128, 96), Image.NEAREST))
+            Image.fromarray(esrgan).save(directory / "esrgan@2x.png")
+            water = np.zeros((96, 128), np.uint8)
+            water[70:, 10:40] = 255
+            Image.fromarray(water).save(directory / "water@2x.png")
+            (directory / "manifest.json").write_text(json.dumps({"terrainMap": {
+                "file": "esrgan@2x.png", "waterMask": "water@2x.png", "scale": 2, "width": 128, "height": 96}}))
+            existing = esrgan.copy()
+            existing[20:24, 60:64, :3] = (10, 14, 6)  # black dot
+            existing[70:, 10:40, :3] = 5  # water must come from the base whatever the re-detail did
+            Image.fromarray(existing).save(root / "rd.png")
+            output = root / "floored.png"
+            code = rt.main(["--map", "DRK", "--cache", str(root / "gameres/hd-cache"), "--output", str(output),
+                            "--work", str(root / "work"), "--dark-floor", "4", "--dark-floor-existing",
+                            str(root / "rd.png")])
+            self.assertEqual(code, 0)
+            out = np.asarray(Image.open(output))
+            self.assertTrue((out[..., 3] == esrgan[..., 3]).all())
+            self.assertTrue((out[water > 127, :3] == esrgan[water > 127, :3]).all())
+            dot = rt.luma(out[20:24, 60:64])
+            self.assertGreaterEqual(float(dot.min()), float(rt.luma(esrgan[0:1, 64:65]).min()) - 4.6)
+            self.assertTrue((out[40:60, 80:120] == existing[40:60, 80:120]).all())
+            self.assertEqual(rt.main(["--map", "DRK", "--cache", str(root / "gameres/hd-cache"), "--output",
+                                      str(output), "--work", str(root / "work"), "--dark-floor-existing",
+                                      str(root / "rd.png")]), 1)  # K is required
+
+
 class PipelineTests(unittest.TestCase):
     def test_dry_run_region_pastes_with_feather_and_keeps_alpha_and_outside(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +277,17 @@ class PipelineTests(unittest.TestCase):
             # Feather: the margin blends monotonically from base towards the result.
             ramp = np.abs(out[40, 32:40, :3].astype(np.float32) - 90).mean(-1)
             self.assertLess(ramp[0], ramp[-1])
+            # The dark floor is post-processing on the same cached tiles: it may only brighten pixels.
+            floored = root / "out-floor.png"
+            code = rt.main(["--map", "TEST", "--cache", str(root / "gameres/hd-cache"), "--esrgan", str(fake),
+                            "--base", "base@2x.png", "--output", str(floored), "--work", str(root / "work"),
+                            "--region", "40,30,40,30", "--margin", "8", "--tile", "128", "--overlap", "32",
+                            "--dry-run", "--dark-floor", "0"])
+            self.assertEqual(code, 0)
+            lifted = np.asarray(Image.open(floored))
+            self.assertTrue((lifted[outside] == base[outside]).all())
+            self.assertGreaterEqual(float((rt.luma(lifted) - rt.luma(out)).min()), -1.0)
+            self.assertGreater(float((rt.luma(lifted) - rt.luma(out)).max()), 1.0)
 
     def test_fitted_fractional_base_is_refused_with_the_fit_route(self):
         with tempfile.TemporaryDirectory() as tmp:
