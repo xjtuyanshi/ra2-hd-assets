@@ -643,6 +643,13 @@ same map, via `seam_scores(result, baseline, profiles=True)`): content both rend
 does not. That step has a texture floor of about one level on temperate grass, so it separates seams of roughly 1.5
 levels or more from content.
 
+`seam_scores(..., visible=(x0, y0, x1, y1))` scores only land inside the rectangle the game shows (the manifest's
+visible area in terrain pixels, x1/y1 exclusive); without it all land is scored. On XLostlake every peak over the
+limit lay outside the visible area, where the re-detail was closer to the original than Real-ESRGAN. Passing
+`baseline_profiles=seam_scores(esrgan, reference, profiles=True)["profiles"]` to `content_excess` additionally skips a
+peak where the result's step against the reference is not larger than the baseline's within 3 px, since that peak is
+the baseline's own error.
+
 ```bash
 python3 -B -m unittest discover -s packages/ra2-assets/python -p 'test_terrain_seams.py'
 ```

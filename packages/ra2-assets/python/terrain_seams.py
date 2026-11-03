@@ -171,16 +171,34 @@ def column_profiles(diff: np.ndarray, energy: np.ndarray, land: np.ndarray, chun
     return tone_ratio, detail_ratio, scored
 
 
+def visible_mask(shape: tuple[int, int], visible: tuple[int, int, int, int] | None) -> np.ndarray:
+    """Boolean mask of the `visible` rectangle (x0, y0, x1, y1; x1/y1 exclusive, pixels of the image) for an image of
+    `shape` (height, width); all True when `visible` is None."""
+    mask = np.zeros(shape, bool)
+    if visible is None:
+        mask[:] = True
+        return mask
+    x0, y0, x1, y1 = (int(v) for v in visible)
+    mask[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = True
+    return mask
+
+
 def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndarray, profiles: bool = False,
-                **kw) -> dict:
+                visible: tuple[int, int, int, int] | None = None, **kw) -> dict:
     """Column and row seam scores of a re-detail against a seam-free reference of the same size.
 
     `land` should already exclude transparent and water pixels and be eroded a few pixels, so that the alpha and
-    shore boundaries themselves are never measured."""
+    shore boundaries themselves are never measured.
+
+    `visible` (x0, y0, x1, y1 in image pixels, x1/y1 exclusive) restricts scoring to the area the game shows: land
+    outside it is ignored, so columns and rows outside it are not scored and cannot carry a peak. Why: the map border
+    outside the visible area is never displayed, and there the re-detail is closer to the original than Real-ESRGAN
+    is (XLostlake: every peak over the limit lay outside x 240-14160, y 300-4740 of the 2x terrain). Default None
+    scores all land."""
     lum = luminance(result_rgb)
     diff = lum - luminance(reference_rgb)
     energy = np.abs(lum - binomial_blur(lum))
-    land = np.asarray(land, bool)
+    land = np.asarray(land, bool) & visible_mask(land.shape, visible)
     tc, dc, sc, lc = column_profiles(diff, energy, land, levels=True, **kw)
     tr, dr, sr, lr = column_profiles(np.ascontiguousarray(diff.T), np.ascontiguousarray(energy.T),
                                      np.ascontiguousarray(land.T), levels=True, **kw)
@@ -199,7 +217,7 @@ def seam_scores(result_rgb: np.ndarray, reference_rgb: np.ndarray, land: np.ndar
 
 
 def content_excess(result_profiles: dict, versus_baseline_profiles: dict, axis: str, limit: float = 1.8,
-                   near: int = 3) -> tuple[float, int]:
+                   near: int = 3, baseline_profiles: dict | None = None) -> tuple[float, int]:
     """Tone step (8-bit levels) of the result against a seam-free baseline at the boundaries where the result's tone
     ratio against the reference reaches `limit`.
 
@@ -209,13 +227,26 @@ def content_excess(result_profiles: dict, versus_baseline_profiles: dict, axis: 
     for Real-ESRGAN itself (XMP27T8 x 4800-9600, build 12), and a faithful re-detail reproduces them at the same
     columns. Content both renderings share cancels in result - baseline; a tiling or band seam does not. The largest
     step within +-`near` px of each peak is taken. Returns (step, position); (0.0, -1) when no boundary reaches the
-    limit."""
+    limit.
+
+    `baseline_profiles` (optional) are seam_scores(baseline, reference, profiles=True)["profiles"], the baseline's own
+    scores against the same reference. A peak is skipped where the result's step against the reference is not larger
+    than the baseline's (within +-`near` px): the result is then at least as close to the original as the baseline,
+    so the peak is the baseline's own error (the XLostlake border peaks). Default None skips nothing."""
     ratio = result_profiles[f"tone_{axis}"]
     level = versus_baseline_profiles[f"tone_{axis}_level"]
     n = level.size
-    padded = np.pad(level, near, mode="edge")
-    local = np.max(np.stack([padded[i:i + n] for i in range(2 * near + 1)]), 0)
-    step = np.where(ratio >= limit, local, -np.inf)
+
+    def near_max(values):
+        padded = np.pad(values, near, mode="edge")
+        return np.max(np.stack([padded[i:i + n] for i in range(2 * near + 1)]), 0)
+
+    local = near_max(level)
+    counted = ratio >= limit
+    if baseline_profiles is not None:
+        own = near_max(result_profiles[f"tone_{axis}_level"])
+        counted &= own > near_max(baseline_profiles[f"tone_{axis}_level"])
+    step = np.where(counted, local, -np.inf)
     if not np.isfinite(step).any():
         return 0.0, -1
     i = int(np.argmax(step))

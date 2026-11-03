@@ -75,6 +75,38 @@ class SeamMetricTests(unittest.TestCase):
         self.assertGreater(excess, 2.0)
         self.assertLessEqual(abs(at - 300), 3)
 
+    def test_border_only_step_is_ignored_inside_the_visible_area(self):
+        visible = (200, 0, 1000, 1024)  # tall enough for min_chunks
+        out = self.out.copy()
+        out[:, 100:] += 2.5  # a tone step in the border strip outside the visible area
+        s = ts.seam_scores(out, self.ref, self.land)
+        self.assertGreaterEqual(s["tone_col"], 1.8)  # default behaviour unchanged: scored everywhere
+        s = ts.seam_scores(out, self.ref, self.land, visible=visible)
+        self.assertLess(max(s["tone_col"], s["tone_row"], s["detail_col"], s["detail_row"]), 1.8)
+        # A planted interior seam inside the rectangle still fails, where it is.
+        out[:, 512:] += 2.5
+        s = ts.seam_scores(out, self.ref, self.land, visible=visible)
+        self.assertGreaterEqual(s["tone_col"], 1.8)
+        self.assertLessEqual(abs(s["tone_col_at"] - 512), 2)
+
+    def test_peak_where_the_baseline_is_further_from_the_original_is_skipped(self):
+        base = self.out.copy()
+        base[:, 512:] += 4  # the baseline's own error against the reference
+        out = self.out.copy()
+        out[:, 512:] += 2  # the result is closer to the original there
+        prof = ts.seam_scores(out, self.ref, self.land, profiles=True)["profiles"]
+        vs = ts.seam_scores(out, base, self.land, profiles=True)["profiles"]
+        own = ts.seam_scores(base, self.ref, self.land, profiles=True)["profiles"]
+        self.assertGreater(ts.content_excess(prof, vs, "col")[0], 1.0)
+        self.assertEqual(ts.content_excess(prof, vs, "col", baseline_profiles=own), (0.0, -1))
+        # A seam the baseline does not have is still reported.
+        out[:, 300:] += 2.5
+        prof = ts.seam_scores(out, self.ref, self.land, profiles=True)["profiles"]
+        vs = ts.seam_scores(out, base, self.land, profiles=True)["profiles"]
+        excess, at = ts.content_excess(prof, vs, "col", baseline_profiles=own)
+        self.assertGreater(excess, 1.5)
+        self.assertLessEqual(abs(at - 300), 3)
+
     def test_erode_and_bleed(self):
         mask = np.zeros((9, 9), bool)
         mask[2:7, 2:7] = True
