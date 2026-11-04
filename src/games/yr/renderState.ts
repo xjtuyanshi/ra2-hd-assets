@@ -647,6 +647,7 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
         layer,
         owner,
         attachedTo,
+        zAdjust,
       }) => ({
         id,
         uid,
@@ -665,6 +666,7 @@ function projectEffects(effects: YrEffects): GameRenderEffects {
         layer,
         owner,
         attachedTo: attachedTo && { ...attachedTo },
+        ...(zAdjust ? { zAdjust } : {}),
       }),
     ),
     bullets: effects.bullets.map(({ id, uid, x, y, z, inviso, type, frame, velocity, owner, firersPalette }) => ({

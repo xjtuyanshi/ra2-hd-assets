@@ -292,6 +292,20 @@ to each **(fire, object) pair**. Rhino 5009 at (63.0, 63.6) is 1.83848 horizonta
 (60.8, 63.2), but 0.84853 behind TWLT050 at (64.0, 63.8): it must remain completely in front of the first and be
 completely covered by the second in the same frame. A global winner cannot express this.
 
+**Anim ZAdjust.** AnimClass::DrawIt passes `AnimType.ZAdjust (+0x344) + AnimClass.ZAdjust (+0x100) - height term`
+as the blit's Z (0x423691..0x4236A1, 0x42377D..0x423798, 0x4237EA..0x423803). The instance field is 0 from the
+constructor, but the engine sets it where an anim must draw over the object it stands in: building damage fires
+(BuildingClass 0x43C0D0, one Rules `DamageFireTypes` anim per `DamageFireOffset` point, ZAdjust =
+min(0, 3 * (offset Y - 15 * (W + H)) / 2 - 10), -43 to -264 on YR Allied mission 1), tree fires (TerrainClass
+0x71C67A, -20 after attaching), muzzle flashes of building weapons (TechnoClass 0x6FF41D, -200) and a few other
+building-spawned anims (-200 at 0x4404CF/0x4586C0, -100 at 0x44CC9D). `effectsReader.ts` publishes it as
+`zAdjust`; `LiveEffectsDriver.cards` turns it into card nearness at the native depth scale (one engine Z unit per
+screen row = `GROUND_DEPTH`, `engineZAdjustBias`) and marks the card `engineZ`, which keeps it out of the per-fire
+capture combination below (that combination approximates the engine's Z test only for anims without an offset).
+Before this, damage fires anchored inside a building's foundation kept their anchor depth and were hidden by the
+building's native depth (every fire on the burning tower, houses and Golden Gate pieces of ALL01UMD). The type's
+own ZAdjust (BEHIND, PSIWARN, ARRW*, CHRONOSK, PARACH) still only nudges the legacy effect sort, unchanged.
+
 The RA2 policy in `src/ra2/fireEngulf.ts` now decides capture membership only, immediately before capture, after
 interpolated poses, effect records and camera are final (`HdRenderer.beforeDepthCapture`). Active non-flat Air
 explosion/collapse cards use the current/same-page-next crop union (`effectDisplayBounds`), including HD display

@@ -120,6 +120,17 @@ export const YR_EFFECTS_OFFSETS = Object.freeze({
   animType: 0xc8,
   /** AnimClass::OwnerObject (ObjectClass* the anim is attached to). */
   animOwnerObject: 0xcc,
+  /**
+   * AnimClass::ZAdjust (int, engine Z units; negative = nearer the viewer). AnimClass::DrawIt's blits add it to the
+   * type's own ZAdjust (AnimTypeClass +0x344) and subtract the height term (0x423691..0x4236A1, 0x42377D..0x423798,
+   * 0x4237EA..0x423803). The
+   * constructor leaves it 0. BuildingClass's damage fires (0x43C0D0: one Rules DamageFireTypes anim per
+   * DamageFireOffset point of the type, BuildingType +0x15D8..+0x1618) get ZAdjust = min(0, 3 * (offset Y -
+   * 15 * (foundation W + H)) / 2 - 10) (0x43C1F5..0x43C235), i.e. tens to a few hundred units nearer, so burning
+   * buildings show their fires over the body they stand inside. Other building-spawned anims store -200 (0x4404CF,
+   * 0x4586C0) or -100 (0x44CC9D).
+   */
+  animZAdjust: 0x100,
   /** AnimClass::IsBuildingAnim (bool: a building's own active/idle/damage anim). */
   animBuilding: 0x118,
   /** AnimClass::Paused (bool). */
@@ -286,6 +297,8 @@ export const YR_EFFECTS_LIMITS = Object.freeze({
    * such anim at twice its owner's coordinates. Larger offsets are skipped and counted in `stats.unresolved`.
    */
   maxAttachOffset: 6 * 256,
+  /** Largest plausible |AnimClass::ZAdjust| (engine Z units; the engine's own stores stay within a few hundred). */
+  maxAnimZAdjust: 4096,
   /** Longest plausible laser duration (frames). */
   maxLaserDuration: 10_000,
 });
@@ -361,6 +374,11 @@ export interface YrAnimEffect {
   /** AnimClass::Invisible (updated but not drawn) or Paused. */
   invisible: boolean;
   paused: boolean;
+  /**
+   * AnimClass::ZAdjust of this instance (engine Z units, negative = drawn nearer than its position says); 0 for most
+   * anims, negative for building damage fires. The type's own ZAdjust is not included. Implausible values read as 0.
+   */
+  zAdjust: number;
 }
 
 export interface YrBulletEffect {
@@ -707,6 +725,7 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
     const start = memory.i32(typePointer + o.animTypeStart);
     const end = memory.i32(typePointer + o.animTypeEnd);
     const layer = memory.i32(typePointer + o.animTypeLayer);
+    const zAdjust = memory.i32(pointer + o.animZAdjust);
     anims.push({
       id: pointer,
       uid: memory.u32(pointer + o.uniqueId),
@@ -730,6 +749,7 @@ export function readYrEffects(memory: GuestMemoryAccessor, options: ReadYrEffect
       buildingAnim: memory.u8(pointer + o.animBuilding) !== 0,
       invisible: memory.u8(pointer + o.animInvisible) !== 0,
       paused: memory.u8(pointer + o.animPaused) !== 0,
+      zAdjust: Math.abs(zAdjust) <= L.maxAnimZAdjust ? zAdjust : 0,
     });
   }
 

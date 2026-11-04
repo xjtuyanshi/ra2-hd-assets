@@ -19,6 +19,7 @@ import {
   effectPageLoaded,
   engineAnchor,
   engineDepth,
+  engineZAdjustBias,
   type EffectInstance,
   type EffectPass,
 } from './effectSprites';
@@ -76,6 +77,12 @@ export interface LiveAnim {
   attachedTo?: { id: number; uid: number; kind: string } | null;
   /** A building's own active/idle anim (drawn with the building, not as an effect). */
   buildingAnim?: boolean;
+  /**
+   * The instance's own engine Z offset (engine Z units, negative = drawn nearer than its position): YR draws its
+   * building damage fires tens to a few hundred units nearer, so they show over the building they stand in. Applied
+   * to the card depth (engineZAdjustBias); the art's own ZAdjust is not.
+   */
+  zAdjust?: number;
 }
 
 export interface LiveBullet {
@@ -652,6 +659,13 @@ export class LiveEffectsDriver {
       const pass: EffectPass = layer === 'top' ? 'top' : flat ? 'ground' : layer === 'air' ? 'air' : 'ground';
       const key = palette(resolved, anim.owner);
       const depth = engineDepth(drawAt.x, drawAt.y, drawAt.z) + (a.zAdjust ?? 0) * 0.001;
+      // The engine's own Z offset of this instance (building damage fires) moves the card's depth like the
+      // engine moves its Z; such a card keeps that depth instead of the per-fire object-depth combination.
+      const engineBias = engineZAdjustBias(anim.zAdjust ?? 0);
+      const depthBias = (lead?.depthBias ?? 0) + engineBias;
+      const zFields = engineBias ? { depthBias, engineZ: true } : depthBias ? { depthBias } : {};
+      // Native art never carried the merge's engulf bias; it takes only the engine's own offset.
+      const nativeZ = engineBias && !flat ? { depthBias: engineBias, engineZ: true } : {};
       // Translucent=yes art fades by stage (animAlpha): the bridge's stage, or the fallback frame's.
       const end = anim.frameCount || a.frameCount;
       const hd = this.hdEnabled && this.style === 'enhanced' ? art.hdAnim(anim.type) : null;
@@ -688,7 +702,7 @@ export class LiveEffectsDriver {
             depth,
             glow: false,
             category: tracked.row.c,
-            ...(lead?.depthBias ? { depthBias: lead.depthBias } : {}),
+            ...zFields,
             hd: {
               frame: hdFrame,
               next: next?.page === hdFrame.page ? next : null,
@@ -733,6 +747,7 @@ export class LiveEffectsDriver {
         depth,
         glow: cardGlows(a, index, alpha, resolved.remap),
         category: tracked.row.c,
+        ...nativeZ,
       });
       drawn++;
     }

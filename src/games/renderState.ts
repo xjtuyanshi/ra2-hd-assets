@@ -295,6 +295,11 @@ export interface GameRenderAnim extends GameRenderPoint {
   layer?: 'underground' | 'surface' | 'ground' | 'air' | 'top' | null;
   owner?: number;
   attachedTo?: { id: number; uid: number; kind: string } | null;
+  /**
+   * The instance's own engine Z offset (engine Z units, one per native screen row; negative = drawn nearer than its
+   * position). Games set it on anims that must draw over the object they stand in, e.g. burning-building fires.
+   */
+  zAdjust?: number;
 }
 
 export interface GameRenderBullet extends GameRenderPoint {

@@ -266,6 +266,7 @@ describe('YR 1.001 effects reader', () => {
         buildingAnim: false,
         invisible: false,
         paused: false,
+        zAdjust: 0,
       },
       {
         id: b.burning,
@@ -291,6 +292,7 @@ describe('YR 1.001 effects reader', () => {
         buildingAnim: true,
         invisible: false,
         paused: false,
+        zAdjust: 0,
       },
       expect.objectContaining({
         id: b.smoking,
@@ -419,6 +421,18 @@ describe('YR 1.001 effects reader', () => {
       unresolved: 1,
       technos: 3,
     });
+  });
+
+  it("publishes an anim's own ZAdjust (building damage fires are spawned nearer than their position)", () => {
+    const b = battle();
+    // BuildingClass's damage-fire placement (0x43C0D0) stores a negative ZAdjust; a torn read far outside any
+    // engine value is 0.
+    b.m.i32(b.burning + O.animZAdjust, -200);
+    b.m.i32(b.boom + O.animZAdjust, 0x40000000);
+    const effects = readYrEffects(createByteViewAccessor(b.m.bytes));
+    expect(effects.anims.find((a) => a.uid === 32)?.zAdjust).toBe(-200);
+    expect(effects.anims.find((a) => a.uid === 31)?.zAdjust).toBe(0);
+    expect(effects.anims.find((a) => a.uid === 33)?.zAdjust).toBe(0);
   });
 
   it('honours includeLimbo, fireWindow and particles options', () => {

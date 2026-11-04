@@ -1,4 +1,4 @@
-import { float, floor, fract, max, min, sqrt } from 'three/tsl';
+import { float, floor, fract, max, min, sqrt, step } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
 import { cardGroundExcess, cardGroundExcessNode } from './cardDepth';
 import { MAX_PAINTER_BIAS } from './painterOrder';
@@ -70,18 +70,31 @@ export function fireballDepthBiasNode(
   );
 }
 
-// Reuse the draw-mode scalar: integer 0/1/2 = card/flat/shadow; fractional part = R / 4 (< 0.3).
-// Radius is zero for flat/shadow cards. The HD six-vec4 layout and native four instance buffers do not grow.
-export function packEffectDrawRadius(draw: number, radius: number): number {
-  return draw + radius / 4;
+// Reuse the draw-mode scalar: integer 0/1/2 = card/flat/shadow; fractional part = R / 4 (< 0.3), plus 0.5 when the
+// card's depth is fixed by the engine's own Z offset (see EffectInstance.engineZ), which keeps it out of the per-fire
+// object-depth combination. Radius is zero for flat/shadow cards. The HD six-vec4 layout and native four instance
+// buffers do not grow.
+const ENGINE_Z_FLAG = 0.5;
+
+export function packEffectDrawRadius(draw: number, radius: number, engineZ = false): number {
+  return draw + radius / 4 + (engineZ ? ENGINE_Z_FLAG : 0);
 }
 
-export function unpackEffectDrawRadius(packed: number): { draw: number; radius: number } {
+export function unpackEffectDrawRadius(packed: number): { draw: number; radius: number; engineZ: boolean } {
   const draw = Math.floor(packed);
-  return { draw, radius: (packed - draw) * 4 };
+  const fraction = packed - draw;
+  const engineZ = fraction >= ENGINE_Z_FLAG;
+  return { draw, radius: (fraction - (engineZ ? ENGINE_Z_FLAG : 0)) * 4, engineZ };
 }
 
 /** TSL unpacking matches the Float32 upload/CPU twin without bit casts or another instanced attribute. */
-export function unpackEffectDrawRadiusNode(packed: ShaderNode): { draw: ShaderNode; radius: ShaderNode } {
-  return { draw: floor(packed), radius: fract(packed).mul(4) };
+export function unpackEffectDrawRadiusNode(packed: ShaderNode): {
+  draw: ShaderNode;
+  radius: ShaderNode;
+  /** 1 for a card whose depth follows the engine's Z offset, else 0. */
+  engineZ: ShaderNode;
+} {
+  const fraction: ShaderNode = fract(packed);
+  const engineZ: ShaderNode = step(ENGINE_Z_FLAG, fraction);
+  return { draw: floor(packed), radius: fraction.sub(engineZ.mul(ENGINE_Z_FLAG)).mul(4), engineZ };
 }

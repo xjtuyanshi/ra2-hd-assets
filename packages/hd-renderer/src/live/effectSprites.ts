@@ -47,7 +47,7 @@ import type { ShaderNode } from '../tsl';
 import type { TerrainDepth } from '../terrainDepth';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import type { Ra2Cache } from '../ra2/cache';
-import { cardDepthNode, EFFECT_DECAL_LIFT } from '../ra2/cardDepth';
+import { cardDepthNode, EFFECT_DECAL_LIFT, GROUND_DEPTH } from '../ra2/cardDepth';
 import {
   fireballDepthBiasNode,
   fireballRadius,
@@ -89,6 +89,12 @@ export interface EffectInstance {
    * it stands in, see FIREBALL_MERGE in effects.ts). Placement is unchanged.
    */
   depthBias?: number;
+  /**
+   * The depth already carries the engine's own Z offset for this anim (engineZAdjustBias in depthBias): the card is not
+   * re-ordered against captured units/buildings by the per-fire object-depth combination (terrainDepth.ts), which
+   * approximates the engine's Z test only for anims without one.
+   */
+  engineZ?: boolean;
   /** Ground effects use the same physical card depth profile as trees and units. */
   painter?: PainterObject;
   painterPart?: number;
@@ -665,7 +671,7 @@ class PageMesh {
     const aRect: ShaderNode = attribute('fxRect', 'vec4');
     const aParams: ShaderNode = attribute('fxParams', 'vec4');
     const aStyle: ShaderNode = attribute('fxStyle', 'vec4');
-    const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.y);
+    const { draw, radius, engineZ } = unpackEffectDrawRadiusNode(aStyle.y);
     const atlasSize: ShaderNode = page.atlasSize;
     const paletteRows = float(cache.paletteAtlas.image.height);
     const ppu = float(PIXELS_PER_CELL_EDGE);
@@ -699,7 +705,7 @@ class PageMesh {
       material.depthNode = layer.terrainDepth.node(
         material.depthNode,
         aAnchor.xyz,
-        draw.equal(0).select(float(1), float(0)),
+        draw.equal(0).and(engineZ.lessThan(0.5)).select(float(1), float(0)),
       );
     const gu: ShaderNode = positionGeometry.x.add(0.5);
     const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
@@ -804,7 +810,7 @@ class PageMesh {
       this.style.setXYZW(
         i,
         s.alpha,
-        packEffectDrawRadius(s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0, effectSphereRadius(s)),
+        packEffectDrawRadius(s.draw === 'shadow' ? 2 : s.draw === 'flat' ? 1 : 0, effectSphereRadius(s), s.engineZ),
         s.glow ? 1 : 0,
         cardPainterBias(s) + (s.depthBias ?? 0),
       );
@@ -897,7 +903,7 @@ class HdPageMesh {
     const aNextRect: ShaderNode = attribute('fxNextRect', 'vec4');
     const aOffsets: ShaderNode = attribute('fxOffsets', 'vec4');
     const aStyle: ShaderNode = attribute('fxStyle', 'vec4');
-    const { draw, radius } = unpackEffectDrawRadiusNode(aStyle.x);
+    const { draw, radius, engineZ } = unpackEffectDrawRadiusNode(aStyle.x);
     const aTiming: ShaderNode = attribute('fxTiming', 'vec4');
     const scale: ShaderNode = aStyle.w;
     // Union of the current and next frame rects in native pixels (top-left, size).
@@ -942,7 +948,7 @@ class HdPageMesh {
       material.depthNode = layer.terrainDepth.node(
         material.depthNode,
         aAnchor.xyz,
-        draw.equal(0).select(float(1), float(0)),
+        draw.equal(0).and(engineZ.lessThan(0.5)).select(float(1), float(0)),
       );
     material.positionNode = Fn(() => {
       const card = aAnchor.xyz
@@ -1039,7 +1045,7 @@ class HdPageMesh {
       this.offsets.setXYZW(i, ...frame.offset, ...next.offset);
       this.style.setXYZW(
         i,
-        packEffectDrawRadius(s.draw === 'flat' ? 1 : 0, effectSphereRadius(s)),
+        packEffectDrawRadius(s.draw === 'flat' ? 1 : 0, effectSphereRadius(s), s.engineZ),
         s.push,
         cardPainterBias(s) + (s.depthBias ?? 0),
         hd.scale,
@@ -1085,6 +1091,15 @@ export function engineAnchor(
   const diff = sx / 30;
   const sum = (sy + level * 15) / 15;
   return out.set((sum + diff) / 2, level * LEVEL_HEIGHT, (sum - diff) / 2);
+}
+
+/**
+ * Camera-space nearness, in world units, of an engine Z offset (a ZAdjust: engine Z units, negative = nearer). The
+ * tactical Z-buffer counts one unit per native screen row of ground, which is GROUND_DEPTH of camera depth (the same
+ * scale the native depth templates use, see ra2/nativeDepth.ts). Positive results pull a card towards the camera.
+ */
+export function engineZAdjustBias(zAdjust: number): number {
+  return zAdjust ? -zAdjust * GROUND_DEPTH : 0;
 }
 
 /** Projected screen y, retained for legacy effect-only ordering (object Ground slots use the native key). */

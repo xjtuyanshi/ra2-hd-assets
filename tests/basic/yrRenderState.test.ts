@@ -191,6 +191,7 @@ function yrEffects(frame: number): YrEffects {
         buildingAnim: false,
         invisible: false,
         paused: false,
+        zAdjust: -120,
       },
     ],
     voxelAnims: [],
@@ -843,7 +844,18 @@ describe('YR 1.001 render state for the HD bridge', () => {
     expect(state.objects[1]).not.toHaveProperty('turretFacingRaw');
     expect(state.effects).toMatchObject({
       anims: [
-        { id: 1, uid: 2, type: 'TWLT070', x: 10, y: 20, z: 30, frameCount: 20, buildingAnim: false, invisible: false },
+        {
+          id: 1,
+          uid: 2,
+          type: 'TWLT070',
+          x: 10,
+          y: 20,
+          z: 30,
+          frameCount: 20,
+          buildingAnim: false,
+          invisible: false,
+          zAdjust: -120,
+        },
       ],
       bullets: [{ id: 3, uid: 4, x: 5, y: 6, z: 7, inviso: false, owner: 0 }],
       lasers: [{ source: { x: 1, y: 2, z: 3 }, target: { x: 1, y: 2, z: 3 }, innerColor: [255, 0, 0] }],
