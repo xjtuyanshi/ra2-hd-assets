@@ -24,8 +24,11 @@ export interface SceneMultipliers {
 
 /**
  * Replace the authored light, without modifying its grade, exposure or white adaptation. Height is the map's median
- * cell height and excludes light-source contributions. Palette overrides replace the normalized terrain tint but
- * multiply untinted object art directly; ordinary scene changes only replace the intensity.
+ * cell height and excludes light-source contributions. Terrain follows the engine's palette x intensity x absolute
+ * normal RGB, so a live normal tint that differs from the authored one (an edited, trigger-changed or stale
+ * [Lighting]) scales each terrain channel by live / authored; objects take the intensity alone. Palette overrides
+ * replace the normalized terrain tint, keep the live normal tint's largest channel, and multiply untinted object art
+ * directly.
  */
 export function computeSceneMultipliers(
   map: MapLighting | null | undefined,
@@ -46,23 +49,37 @@ export function computeSceneMultipliers(
     live.level,
     medianZ,
   ];
-  if (!values.every(Number.isFinite) || (live.override && !live.override.every((v) => Number.isFinite(v) && v >= 0)))
+  const rgbValid = (rgb: readonly number[] | null | undefined) =>
+    !!rgb && rgb.length === 3 && rgb.every((v) => Number.isFinite(v) && v >= 0);
+  if (!values.every(Number.isFinite) || !rgbValid(live.tint) || (live.override && !rgbValid(live.override)))
     return identity();
+  const mapTint = [map.red, map.green, map.blue];
   // Avoid a divide (and any rounding) in the normal authored state, including a map with zero ambient light.
-  if (live.override === null && live.ambient === map.ambient && live.ground === map.ground && live.level === map.level)
+  if (
+    live.override === null &&
+    live.ambient === map.ambient &&
+    live.ground === map.ground &&
+    live.level === map.level &&
+    live.tint.every((channel, i) => channel === mapTint[i])
+  )
     return identity();
   const authored = Math.max(0, map.ambient + map.level * medianZ - map.ground);
   const current = Math.max(0, live.ambient + live.level * medianZ - live.ground);
   // A completely black authored channel has no recoverable palette signal. Keep the transform finite rather than
   // inventing a huge gain; valid ordinary maps retain the exact ratio, without an arbitrary brightness ceiling.
   const ratio = authored > 0 ? current / authored : current === 0 ? 0 : 1;
-  if (!live.override) return { terrain: [ratio, ratio, ratio], objects: [ratio, ratio, ratio] };
-  const mapTint = [map.red, map.green, map.blue];
+  if (!live.override) {
+    const terrain = live.tint.map((channel, i) => (mapTint[i]! > 0 ? ratio * (channel / mapTint[i]!) : ratio));
+    return { terrain: terrain as [number, number, number], objects: [ratio, ratio, ratio] };
+  }
   const maxTint = Math.max(...mapTint);
+  // The event RGB replaces the normalized tint only: the cell intensity still carries the normal tint's largest
+  // channel, which is the live one when it differs from the authored map.
+  const largest = maxTint > 0 ? Math.max(...live.tint) / maxTint : 1;
   const objects = live.override.map((channel) => ratio * channel) as [number, number, number];
   const terrain = live.override.map((channel, i) => {
     const normalized = maxTint > 0 ? Math.max(0, mapTint[i]!) / maxTint : 1;
-    return ratio * (normalized > 0 ? channel / normalized : channel);
+    return ratio * largest * (normalized > 0 ? channel / normalized : channel);
   }) as [number, number, number];
   return { terrain, objects };
 }

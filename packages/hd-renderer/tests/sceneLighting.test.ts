@@ -50,6 +50,58 @@ describe('scene lighting replacement', () => {
     });
   });
 
+  it('carries a live normal tint that differs from the authored map to terrain only', () => {
+    // A day-built cache (1/1/1/1, no ground/level) under an edited night [Lighting]: 0.55 ambient, level 0.003,
+    // RGB 0.40/0.40/0.70. Engine terrain = I x absolute RGB, objects = I alone.
+    const day: MapLighting = { ambient: 1, ground: 0, level: 0, red: 1, green: 1, blue: 1 };
+    const night: Ra2SceneLighting = {
+      ambient: 0.55,
+      ground: 0,
+      level: 0.003,
+      tint: [0.4, 0.4, 0.7],
+      override: null,
+      event: null,
+    };
+    const i = 0.55 + 0.003 * 4;
+    const value = computeSceneMultipliers(day, night, 4);
+    [i * 0.4, i * 0.4, i * 0.7].forEach((v, c) => expect(value.terrain[c]).toBeCloseTo(v, 12));
+    value.objects.forEach((v) => expect(v).toBeCloseTo(i, 12));
+    // A tinted authored map: the gain is live / authored per channel, so the grade's baked tint is replaced.
+    const tinted: MapLighting = { ambient: 0.8, ground: 0, level: 0.028, red: 0.87, green: 1, blue: 1.1 };
+    const k = computeSceneMultipliers(tinted, night, 4);
+    const ratio = i / (0.8 + 0.028 * 4);
+    [0.4 / 0.87, 0.4 / 1, 0.7 / 1.1].forEach((t, c) => expect(k.terrain[c]).toBeCloseTo(ratio * t, 12));
+    // Only the tint differs: intensity stays, terrain channels follow the tint.
+    expect(computeSceneMultipliers(map, { ...clear, tint: [0.5, 0.8, 0.68] }, 0)).toEqual({
+      terrain: [0.5, 1, 1],
+      objects: [1, 1, 1],
+    });
+    // Invalid tint keeps the authored light rather than inventing one.
+    for (const tint of [
+      [NaN, 1, 1],
+      [-0.1, 1, 1],
+    ] as [number, number, number][])
+      expect(computeSceneMultipliers(map, { ...clear, ambient: 0.5, tint }, 0)).toEqual({
+        terrain: [1, 1, 1],
+        objects: [1, 1, 1],
+      });
+  });
+
+  it('keeps the live tint largest channel under a palette event on a re-tinted map', () => {
+    const day: MapLighting = { ambient: 1, ground: 0, level: 0, red: 1, green: 1, blue: 1 };
+    const nightStorm: Ra2SceneLighting = {
+      ambient: 0.87,
+      ground: 0,
+      level: 0,
+      tint: [0.4, 0.4, 0.7],
+      override: [0.3, 0.4, 0.75],
+      event: 'storm',
+    };
+    const value = computeSceneMultipliers(day, nightStorm, 4);
+    [0.3, 0.4, 0.75].forEach((v, c) => expect(value.terrain[c]).toBeCloseTo(0.87 * 0.7 * v, 12));
+    [0.3, 0.4, 0.75].forEach((v, c) => expect(value.objects[c]).toBeCloseTo(0.87 * v, 12));
+  });
+
   it('owns independent neutral uniforms and copies event state into pre-world layers', () => {
     const a = new AtmosphereNodes();
     const b = new AtmosphereNodes();

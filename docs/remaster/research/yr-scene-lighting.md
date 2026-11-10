@@ -307,6 +307,14 @@ and buildings/units `(0.23,0.34,0.64)`, consistent within palette quantization. 
 sample occupy native layer `top`, at about 1493 leptons Z, and the original captures show their bright grey art
 above black shroud without event darkening.
 
+When the live normal RGB differs from the cache's authored `[Lighting]` (a map edited after its cache was built, a
+trigger-changed light, a stale cache), `computeSceneMultipliers` scales each terrain channel by live / authored RGB on
+top of the intensity ratio, and an event palette keeps the live normal RGB's largest channel M; objects still take the
+intensity alone. A day-built cache (1/1/1) under an edited night of Ambient 0.55, Level 0.003 and RGB 0.4/0.4/0.7
+therefore gives terrain `0.562 x (0.4, 0.4, 0.7)` at median height 4 instead of a neutral 0.562 (round 9e #3). Equal
+live and authored RGB keep the exact identity path. Only light level and tint follow the live values: the day/dusk/night
+staging, sun and shadows still come from the cached map.
+
 The supplied HD cinematic replay at hour 16.5 measured storm/clear terrain ratios `(0.229, 0.450, 1.117)` and
 building ratios `(0.22, 0.36–0.39, 0.75–0.80)` despite correct scene multipliers. The storm presentation was selecting
 the ordinary grey-blue overcast key after adaptation, adding a second colour transform. It now transfers removed
