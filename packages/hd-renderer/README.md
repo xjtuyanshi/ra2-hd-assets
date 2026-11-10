@@ -348,6 +348,19 @@ scene bloom (their material sparkle remains); matching the former noon bloom hal
 The night toe is suppressed where self-lit colour survives; fractional filtered edges and GPU composition
 remain **UNVERIFIED** until replay captures are measured.
 
+The engine's own field-wide ore/gem glints (`src/ra2/cellGlints.ts`, drawn by `src/live/glintLayer.ts`) replace the
+pass HD mode skips on the native surface (TacticalClass 0x6D7840, see
+`docs/remaster/research/yr-ore-glints.md`): every ore or gem cell carries one single-pixel glint at a random spot
+in a 64x32 box around its centre, gold to near-white and back in 273-546 ms, then a random pause of up to 4.1 s,
+on the renderer's wall clock. Each is a camera-facing dot of about one engine pixel in the same self-lit attachment,
+so map light, scene events and the night grade do not dim it; it is pulled just in front of upright art standing in
+its own cell, so objects in nearer cells hide it (the engine writes it over everything). Cells under black shroud
+are not advanced. The TWNK1 anims (`OreTwinkle`) are separate engine anims and unchanged. With the glints on, the
+HD procedural star twinkle on crystals (`SpriteLookState.crystalSparkle`, an HD addition at fixed spots) is 0 by
+default; `LiveViewOptions.oreGlints: false` / `crystalSparkle`, sandbox `glints=off` / `sparkle=0..1` and in game
+`hd-glints=off` / `hd-sparkle=0..1` change that. Water glints (kind 0 of the same pass) are not drawn: HD water has
+its own glitter.
+
 ## Night, weather and map light sources
 
 Maps are staged from their own `[Lighting]` (`RenderMap.atmosphere`: `sidecarAtmosphere` recomputes it from the raw

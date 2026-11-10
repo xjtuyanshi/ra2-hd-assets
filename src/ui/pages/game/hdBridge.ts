@@ -1083,6 +1083,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           volumetricEffects: params.get('hd-fxvol') === 'ray' ? 'ray' : 'off',
           // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
           water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
+          // hd-glints=off: leave out the engine's ore/gem glints; hd-sparkle=0..1: the HD star twinkle on crystals.
+          ...(params.get('hd-glints') === 'off' ? { oreGlints: false } : {}),
+          ...(params.has('hd-sparkle') && Number.isFinite(Number(params.get('hd-sparkle')))
+            ? { crystalSparkle: Number(params.get('hd-sparkle')) }
+            : {}),
           ...(params.get('hd-vlook') === 'remaster' ? { voxelLook: 'remaster' } : {}),
           ...(projectionDir && !/\.\.|[\\:]/.test(projectionDir)
             ? { voxelProjection: `/hd-cache/${projectionDir}` }

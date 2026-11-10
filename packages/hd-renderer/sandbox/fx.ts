@@ -39,6 +39,8 @@
  *                             ground/level retain the map values. Applies to synthetic snapshots and replays.
  *   &look=golden              the enhanced look preset (sun arc, relit art, shadows following the sun)
  *   &water=enhanced           the modern water (default: the earlier HD water)
+ *   &glints=off               leave out the engine's ore/gem glints (ra2/cellGlints.ts); &sparkle=0..1 sets the HD
+ *                             star twinkle on crystals (default 0 with glints, 1 without)
  *   &native=1                 pass the bridge fields (exact anim frame) instead of relying on the fallback timing
  *   &garnish=0                the original art alone, without HD light, sparks or smoke
  *   &effects=enhanced         the enhanced effect style (LiveViewOptions.effects) instead of the faithful garnish
@@ -134,6 +136,8 @@ const live = await LiveView.create(canvas, {
   volumetricEffects: params.get('fxvol') === 'ray' ? 'ray' : 'off',
   effectsHdBase: params.get('fxhdbase') ?? undefined,
   water: params.get('water') === 'enhanced' ? 'enhanced' : 'classic',
+  ...(params.get('glints') === 'off' ? { oreGlints: false } : {}),
+  ...(params.has('sparkle') ? { crystalSparkle: Number(params.get('sparkle')) } : {}),
 });
 // As the game page shows it: pipelines compiled off the frame (objects appear when theirs is ready).
 if (params.get('pipelines') === 'async') live.hd.enableAsyncPipelines();

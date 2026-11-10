@@ -83,6 +83,7 @@ import {
   animAlpha,
   effectDisplayBounds,
   effectPageLoaded,
+  engineAnchor,
   type EffectDisplayBounds,
   type EffectInstance,
 } from './effectSprites';
@@ -96,7 +97,9 @@ import { HeldPicture } from './heldPicture';
 import { PageGate, PageUploader, type PageUpload } from '../pageUpload';
 import { countCompilations } from '../compileCounter';
 import { LIBRARY_PALETTE_PREFIX, LiveLibrary } from './library';
-import { OverlayInstanceCache, type LiveOverlayCells } from './overlays';
+import { OverlayInstanceCache, tiberiumCells, type LiveOverlayCells } from './overlays';
+import { GlintLayer } from './glintLayer';
+import { CellGlints } from '../ra2/cellGlints';
 import { SmudgeInstanceCache, type LiveSmudgeCells, type SmudgePage } from './smudges';
 import { Projectiles } from './projectiles';
 import { shpUnitPose, shpUnitFrame, type ShpUnitState } from './shpUnits';
@@ -312,6 +315,16 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   nativeDetail?: 'ignore' | 'mirror';
   /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
   water?: WaterStyle;
+  /**
+   * The engine's own field-wide ore/gem glints (ra2/cellGlints.ts, the pass HD mode skips on the native surface):
+   * on by default; false leaves them out.
+   */
+  oreGlints?: boolean;
+  /**
+   * Gain of the HD's procedural star twinkle on ore and gems (spriteLook.ts crystalSparkle, an HD addition). Defaults
+   * to 0 while the engine's glints are drawn (they would double up) and to 1 without them.
+   */
+  crystalSparkle?: number;
 }
 
 export interface LiveDiagnostics {
@@ -408,6 +421,22 @@ export interface LiveEnvironment {
 const UNIT_FOUNDATION = [1, 1] as const;
 const LEPTONS_PER_CELL = 256;
 const LEPTONS_PER_LEVEL = 104;
+
+/** Cells of the map's own tiberium overlays (the static map cache's self-lit overlays), ascending. */
+export function staticTiberiumCells(
+  objects: readonly Pick<MapObject, 'kind' | 'lighting' | 'x' | 'y'>[],
+  terrain: { width: number; height: number; exists: Uint8Array },
+): Int32Array {
+  const cells = new Set<number>();
+  for (const object of objects) {
+    if (!isUnlitMapOverlay(object)) continue;
+    const { x, y } = object;
+    if (x < 0 || y < 0 || x >= terrain.width || y >= terrain.height) continue;
+    const cell = y * terrain.width + x;
+    if (terrain.exists[cell]) cells.add(cell);
+  }
+  return Int32Array.from([...cells].sort((a, b) => a - b));
+}
 /** A logic-frame move longer than this (cells) is a teleport (chrono, reinforcement) and is not interpolated. */
 const TELEPORT_CELLS = 3;
 /**
@@ -916,6 +945,11 @@ export class LiveView {
   private readonly cellObjects = new Map<number, MapObject[]>();
   private cellsDirty = true;
   private readonly overlayInstances: OverlayInstanceCache;
+  /** The engine's ore/gem glints (see LiveViewOptions.oreGlints); null when switched off. */
+  private readonly glints: { state: CellGlints; layer: GlintLayer } | null;
+  /** Map cells that carry a glint: the live tiberium overlays, or the map's own ore until those are published. */
+  private glintCells: Int32Array = new Int32Array(0);
+  private readonly glintAnchor = new Vector3();
   /** `indexed`: built from the indexed page while the page's HD art loads (a shown view), to be rebuilt with it. */
   private readonly overlayLayers = new Map<number, { layer: SpriteLayer; materials: boolean; indexed?: boolean }>();
   private readonly uploadedOverlays = new Map<number, readonly SpriteInstance[]>();
@@ -1142,6 +1176,14 @@ export class LiveView {
       exists: cache.exists,
     };
     this.overlayInstances = new OverlayInstanceCache(cellTerrain);
+    if (options.oreGlints !== false) {
+      const overlay = hd.emissiveOverlay;
+      const layer = new GlintLayer(hd.nodes, overlay.cameraRight, overlay.cameraUp, overlay.toCamera);
+      this.root.add(layer.mesh);
+      this.glints = { state: new CellGlints(cellTerrain.width * cellTerrain.height), layer };
+      this.glintCells = staticTiberiumCells(cache.manifest.objects, cellTerrain);
+    } else this.glints = null;
+    spriteLookFor(hd.nodes).crystalSparkle.value = Math.max(0, options.crystalSparkle ?? (this.glints ? 0 : 1));
     this.smudgeInstances = new SmudgeInstanceCache(cellTerrain, cache.manifest.sprites);
     // What the map itself places will be in the match's first snapshot: the map cache lists it, so its art starts
     // loading now, behind the loading screen, and not when the game has created the objects (see prepare).
@@ -1799,6 +1841,7 @@ export class LiveView {
     this.effectDriver.frame(this.hd.seconds(), this.wind);
     if (!current) this.hd.setSceneLighting(null);
     this.liveBeams.displayScale.value = 1 / Math.max(1e-3, this.hd.meanExposure);
+    this.updateGlints(now);
     if (this.effectSprites) {
       // Quality tier 1 and up: no copy of the frame for translucent engine effects (see EffectSpriteLayer.backdropMix).
       this.effectSprites.backdropMix = !(this.hd.quality >= 1);
@@ -2202,6 +2245,34 @@ export class LiveView {
     for (const { layer } of this.pageLayers.values()) layer.updateCaptureCodes(this.spriteCaptureCode);
   }
 
+  /**
+   * One pass of the engine's glint step on the renderer's wall clock (milliseconds, like the engine's timeGetTime):
+   * cells under black shroud are left untouched, as cells the engine does not process.
+   */
+  private updateGlints(now: number): void {
+    const glints = this.glints;
+    if (!glints) return;
+    const { state, layer } = glints;
+    const width = this.cache.manifest.grid.width;
+    const levels = this.cache.height;
+    const centre = (cell: number, axis: 0 | 1): number => {
+      const x = cell % width;
+      return (axis === 0 ? x : (cell - x) / width) * LEPTONS_PER_CELL + LEPTONS_PER_CELL / 2;
+    };
+    layer.begin();
+    state.step(
+      this.glintCells,
+      state.elapsed(now),
+      (cell, dx, dy, r, g, b) => {
+        const z = (levels[cell] ?? 0) * LEPTONS_PER_LEVEL;
+        layer.add(engineAnchor(centre(cell, 0), centre(cell, 1), z, undefined, this.glintAnchor), dx, dy, r, g, b);
+      },
+      (cell) =>
+        this.shroud.isLocationShrouded(centre(cell, 0), centre(cell, 1), (levels[cell] ?? 0) * LEPTONS_PER_LEVEL),
+    );
+    layer.end();
+  }
+
   /** Switch garnish for new effects and card art on the next snapshot (see LiveViewOptions.effects). */
   setEffectStyle(style: EffectStyle): void {
     this.effectDriver.style = style;
@@ -2213,6 +2284,7 @@ export class LiveView {
   dispose(): void {
     if (this.hd.beforeDepthCapture === this.classifyFireEngulf) this.hd.beforeDepthCapture = undefined;
     this.liveBeams.dispose();
+    this.glints?.layer.dispose();
     this.hd.renderer.setAnimationLoop(null);
     for (const { layer } of this.overlayLayers.values()) this.disposeOverlayLayer(layer);
     this.overlayLayers.clear();
@@ -3911,6 +3983,14 @@ export class LiveView {
       this.state.map.lighting,
     );
     if (!changed) return;
+    if (this.glints) {
+      const { grid } = this.cache.manifest;
+      const terrain = { width: grid.width, height: grid.height, exists: this.cache.exists };
+      this.glintCells =
+        this.overlayInstances.active && snapshot.overlays
+          ? tiberiumCells(snapshot.overlays, this.library?.library ?? null, terrain)
+          : staticTiberiumCells(this.cache.manifest.objects, terrain);
+    }
     if (wasActive !== this.overlayInstances.active) this.cellsDirty = true;
     this.overlayPagesDirty = true;
     for (const type of this.overlayInstances.instances.missingTypes) {

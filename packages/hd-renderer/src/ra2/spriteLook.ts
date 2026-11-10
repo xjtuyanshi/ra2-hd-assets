@@ -103,6 +103,11 @@ export class SpriteLookState {
   readonly unlitSkyWeight = uniform(new Color());
   readonly unlitSunLight = uniform(new Color());
   readonly unlitSkyLight = uniform(new Color());
+  /**
+   * Gain of the procedural star twinkle on ground crystals (crystalSparkle), an HD addition. A live view that draws
+   * the engine's own ore glints (ra2/cellGlints.ts) turns it down so the two do not double up.
+   */
+  readonly crystalSparkle = uniform(1);
   /** Sun highlights on facades and roofs (and the sheen of wet surfaces). */
   readonly specular = uniform(0);
   /** Window glass: sky reflection and sun glints on the panes of the material atlas (0 = the art's own panes). */
@@ -306,6 +311,7 @@ export function groundCrystalColour(
     .mul(twinkle)
     .mul(2.4)
     .mul(state.specular)
+    .mul(state.crystalSparkle)
     .mul(crystal)
     .mul(sparkleLight);
   return base.add(highlight).add(sparkle);

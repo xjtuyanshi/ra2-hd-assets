@@ -150,6 +150,33 @@ export function buildOverlayInstances(
   return { pages, missingTypes };
 }
 
+/**
+ * Map cells (y * terrain.width + x) whose live overlay is tiberium (ore or gems): the cells the engine's glint pass
+ * gives a glint (ra2/cellGlints.ts, kind 1). Rubble carriers and cells outside the map are left out; ascending order.
+ */
+export function tiberiumCells(
+  cells: LiveOverlayCells,
+  library: Pick<TypeLibrary, 'overlays'> | null,
+  terrain: Pick<OverlayTerrain, 'width' | 'height' | 'exists'>,
+): Int32Array {
+  const out: number[] = [];
+  if (!library?.overlays || !Number.isSafeInteger(cells.width) || cells.width <= 0) return new Int32Array(0);
+  const count = Math.min(cells.width * cells.height, cells.index.length);
+  const rubble = new Set((cells.rubble ?? []).map((entry) => entry.slot));
+  for (let slot = 0; slot < count; slot++) {
+    const index = cells.index[slot]!;
+    if (index < 0 || rubble.has(slot)) continue;
+    const type = library.overlays[cells.types[index] ?? ''];
+    if (type?.tiberium !== true || type.rubble === true) continue;
+    const x = cells.originX + (slot % cells.width);
+    const y = cells.originY + Math.floor(slot / cells.width);
+    if (x < 0 || y < 0 || x >= terrain.width || y >= terrain.height) continue;
+    const cell = y * terrain.width + x;
+    if (terrain.exists[cell]) out.push(cell);
+  }
+  return Int32Array.from(out.sort((a, b) => a - b));
+}
+
 /** Nearness per step towards the camera, and the number of cell diagonals after which overlayTieBias starts over. */
 export const OVERLAY_TIE_STEP = 0.0008;
 export const OVERLAY_TIE_PERIOD = 64;

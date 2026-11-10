@@ -20,7 +20,8 @@ import {
   UnsignedByteType,
   WebGPURenderer,
 } from 'three/webgpu';
-import { float, lights, texture as textureNode, uv, vec4 } from 'three/tsl';
+import { float, lights, texture as textureNode, uniform, uv, vec4 } from 'three/tsl';
+import { GLINT_CAPACITY, GlintLayer } from '../src/live/glintLayer';
 // @ts-expect-error r186 exposes this internal module without a matching @types/three declaration.
 import RenderObject from 'three/src/renderers/common/RenderObject.js';
 import { InstancedQuad } from '../src/instancedQuad';
@@ -721,6 +722,26 @@ describe('r186 vertex and uniform binding budget', () => {
     lights.dispose();
     nodes.dispose();
     terrainDepth.dispose();
+  });
+
+  it('audits the cell glint pool (one interleaved instance buffer) empty, used and full', () => {
+    const layer = new GlintLayer(
+      new AtmosphereNodes(),
+      uniform(new Vector3(1, 0, 0)),
+      uniform(new Vector3(0, 1, 0)),
+      uniform(new Vector3(0, 0, 1)),
+    );
+    expect(layer.mesh.material).toMatchObject({ transparent: true, depthTest: true, depthWrite: false });
+    for (const count of [0, 1, GLINT_CAPACITY + 5]) {
+      layer.begin();
+      for (let i = 0; i < count; i++) layer.add(new Vector3(i, 0, i), -31, 16, 255, 255, 247);
+      layer.end();
+      expect(layer.mesh.count).toBe(Math.min(count, GLINT_CAPACITY));
+      expect(layer.mesh.visible).toBe(count > 0);
+      assertLimits(layer.mesh);
+      assertLimits(layer.mesh, 16384);
+    }
+    layer.dispose();
   });
 
   it('binds the per-cell ground mask only for rain splashes and snow landing', () => {

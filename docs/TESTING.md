@@ -56,7 +56,7 @@ The suite builds both indexed and HD colour paths with windows and the enhanced 
 shades and wet reflections, plus signed R8 template loads, test-only door/ground-unit color ordering, shared capture
 codes and child-pass cleanup. Grown cell, overlay and smudge pages keep the same
 binding count. Other fixtures cover all sixteen procedural effect pools (including the seven enhanced explosion
-pools), beams, emitters, light fields, rain/masked splashes/snow, data-sized night poles, terrain/cliffs, classic and enhanced
+pools), beams, the cell glint pool, emitters, light fields, rain/masked splashes/snow, data-sized night poles, terrain/cliffs, classic and enhanced
 water with and without scene reflections, voxel units/projectiles/debris/shadows, sandbox objects/windows and custom
 full-screen mist/tone mapping. The stand-in voxel mesh (drawn while a model's smooth mesh is built off the presenting
 thread) must generate the same shader code and buffer layouts as the smooth mesh with every material that draws

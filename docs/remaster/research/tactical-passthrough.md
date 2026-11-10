@@ -266,6 +266,7 @@ around `cx`/`cy`, frozen at progress 0.5. `bprogress=0..1` selects a different l
     native. The other `rand()` callers found (0x5592B0, 0x559608, 0x621DA0/0x621DFA, 0x632692, 0x7A458D) look like
     UI, string or buffer code, and 0x5B8AF3 and 0x5DEC55 seed the generator with `srand()` first; no simulation
     consumer of this stream was found, but that is a survey of call sites, not a proof.
+    The HD renderer draws its own copy of these glints with its own generator (`yr-ore-glints.md`).
   - The glint pass (0x6D7847), the spotlight draw 0x5FF850 (0x5FF86E) and the laser draw (0x550BCA) update the detail
     hysteresis flag 0xABCD50 through 0x55AF60, which compares the measured frame rate 0xABCD44 (frames per timing
     period) with two thresholds. Animation and particle drawing, which keep running, call it too (0x422FCC,
