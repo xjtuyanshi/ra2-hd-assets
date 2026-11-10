@@ -334,6 +334,75 @@ describe('LiveView ground motion', () => {
   });
 });
 
+describe('LiveView camera scroll', () => {
+  /** The view's left edge in engine pixels (viewWidth 0), back from the camera target. */
+  const viewX = (camera: IsoCamera) => (camera.target.x - camera.target.z) * 30;
+
+  /**
+   * A held arrow key: the view moves `step` engine pixels per logic frame at 31.3 Hz; each logic frame is ready a
+   * little early or late and is picked up on the bridge's 16.7 ms poll grid, so snapshots arrive 17, 33 or 50 ms apart.
+   * The display runs at `hz`, off the poll grid.
+   */
+  function pan(hz: number, step: number, frames = 90) {
+    const p = presentation();
+    const poll = 1000 / 60;
+    let seed = 7;
+    const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648) * 2 - 1;
+    const arrivals: number[] = [];
+    for (let k = 0; k < frames; k++) {
+      const ready = k * (1000 / 31.3) + 9 * random();
+      arrivals.push(Math.max(arrivals.at(-1) ?? 0, Math.ceil(ready / poll) * poll));
+    }
+    const gaps = new Set(arrivals.slice(1).map((at, i) => Math.round(at - arrivals[i]!)));
+    const shown: number[] = [];
+    let next = 0;
+    for (let now = 5; now <= arrivals.at(-1)! + 150; now += 1000 / hz) {
+      for (; next < arrivals.length && arrivals[next]! <= now; next++)
+        p.view.push({ ...snapshot(next + 1, 0), view: { x: next * step, y: 0 } }, arrivals[next]!);
+      p.view.render(now);
+      shown.push(viewX(p.hd.view));
+    }
+    return { p, shown, gaps, arrivals };
+  }
+
+  function spread(shown: number[], step: number, frames: number) {
+    // Skip the start (the period is still being learned) and the stop.
+    const from = shown.findIndex((x) => x > 8 * step);
+    const to = shown.findIndex((x) => x > (frames - 4) * step);
+    const steps = shown.slice(from + 1, to).map((x, i) => x - shown[from + i]!);
+    const mean = steps.reduce((sum, s) => sum + s, 0) / steps.length;
+    const deviation = Math.sqrt(steps.reduce((sum, s) => sum + (s - mean) ** 2, 0) / steps.length);
+    return { steps, mean, spread: deviation / mean, min: Math.min(...steps), max: Math.max(...steps) };
+  }
+
+  it('scrolls at an even speed although snapshots arrive on the poll grid 17, 33 or 50 ms apart', () => {
+    for (const hz of [60, 50, 40]) {
+      const { shown, gaps } = pan(hz, 23);
+      if (hz === 60) expect([...gaps].sort((a, b) => a - b)).toEqual([17, 33, 50]);
+      const s = spread(shown, 23, 90);
+      expect(s.steps.length).toBeGreaterThan(80);
+      // 23 engine pixels per 31.95 ms logic frame.
+      expect(s.mean).toBeCloseTo((23 * 31.3) / hz, 0);
+      // Blending over the last arrival interval gave a spread of 0.34 to 0.44 with frozen and doubled frames.
+      expect(s.spread).toBeLessThan(0.15);
+      expect(s.min).toBeGreaterThan(0);
+      expect(s.max).toBeLessThan(1.6 * s.mean);
+      // At rest exactly on the newest snapshot, never behind and back again.
+      expect(shown.at(-1)).toBeCloseTo(89 * 23, 6);
+      for (let i = 1; i < shown.length; i++) expect(shown[i]!).toBeGreaterThanOrEqual(shown[i - 1]! - 1e-9);
+    }
+  });
+
+  it('still shows a jump of the view (a radar click, a new timeline) in one frame', () => {
+    const { p, shown, arrivals } = pan(60, 23, 30);
+    const last = arrivals.at(-1)!;
+    expect(shown.at(-1)).toBeCloseTo(29 * 23, 6);
+    p.view.push({ ...snapshot(31, 0), view: { x: 29 * 23 + 1000, y: 0 } }, last + 200);
+    p.view.render(last + 201);
+    expect(viewX(p.hd.view)).toBeCloseTo(29 * 23 + 1000, 6);
+  });
+});
+
 describe('LiveView physical occlusion scheduling', () => {
   it('hides the whole native-hidden voxel root and restores it on the same logic frame', () => {
     const p = presentation();
@@ -821,10 +890,10 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(p.live.current).toBe(current);
     expect(p.live.previous).toBe(previous);
     expect(p.live.current?.at).toBe(100);
-    // Units play the step until it is due at 225 ms; the camera keeps the arrival interval.
+    // Units and the camera play the step until it is due at 225 ms (the camera moves by the same engine units here).
     const first = 256 + (100 * (150 - 60)) / (225 - 60);
     expect(p.visual.root.position.x).toBeCloseTo(first / 256);
-    expect(p.hd.view.target.x).toBeCloseTo(306 / 60);
+    expect(p.hd.view.target.x).toBeCloseTo(first / 60);
     expect(p.live.current?.byUid.get(1)?.renderOrder?.index).toBe(8);
     expect(p.live.current?.byUid.get(1)?.x).toBe(356);
     expect(p.mesh.userData.painterDepth.bias).toBeGreaterThan(bias);
@@ -832,8 +901,9 @@ describe('LiveView physical occlusion scheduling', () => {
     p.view.render(250);
     // The next step (due at 325 ms) starts from the pose on screen at the last presentation (150 ms), not from the
     // previous snapshot: no jump at its arrival.
-    expect(p.visual.root.position.x).toBeCloseTo((first + ((456 - first) * (250 - 160)) / (325 - 160)) / 256);
-    expect(p.hd.view.target.x).toBeCloseTo(406 / 60);
+    const second = first + ((456 - first) * (250 - 160)) / (325 - 160);
+    expect(p.visual.root.position.x).toBeCloseTo(second / 256);
+    expect(p.hd.view.target.x).toBeCloseTo(second / 60);
   });
 
   it('updates a same-frame pose endpoint without restarting interpolation', () => {

@@ -90,7 +90,8 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    pixel. Positions and facings are interpolated between logic frames: each step plays at one speed from the poses
    on screen to the newest snapshot, due a period and a quarter after that frame's arrival on a de-jittered logic
    clock (`LiveView.scheduleMotion`; snapshots arrive 30 to 75 ms apart, and interpolating over the last arrival
-   interval stalled and jumped). Every animation (walking, building layers,
+   interval stalled and jumped). The camera scrolls on the same clock from the view last shown (jumps over 400 engine
+   pixels are shown at once), so a held arrow key pans at an even speed and units stay on their ground. Every animation (walking, building layers,
    build-up, effects) is clocked on the engine's logic frames, not on the wall clock. Infantry, SHP vehicles and
    aircraft get the engine's extra object light (rules `ExtraInfantryLight`/`ExtraUnitLight`/`ExtraAircraftLight`, 0.2
    in YR); buildings get none. Capturable tech buildings (oil derrick, airport, ...) of a civilian house (the bridge's

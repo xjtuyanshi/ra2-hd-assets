@@ -451,7 +451,8 @@ const TELEPORT_CELLS = 3;
  * snapshot no longer changes the speed: it only uses up (or adds to) the margin. A snapshot later than the margin has
  * already let the units come to rest, so the clock moves to it at once (the margin grows quickly and shrinks slowly,
  * like a jitter buffer). Replayed on recorded arrivals this leaves no stalled frame on a cruising tank and a speed
- * variation of 7 to 20 %.
+ * variation of 7 to 20 %. The camera scrolls on the same clock (see LiveView.cameraShown), so units stay on their
+ * ground while the map pans.
  */
 /** Share of a logic period by which a step's end trails the next frame's expected arrival (the jitter it absorbs). */
 const MOTION_MARGIN = 0.25;
@@ -911,6 +912,14 @@ export class LiveView {
   /** The current step: when the poses it starts from were presented and when it reaches the newest snapshot. */
   private motionStart = 0;
   private motionEnd?: number;
+  /**
+   * The camera plays each logic step on the same clock as the units (scheduleMotion): from the view last presented
+   * (cameraShown, unsnapped engine pixels) to the newest snapshot's. Blended over the last arrival interval instead, it
+   * reached a snapshot early after a short poll gap and stood still, and leapt after a long one (round 9e #14: per-frame
+   * scroll steps from 0 to 3 times the mean on a held arrow key).
+   */
+  private cameraShown?: { x: number; y: number } | null;
+  private cameraFrom?: { x: number; y: number } | null;
   private readonly shpPose: ReturnType<typeof shpUnitPose> = { state: 'stand', step: 0 };
   private readonly hidden = (x: number, y: number, z: number): boolean => this.shroud.isLocationShrouded(x, y, z);
   private readonly effectPalette = (resolved: ResolvedAnim, owner: number | undefined): string =>
@@ -1514,6 +1523,7 @@ export class LiveView {
       // interpolated from it and no building of the match counts as having appeared after it.
       this.warming = false;
       this.current = this.previous = null;
+      this.cameraShown = this.cameraFrom = null;
       this.objectsFor = this.effectsFor = null;
       this.appearances.clear();
       this.buildingVisualHistory?.clear();
@@ -1556,6 +1566,8 @@ export class LiveView {
       this.objectsFor = this.effectsFor = null;
     } else {
       if (current) this.scheduleMotion(snapshot.frame - current.snapshot.frame, snapshot.frame, at - current.at, at);
+      // The step starts at the view on screen; with nothing shown yet (or a new timeline) from the snapshot's own.
+      this.cameraFrom = current ? (this.cameraShown ?? current.snapshot.view) : null;
       this.current = { snapshot, at, byUid };
     }
     // A step still being played out keeps interpolating even when the newest frame moved nothing.
@@ -1787,7 +1799,15 @@ export class LiveView {
           this.effectDriver.skyFlash(this.hd.seconds()),
         ),
       );
-      this.applyCamera(previous?.snapshot.view ?? null, current.snapshot.view, alpha);
+      const cameraAlpha =
+        previous && this.motionEnd !== undefined
+          ? Math.min(1, Math.max(0, (now - this.motionStart) / (this.motionEnd - this.motionStart)))
+          : alpha;
+      this.applyCamera(
+        previous ? (this.cameraFrom ?? previous.snapshot.view) : null,
+        current.snapshot.view,
+        cameraAlpha,
+      );
       // Sprite pages, voxel models, and the meshes and redraw projections built from them, arrive asynchronously.
       const libraryRevision = (this.library?.revision ?? 0) + this.voxelUnits.revision;
       const artRevision = this.effectArt?.revision ?? 0;
@@ -1795,8 +1815,8 @@ export class LiveView {
       const materials = this.hd.materialsWanted();
       if (this.objectLibraryRevision !== libraryRevision || this.objectsMaterials !== materials)
         this.overlayPagesDirty = true;
-      // Objects play each step from the poses on screen to its due time (scheduleMotion); the camera keeps the
-      // arrival interval above.
+      // Objects play each step from the poses on screen to its due time (scheduleMotion), like the camera above;
+      // scene lighting keeps the arrival interval.
       const objectAlpha = !this.objectsInterpolate
         ? 1
         : previous && this.motionEnd !== undefined
@@ -2359,8 +2379,11 @@ export class LiveView {
     // art whose texels match the buffer's pixels (2x art at two device pixels per engine pixel) then stays texel-exact
     // while the map scrolls instead of being resampled half a texel off on every in-between frame.
     const grid = this.bufferScale;
-    const x = jump || !from ? to.x : snapToPixelGrid(from.x + (to.x - from.x) * alpha, grid);
-    const y = jump || !from ? to.y : snapToPixelGrid(from.y + (to.y - from.y) * alpha, grid);
+    const shownX = jump || !from ? to.x : from.x + (to.x - from.x) * alpha;
+    const shownY = jump || !from ? to.y : from.y + (to.y - from.y) * alpha;
+    this.cameraShown = { x: shownX, y: shownY };
+    const x = jump || !from ? to.x : snapToPixelGrid(shownX, grid);
+    const y = jump || !from ? to.y : snapToPixelGrid(shownY, grid);
     // The camera looks at the ground point (level 0) under the view's centre; orthographic, so height is irrelevant.
     const diff = (x + this.viewWidth / 2) / 30;
     const sum = (y + this.viewHeight / 2) / 15;
