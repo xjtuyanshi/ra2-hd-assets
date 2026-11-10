@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Vector3 } from 'three/webgpu';
 import { SpriteLayer, objectAnchor, type SpriteInstance } from '../src/ra2/sprites';
-import { paletteFor, ra2Screen, screenToCell, type Ra2Cache } from '../src/ra2/cache';
+import { paletteFor, paletteRowOf, ra2Screen, screenToCell, type Ra2Cache } from '../src/ra2/cache';
 import { ShroudLayer, shroudCorners } from '../src/live/shroud';
 import { SpritePool } from '../src/live/spritePool';
 import type { DirtyAttribute } from '../src/dirtyAttribute';
@@ -34,6 +34,28 @@ describe('live sprite buffers', () => {
     local.paletteRow.set('unit@house', 1);
     expect(paletteFor(local, 'unit', true, 'house')).toBe('unit@house');
     expect(paletteFor(local, 'unit', false, 'house')).toBe('unit');
+  });
+
+  it('falls back from a missing house row to its base palette and reports an unknown key once', () => {
+    const local = {
+      paletteRow: new Map([
+        ['iso', 0],
+        ['lib:unit', 4],
+        ['lib:unit@live3', 9],
+      ]),
+    } as unknown as Ra2Cache;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(paletteRowOf(local, 'lib:unit@live3')).toBe(9);
+      expect(paletteRowOf(local, 'lib:unit@live7')).toBe(4);
+      expect(warn).not.toHaveBeenCalled();
+      expect(paletteRowOf(local, 'fx:anim-missing')).toBe(0);
+      expect(paletteRowOf(local, 'fx:anim-missing')).toBe(0);
+      expect(paletteRowOf(local, 'fx:gone@live7')).toBe(0);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('keeps stable decal/shadow/card ordering and only uploads changed float32 components', () => {

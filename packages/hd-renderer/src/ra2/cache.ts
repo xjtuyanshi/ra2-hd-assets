@@ -693,6 +693,26 @@ export function tileAtlasPixel(
   return [tile.rect[0] + tile.anchor[0] + (px - ax), tile.rect[1] + tile.anchor[1] + (py - ay)];
 }
 
+const warnedPaletteKeys = new Set<string>();
+
+/**
+ * Atlas row of a palette key for an instance upload. A house row that is missing (atlas full, house not yet seen)
+ * falls back to its base palette, exactly like `paletteFor`; a key with no row at all is reported once and drawn
+ * with row 0 as before, instead of silently taking the map's first palette.
+ */
+export function paletteRowOf(cache: Ra2Cache, key: string): number {
+  const row = cache.paletteRow.get(key);
+  if (row !== undefined) return row;
+  const at = key.lastIndexOf('@');
+  const base = at > 0 ? cache.paletteRow.get(key.slice(0, at)) : undefined;
+  if (base !== undefined) return base;
+  if (!warnedPaletteKeys.has(key)) {
+    warnedPaletteKeys.add(key);
+    console.warn(`[HD] palette ${JSON.stringify(key)} has no atlas row: drawn with row 0`);
+  }
+  return 0;
+}
+
 /** Palette key for an object's art: the house-remapped row when the art is remappable and the owner is known. */
 const remapKeys = new WeakMap<Ra2Cache, Map<string, Map<string, string>>>();
 

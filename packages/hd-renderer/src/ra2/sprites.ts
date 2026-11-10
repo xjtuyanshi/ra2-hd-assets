@@ -68,7 +68,7 @@ import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
 import { bindUnlitSpriteMaterial } from './unlitSprites';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
-import { hdSupersampled, type HdAtlas, type Ra2Cache } from './cache';
+import { hdSupersampled, paletteRowOf, type HdAtlas, type Ra2Cache } from './cache';
 import { mapLightAt, srgbScale } from './mapLighting';
 import { ENGINE_SHADOW_OPACITY } from './voxelShadow';
 import { cardDepthNode, SPRITE_DECAL_LIFT, SPRITE_DECAL_LIFT_ROWS } from './cardDepth';
@@ -1340,7 +1340,7 @@ export class SpriteLayer {
         this.anchor.setComponent(i, 6, tinted ? (s.tintLight ?? 1) : 1);
         this.anchor.setComponent(i, 7, tinted ? (s.tintColour ?? 0) : 0);
         this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
-        this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], this.cache.paletteRow.get(s.palette) ?? 0, s.push);
+        this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], paletteRowOf(this.cache, s.palette), s.push);
         this.flags.setXYZW(
           i,
           instanceCode(s),

@@ -388,6 +388,12 @@ export class LiveEffectsDriver {
   logicFrame = 0;
   /** Anim types seen without art (diagnostics). */
   readonly unknownTypes = new Set<string>();
+  /**
+   * Art types with Layer=Top that an instance routed to another pass (the engine reports an attached anim in Ground).
+   * Reported once per type: the round-9e blue storm-cloud cards were drawn under a vehicle, i.e. not in the Top pass,
+   * and this names the instance state that sent them there in a live session.
+   */
+  private readonly offTopTypes = new Set<string>();
   /** HD garnish on top of the native art (off = the original effects only, for comparisons). */
   garnishEnabled = true;
   /** The live view's opt-out for RGBA flipbooks; native art and procedural garnish keep their existing behavior. */
@@ -658,6 +664,13 @@ export class LiveEffectsDriver {
       const layer = anim.layer ?? a.layer;
       const pass: EffectPass = layer === 'top' ? 'top' : flat ? 'ground' : layer === 'air' ? 'air' : 'ground';
       const key = palette(resolved, anim.owner);
+      if (a.layer === 'top' && pass !== 'top' && !this.offTopTypes.has(anim.type)) {
+        this.offTopTypes.add(anim.type);
+        console.warn(
+          `[HD] ${anim.type}: art Layer=Top drawn in the ${pass} pass (engine layer ${anim.layer ?? 'unknown'}, ` +
+            `attached ${anim.attachedTo ? 'yes' : 'no'}, flat ${flat}, palette ${key})`,
+        );
+      }
       const depth = engineDepth(drawAt.x, drawAt.y, drawAt.z) + (a.zAdjust ?? 0) * 0.001;
       // The engine's own Z offset of this instance (building damage fires) moves the card's depth like the
       // engine moves its Z; such a card keeps that depth instead of the per-fire object-depth combination.

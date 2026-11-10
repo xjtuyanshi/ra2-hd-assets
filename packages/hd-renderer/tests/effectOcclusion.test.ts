@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { DataTexture, Group, Mesh, type MeshBasicNodeMaterial, Vector3 } from 'three/webgpu';
 import type { EffectsLayer } from '../src/effects';
 import type { InstancedQuad } from '../src/instancedQuad';
@@ -121,5 +121,44 @@ it('keeps only native Top animations above black shroud, in a separate transpare
     expect(layer.topRoot.children).toHaveLength(0);
   } finally {
     texture.dispose();
+  }
+});
+
+it('keeps the engine pass for an attached Layer=Top anim and names it once for live diagnosis', () => {
+  const topArt = {
+    ...art,
+    anim: () => ({
+      art: { layer: 'top', start: 0, frameCount: 1 },
+      sprite: { frames: [frame] },
+      palette: 'fx:anim',
+      remap: false,
+    }),
+  } as unknown as EffectArt;
+  const driver = new LiveEffectsDriver({ setBeams() {} } as unknown as EffectsLayer, () => false);
+  driver.garnishEnabled = false;
+  const cloud = { type: 'WCCLOUD1', x: 256, y: 512, z: 1490, frame: 0 };
+  driver.push(
+    {
+      anims: [
+        { id: 1, uid: 1, ...cloud, layer: 'top' as const },
+        { id: 2, uid: 2, ...cloud, layer: 'ground' as const, attachedTo: { id: 7, uid: 7, kind: 'unit' } },
+        { id: 3, uid: 3, ...cloud, layer: 'ground' as const, attachedTo: { id: 7, uid: 7, kind: 'unit' } },
+      ],
+      bullets: [],
+      particleSystems: [],
+    },
+    1,
+    0,
+    new Vector3(),
+  );
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const cards: EffectInstance[] = [];
+    driver.cards(topArt, () => 'fx:anim', cards);
+    expect(cards.map((card) => card.pass).sort()).toEqual(['ground', 'ground', 'top']);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/WCCLOUD1: art Layer=Top drawn in the ground pass .*attached yes/);
+  } finally {
+    warn.mockRestore();
   }
 });

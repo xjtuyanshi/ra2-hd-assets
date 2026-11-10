@@ -46,7 +46,7 @@ import { bindSlotsBeforeRender, samplingClass, slotMaterial, textureSlot } from 
 import type { ShaderNode } from '../tsl';
 import type { TerrainDepth } from '../terrainDepth';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
-import type { Ra2Cache } from '../ra2/cache';
+import { paletteRowOf, type Ra2Cache } from '../ra2/cache';
 import { cardDepthNode, EFFECT_DECAL_LIFT, GROUND_DEPTH } from '../ra2/cardDepth';
 import {
   fireballDepthBiasNode,
@@ -806,7 +806,7 @@ class PageMesh {
       const s = instances[i]!;
       this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
       this.rect.setXYZW(i, s.frame.rect[0], s.frame.rect[1], s.frame.rect[2], s.frame.rect[3]);
-      this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], cache.paletteRow.get(s.palette) ?? 0, s.push);
+      this.params.setXYZW(i, s.frame.offset[0], s.frame.offset[1], paletteRowOf(cache, s.palette), s.push);
       this.style.setXYZW(
         i,
         s.alpha,
