@@ -407,6 +407,8 @@ export const englishMessages = {
   '高清画面未启用：地图 {0} 没有高清素材，显示原版画面':
     'HD view off: map {0} has no HD assets; showing the original picture',
   '正在准备高清战场…': 'Preparing the HD battlefield…',
+  '本局战场过大，高清画面跟不上，继续显示原版画面':
+    'This match is too large for the HD view to keep up; continuing with the original picture',
   '高清暂不可用，原版可继续游玩': 'HD is temporarily unavailable; keep playing in the original view',
   '高清素材不完整，继续显示原版画面': 'HD assets are incomplete; continuing with the original picture',
   '高清画面暂时不可用，按 \\ 查看原版': 'HD view unavailable; press \\ for the original picture',

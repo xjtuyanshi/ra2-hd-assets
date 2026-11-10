@@ -68,7 +68,11 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    sidebar while coherent subscriptions catch up. After a 500 ms gap (or a one-second pending reader), the bridge
    checks native health; only a confirmed unreadable range persisting for 500 ms disables passthrough and shows the
    Chinese recovery notice over the live original picture. A rendering exception also retains its recovery path;
-   time-budget truncation alone never changes the picture style. A complete
+   a short time-budget truncation never changes the picture style. A capture that stays truncated for 2 s without one
+   completed render state (`native.renderHealth.incompleteSinceEpochMs`; a match that outgrew the agent's per-frame
+   copy) also returns to the live original, with a notice that the match is too large for HD, until a complete state
+   arrives; before the first HD frame the same condition replaces the preparation notice (probed once a second after
+   2 s of preparation). Health reports time out after 2 s, so one that never answers cannot block later checks. A complete
    unkeyed native frame retires queued keyed frames immediately. A new complete state must draw settled art before
    HD cross-fades back; late replies from before the recovery cannot reveal an old picture. Real dialogs switch to
    the original immediately and preserve the ordinary return without another fade. A confirmed native menu video mode resets reveal state immediately,

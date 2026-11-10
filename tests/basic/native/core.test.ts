@@ -467,6 +467,36 @@ describe('native core session and presenter lifecycle', () => {
     },
   );
 
+  it('reports how long a truncated capture has gone without a completed render state, and clears it on the next', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started();
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      renderHealth: { unreadableSinceEpochMs: null, incompleteSinceEpochMs: null },
+    });
+    agent.mirrorFault = { reason: 1, stage: 2, rule: 0, value: 1000, limit: 4000 };
+    agent.mirror(2, [], 1);
+    await flush();
+    const since = ((await core.getDiagnostics('sample')).native as { renderHealth: { incompleteSinceEpochMs: number } })
+      .renderHealth.incompleteSinceEpochMs;
+    expect(since).toEqual(expect.any(Number));
+    // Every further truncation keeps the episode's start; it stays a budget miss, not an unreadable game.
+    for (let index = 0; index < 5; index++) {
+      await vi.advanceTimersByTimeAsync(600);
+      agent.mirror(3 + index, [], 1);
+      expect(await core.getRenderState()).toBeNull();
+    }
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      renderHealth: { unreadableSinceEpochMs: null, incompleteSinceEpochMs: since },
+      mirrorRecovery: { count: 0 },
+    });
+    agent.mirror(9, [{ address: 0x1000, bytes: agent.initial }]);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      renderHealth: { unreadableSinceEpochMs: null, incompleteSinceEpochMs: null },
+    });
+  });
+
   it.each(['stop', 'disconnect'])(
     'settles publication waiting immediately during %s without another input request',
     async (ending) => {

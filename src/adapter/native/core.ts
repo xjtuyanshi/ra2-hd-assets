@@ -339,6 +339,13 @@ export class NativeCore {
   private readonly cadenceEvents: NativeCadenceEvent[] = [];
   private lastMirrorFlags = 0;
   private unreadableSinceEpochMs: number | null = null;
+  /**
+   * First truncated capture (budget or page cap) since the render reader last completed. A truncation while
+   * scrolling is caught up within a few publications; one that lasts means the match outgrew what the agent can
+   * copy per frame (round 9e #10: 16 741 infantry, 119 recoveries and no complete mirror), and the bridge must not
+   * keep a frozen HD picture over the live game. Reported as is; the bridge decides how long is too long.
+   */
+  private incompleteSinceEpochMs: number | null = null;
   private previousLogicFrame: number | null = null;
   private menuSurface: boolean | null = null;
   private awaitingBattleMirror = false;
@@ -527,7 +534,10 @@ export class NativeCore {
     const previousMirrorFrame = this.memory.frame;
     this.lastMirrorFlags = update.flags;
     this.cadence.mirrors++;
-    if (update.flags & 1) this.cadence.truncatedMirrors++;
+    if (update.flags & 1) {
+      this.cadence.truncatedMirrors++;
+      this.incompleteSinceEpochMs ??= performance.timeOrigin + performance.now();
+    }
     if (update.flags & 4) {
       this.cadence.invalidMirrors++;
       this.unreadableSinceEpochMs ??= performance.timeOrigin + performance.now();
@@ -1189,6 +1199,7 @@ export class NativeCore {
     this.completeRenderAt = -Infinity;
     this.completeRenderFrame = null;
     this.unreadableSinceEpochMs = null;
+    this.incompleteSinceEpochMs = null;
     this.battleResumedAt = performance.now();
     // An incomplete reader never reaches working-set retirement. End its allocation scope at the actual video
     // mode/frame epoch instead, before the next map can inherit freed or over-capacity pages.
@@ -1281,6 +1292,8 @@ export class NativeCore {
           // cannot clear its episode, even when the reset rate limit keeps the same reader epoch.
           if (this.hasCurrentMirror() && readInvalidMirrors === this.cadence.invalidMirrors)
             this.unreadableSinceEpochMs = null;
+          // Any completed render state ends a truncation episode: the HD stream is moving, if slowly.
+          this.incompleteSinceEpochMs = null;
           // Subscription waits may receive newer images: cache the publication actually consumed by the reader.
           this.renderPublication = readPublication;
           this.renderPublicationEpoch = epoch;
@@ -1640,7 +1653,10 @@ export class NativeCore {
         mirrorComplete: this.memory.complete,
         awaitingLogicMirror: !this.policyPrepared || !this.memory.complete,
         mirrorMisses: this.memory.misses,
-        renderHealth: { unreadableSinceEpochMs: this.unreadableSinceEpochMs },
+        renderHealth: {
+          unreadableSinceEpochMs: this.unreadableSinceEpochMs,
+          incompleteSinceEpochMs: this.incompleteSinceEpochMs,
+        },
         battlefieldRepaint: {
           state: this.battlefieldRepaint,
           requestedAtEpochMs: this.battlefieldRepaintAt,

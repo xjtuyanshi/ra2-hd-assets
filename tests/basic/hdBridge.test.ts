@@ -224,7 +224,12 @@ function setup(
     getRenderState: vi.fn(async (): Promise<GameRenderState | null> => state),
     getRenderPreparation: vi.fn(async (): Promise<GameRenderPreparation | null> => null),
     getDiagnostics: vi.fn(async () => ({
-      native: { renderHealth: { unreadableSinceEpochMs: null as number | null } },
+      native: {
+        renderHealth: { unreadableSinceEpochMs: null } as {
+          unreadableSinceEpochMs: number | null;
+          incompleteSinceEpochMs?: number | null;
+        },
+      },
     })),
     setTacticalPassthrough: vi.fn(async (_flags: number) => true),
   };
@@ -2767,6 +2772,91 @@ describe('live original to HD transition', () => {
     expect(harness.status).toHaveBeenLastCalledWith(null);
     harness.stop();
     expect(harness.status).toHaveBeenLastCalledWith(null);
+  });
+
+  const capacity = 'This match is too large for the HD view to keep up; continuing with the original picture';
+  const health = (incompleteSinceEpochMs: number | null, unreadableSinceEpochMs: number | null = null) => ({
+    native: { renderHealth: { unreadableSinceEpochMs, incompleteSinceEpochMs } },
+  });
+
+  it('returns a battle whose capture stopped catching up to the live original after two seconds, with a notice', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    const starvedAt = performance.timeOrigin + performance.now();
+    harness.vm.getDiagnostics.mockImplementation(async () => health(starvedAt));
+    harness.setState(null);
+    await advance(17);
+    // A truncation that may still catch up (a scroll) keeps the last complete HD scene.
+    await advance(100, 18);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    await advance(100, 7);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.vm.setTacticalPassthrough).toHaveBeenLastCalledWith(0);
+    expect(harness.bridge()!.timeline.transitions.at(-1)?.reason).toBe('capture-starved');
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    harness.nativeFrame(false);
+    expect(harness.hdCanvas.style.display).toBe('none');
+    await advance(17, 3);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    // The capture catches up again: the next complete state fades HD back and clears the notice.
+    harness.vm.getDiagnostics.mockImplementation(async () => health(null));
+    harness.setState(battle(120));
+    await advance(17, 3);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.bridge()!.diagnostics.state?.frame).toBe(120);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    harness.stop();
+  });
+
+  it('replaces the preparation notice when the capture of a battle not yet shown is starved', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    const view = fakeView();
+    view.settledFrames = 0;
+    liveView.create.mockResolvedValue(view);
+    harness.vm.getDiagnostics.mockImplementation(async () => health(performance.timeOrigin + 1000));
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    // An ordinary preparation is not asked about for its first two seconds.
+    await advance(100, 15);
+    expect(harness.vm.getDiagnostics).not.toHaveBeenCalled();
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    await advance(100, 15);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    expect(harness.hdCanvas.style.display).not.toBe('block');
+    const asked = harness.vm.getDiagnostics.mock.calls.length;
+    await advance(100, 10);
+    // Asked again about once a second, not every frame.
+    expect(harness.vm.getDiagnostics.mock.calls.length - asked).toBeLessThanOrEqual(1);
+    // A complete state: the capture keeps up again, the battlefield is being prepared.
+    harness.vm.getDiagnostics.mockImplementation(async () => health(null));
+    harness.setState(battle(1));
+    await advance(17, 3);
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    harness.stop();
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+  });
+
+  it('does not let a health report that never answers block the later checks', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    harness.vm.getDiagnostics.mockImplementationOnce(() => new Promise(() => undefined));
+    harness.vm.getDiagnostics.mockImplementation(async () => health(null, performance.timeOrigin));
+    harness.setState(null);
+    await advance(17);
+    await advance(501);
+    expect(harness.vm.getDiagnostics).toHaveBeenCalledTimes(1);
+    await advance(100, 15);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.vm.getDiagnostics).toHaveBeenCalledTimes(1);
+    await advance(100, 7);
+    expect(harness.vm.getDiagnostics.mock.calls.length).toBeGreaterThan(1);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.bridge()!.timeline.transitions.at(-1)?.reason).toBe('state-unavailable');
+    harness.stop();
   });
 });
 
