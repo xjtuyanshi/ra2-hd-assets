@@ -806,6 +806,10 @@ export class HdRenderer {
   /** Bloom threshold on the unexposed scene (see frame()). */
   private readonly bloomThreshold = uniform(NIGHT_BLOOM_THRESHOLD);
   private readonly blackLift = uniform(new Color(0, 0, 0));
+  /** Share of the cinematic grade shown: the day share (1 - night weight) times the scene's own (SceneLighting). */
+  private readonly gradeShare = uniform(1);
+  /** SceneLighting.darkLoss: encoded amount taken off the lit, visible battlefield. */
+  private readonly darkLoss = uniform(new Color(0, 0, 0));
   /** Share of PBR Neutral in the faithful display transform: the night weight on original maps (see post.ts). */
   private readonly nightDisplay = uniform(0);
   private readonly gradeUniforms = {
@@ -1340,7 +1344,7 @@ export class HdRenderer {
       // Grade display-linear colour after the tone map, before renderOutput encodes sRGB and the night toe lift.
       const linear: ShaderNode =
         toneMapper === 'faithful' ? mixed : toneMapping(TONE_MAPPERS[toneMapper], float(1), vec4(composite, 1)).rgb;
-      const graded: ShaderNode = mix(cinematicGrade(linear, this.gradeUniforms), linear, this.nightDisplay);
+      const graded: ShaderNode = mix(linear, cinematicGrade(linear, this.gradeUniforms), this.gradeShare);
       output = renderOutput(vec4(addEmission(graded), 1), NoToneMapping);
     } else if (overlay || unlit) {
       const linear: ShaderNode =
@@ -1360,7 +1364,13 @@ export class HdRenderer {
     const toeVisibility: ShaderNode = unlitColour
       ? dot(unlitColour, vec3(1)).greaterThan(0).select(float(0), visible)
       : visible;
-    let display: ShaderNode = vec4(output.rgb.add(this.blackLift.mul(toeVisibility).mul(toe.mul(toe))), 1);
+    let display: ShaderNode = vec4(
+      output.rgb
+        .add(this.blackLift.mul(toeVisibility).mul(toe.mul(toe)))
+        .sub(this.darkLoss.mul(toeVisibility))
+        .max(0),
+      1,
+    );
     if (this.settings.clarity > 0 && debugView === 'none') {
       // Band-pass (difference of two half-resolution blurs): faces, crevices and canopy masses a few CSS px and up gain
       // contrast while pixel-scale texture (brick, asphalt grain) is left as it is; the plain unsharp mask doubled it.
@@ -1620,6 +1630,8 @@ export class HdRenderer {
     this.nodes.sceneTerrainMul.value.fromArray(scene.terrain).multiplyScalar(flash);
     this.nodes.sceneObjectMul.value.fromArray(scene.objects).multiplyScalar(flash);
     this.nodes.sceneSunShadow.value = scene.sunShadow;
+    this.gradeShare.value = (1 - nightGrade) * scene.gradeShare;
+    this.darkLoss.value.fromArray(scene.darkLoss);
     this.lighting.sun.castShadow = this.settings.shadows && !this.world && scene.sunShadow > 0;
     if (scene.overcast > 0) this.lighting.applySceneOvercast(scene.overcast);
     if (this.settings.voxelLook === 'remaster') {
@@ -2003,7 +2015,7 @@ export class HdRenderer {
     const balance = this.gradeUniforms.gradeBalance.value;
     vehicleBalanceGain(
       [balance.x, balance.y, balance.z],
-      hasCinematicGrade(s) && s.debugView === 'none' ? 1 - this.nightDisplay.value : 0,
+      hasCinematicGrade(s) && s.debugView === 'none' ? this.gradeShare.value : 0,
       vehicles.gradeBalance,
       voxels.whiteBalance.value,
     );

@@ -16,7 +16,12 @@ import { Lighting } from '../src/lighting';
 import type { LightField } from '../src/lightField';
 import { MapLightGrade } from '../src/ra2/mapLighting';
 import { MapLights, type SourceLight } from '../src/ra2/mapLights';
-import { computeSceneMultipliers, ra2SceneLighting, type Ra2SceneLighting } from '../src/ra2/sceneLighting';
+import {
+  computeSceneMultipliers,
+  ra2DisplayPolicy,
+  ra2SceneLighting,
+  type Ra2SceneLighting,
+} from '../src/ra2/sceneLighting';
 import { buildTerrain } from '../src/terrain';
 import { buildWater } from '../src/water';
 import { buildRain, buildSnow } from '../src/weather';
@@ -266,6 +271,8 @@ function headless(profile: AtmosphereProfile, weather: Weather) {
     exposure: { value: Color };
     bloomThreshold: { value: number };
     nightDisplay: { value: number };
+    gradeShare: { value: number };
+    darkLoss: { value: Color };
     staticGain: number;
   };
   const noon = new Lighting(2, 2);
@@ -367,11 +374,18 @@ describe('renderer faithfulness controls', () => {
         const multipliers = computeSceneMultipliers(duskMap, storm, 6);
         expect(f.hd.nodes.sceneTerrainMul.value.toArray()).toEqual(multipliers.terrain);
         expect(f.hd.nodes.sceneObjectMul.value.toArray()).toEqual(multipliers.objects);
+        // The scene's grade share and 16-bit surface loss reach the display, times the day share of the grade.
+        const policy = ra2DisplayPolicy(multipliers.terrain);
+        expect(f.internals.gradeShare.value).toBeCloseTo((1 - f.internals.nightDisplay.value) * policy.gradeShare, 12);
+        expect(f.internals.gradeShare.value).toBeLessThan(1);
+        expectRgb(f.internals.darkLoss.value.toArray(), policy.darkLoss);
         f.hd.setSceneLighting(null);
         f.hd.frame(0);
         expect(f.controls()).toEqual(before);
         expect(f.hd.nodes.sceneSunShadow.value).toBe(1);
         expect(f.hd.nodes.sceneTerrainMul.value.toArray()).toEqual([1, 1, 1]);
+        expect(f.internals.gradeShare.value).toBe(1 - f.internals.nightDisplay.value);
+        expect(f.internals.darkLoss.value.toArray()).toEqual([0, 0, 0]);
       } finally {
         f.dispose();
       }

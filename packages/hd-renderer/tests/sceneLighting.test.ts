@@ -2,7 +2,13 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { AtmosphereNodes } from '../src/atmosphere';
 import type { MapLighting } from '../src/contract';
-import { computeSceneMultipliers, ra2SceneLighting, type Ra2SceneLighting } from '../src/ra2/sceneLighting';
+import {
+  computeSceneMultipliers,
+  ra2DisplayPolicy,
+  ra2SceneLighting,
+  SURFACE_565_LOSS,
+  type Ra2SceneLighting,
+} from '../src/ra2/sceneLighting';
 
 import { resolveSceneLighting } from '../src/sceneLighting';
 
@@ -140,14 +146,24 @@ describe('adapter boundary and neutral scene presentation', () => {
       const input = { ...storm, event };
       const before = structuredClone(input);
       const presentation = ra2SceneLighting(map, input, 0, 0.8)!;
+      const multipliers = computeSceneMultipliers(map, input, 0);
       expect(presentation).toEqual({
-        ...computeSceneMultipliers(map, input, 0),
+        ...multipliers,
+        ...ra2DisplayPolicy(multipliers.terrain),
         sunShadow: event === 'storm' ? 0 : 1,
         overcast: event === 'storm' ? 1 : 0,
         skyFlash: event === 'storm' ? 0.12 : 0,
       });
       expect(input).toEqual(before);
-      expect(Object.keys(presentation).sort()).toEqual(['objects', 'overcast', 'skyFlash', 'sunShadow', 'terrain']);
+      expect(Object.keys(presentation).sort()).toEqual([
+        'darkLoss',
+        'gradeShare',
+        'objects',
+        'overcast',
+        'skyFlash',
+        'sunShadow',
+        'terrain',
+      ]);
     }
     expect(ra2SceneLighting(map, null, 0)).toBeNull();
     expect(ra2SceneLighting(map, storm, 0, NaN)?.skyFlash).toBe(0);
@@ -162,7 +178,7 @@ describe('adapter boundary and neutral scene presentation', () => {
       skyFlash: 0.8,
     };
     const presentation = resolveSceneLighting(input);
-    expect(presentation).toEqual(input);
+    expect(presentation).toEqual({ ...input, gradeShare: 1, darkLoss: [0, 0, 0] });
     expect(presentation.terrain).not.toBe(input.terrain);
     expect(
       resolveSceneLighting({
@@ -179,5 +195,49 @@ describe('adapter boundary and neutral scene presentation', () => {
       overcast: 1,
       skyFlash: 0,
     });
+    expect(resolveSceneLighting({ ...input, gradeShare: 0.25, darkLoss: [0.01, 0, 2] })).toMatchObject({
+      gradeShare: 0.25,
+      darkLoss: [0.01, 0, 1],
+    });
+    expect(resolveSceneLighting({ ...input, gradeShare: NaN, darkLoss: [0.01, -1, 0] })).toMatchObject({
+      gradeShare: 1,
+      darkLoss: [0, 0, 0],
+    });
+    expect(resolveSceneLighting({ ...input, gradeShare: 3 }).gradeShare).toBe(1);
+  });
+
+  it('keeps the full grade and no surface loss in the authored light, including dark stock maps', () => {
+    for (const ambient of [1, 0.65, 0.3]) {
+      const presentation = ra2SceneLighting({ ...map, ambient }, { ...clear, ambient }, 4)!;
+      expect(presentation.gradeShare).toBe(1);
+      expect(presentation.darkLoss).toEqual([0, 0, 0]);
+    }
+    // A brighter scene than authored (a flash or a lit event) keeps the grade and adds no loss.
+    expect(ra2DisplayPolicy([1.4, 1.2, 1])).toEqual({ gradeShare: 1, darkLoss: [0, 0, 0] });
+    expect(ra2DisplayPolicy([NaN, 1, 1])).toEqual({ gradeShare: 1, darkLoss: [0, 0, 0] });
+  });
+
+  it('fades the grade and adds the 16-bit surface loss on a night [Lighting] edit of a day map', () => {
+    // Round 9e #3: XMP27T8's day cache under the edited night (ambient 0.55, level 0.003, tint 0.4/0.4/0.7), z = 4.
+    const day: MapLighting = { ambient: 1, ground: 0, level: 0, red: 1, green: 1, blue: 1 };
+    const night: Ra2SceneLighting = { ...clear, ambient: 0.55, level: 0.003, tint: [0.4, 0.4, 0.7] };
+    const presentation = ra2SceneLighting(day, night, 4)!;
+    const terrain = [0.562 * 0.4, 0.562 * 0.4, 0.562 * 0.7];
+    terrain.forEach((v, i) => expect(presentation.terrain[i]).toBeCloseTo(v, 12));
+    expect(presentation.gradeShare).toBeCloseTo(0.2126 * terrain[0]! + 0.7152 * terrain[1]! + 0.0722 * terrain[2]!, 12);
+    expect(presentation.gradeShare).toBeCloseTo(0.237, 3);
+    terrain.forEach((v, i) => expect(presentation.darkLoss[i]).toBeCloseTo(SURFACE_565_LOSS[i]! * (1 - v), 12));
+    // About 3.1 / 1.5 / 2.4 levels of 255.
+    expect(presentation.darkLoss.map((v) => Math.round(v * 2550) / 10)).toEqual([3.1, 1.5, 2.4]);
+  });
+
+  it('fades the grade under a storm palette by the storm terrain level, the blue channel losing almost nothing', () => {
+    const presentation = ra2SceneLighting(map, storm, 0)!;
+    const t = presentation.terrain;
+    expect(presentation.gradeShare).toBeCloseTo(0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2], 12);
+    expect(presentation.gradeShare).toBeGreaterThan(0.4);
+    expect(presentation.gradeShare).toBeLessThan(0.5);
+    expect(presentation.darkLoss[2]).toBeLessThan(presentation.darkLoss[1]);
+    expect(presentation.darkLoss[1]).toBeLessThan(presentation.darkLoss[0]);
   });
 });

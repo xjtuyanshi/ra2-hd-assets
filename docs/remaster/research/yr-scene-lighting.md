@@ -315,6 +315,22 @@ therefore gives terrain `0.562 x (0.4, 0.4, 0.7)` at median height 4 instead of 
 live and authored RGB keep the exact identity path. Only light level and tint follow the live values: the day/dusk/night
 staging, sun and shadows still come from the cached map.
 
+Two display effects follow such a run-time scale (`ra2DisplayPolicy`, `SceneLighting.gradeShare` / `darkLoss`). The
+engine draws into a 16-bit RGB565 surface: truncating to 5/6/5 bits and showing the result with bit replication loses
+about `a - v / 32` (red, blue) and `a - v / 64` (green) levels of 255 at value v, with a = 3.98 / 1.99. HD shows the
+palette colours themselves, so by day its dark tones sit a few levels above the original's (round 9e same-moment
+harbour pair, HD with the grade removed minus original in luma bins 24-36: +2.4..3.3 / +1.1..2.3 / +2.5..3.3, against
+2.9 / 1.5 / 2.9 predicted). The level-dependent part scales with the palette and is already in the art's calibration;
+the constant part does not, so under a terrain multiplier s the original loses `a x (1 - s)` more than HD, which the
+display now takes off the lit, visible battlefield (about 3.1 / 1.5 / 2.4 levels on the XMP27T8 night edit; zero in
+the authored light and above it). Objects receive the terrain value too (their own loss is smaller, about 1.3 levels
+less on that edit). Second, the look's cinematic grade (shadow split-tone, mid-tone lift, cool balance) was tuned on
+the authored picture; on a picture the engine has darkened to a fifth it moved everything into graded shadow. Its share
+is now the luminance of the terrain multiplier (1 in the authored light; 0.237 on the night edit, about 0.44 in an Ion
+Storm on a stock day map), as the night presentation already fades it. Offline estimate on the round 9e night A/B
+still (HD grade inverted, then re-applied with both changes): battlefield HD / original luma 1.31 -> 1.16, B/G +17 %
+-> +6 %; it needs a live A/B.
+
 The supplied HD cinematic replay at hour 16.5 measured storm/clear terrain ratios `(0.229, 0.450, 1.117)` and
 building ratios `(0.22, 0.36–0.39, 0.75–0.80)` despite correct scene multipliers. The storm presentation was selecting
 the ordinary grey-blue overcast key after adaptation, adding a second colour transform. It now transfers removed

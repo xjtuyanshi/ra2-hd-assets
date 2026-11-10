@@ -244,7 +244,7 @@ describe('vehicle finish wiring', () => {
   it('keeps the vehicle finish neutral in every debug view, and follows the night fade and airless maps', () => {
     const hd = headlessRenderer();
     const frame = hd as unknown as LookUpdater & {
-      nightDisplay: { value: number };
+      gradeShare: { value: number };
       updateGrade(airless: boolean): void;
     };
     const voxels = voxelLightingFor(hd.nodes);
@@ -267,18 +267,19 @@ describe('vehicle finish wiring', () => {
         expect(vehicleLookGains(hd.settings, true)).toMatchObject({ exposure: 1, gradeBalance: 1, topGain: 1 });
       }
       hd.settings.debugView = 'none';
-      // Night: the grade fades out of the display (nightDisplay), and the balance correction with it.
-      frame.nightDisplay.value = 0.6;
+      // Night, or a scene the game darkens: the grade fades out of the display (gradeShare = (1 - night weight) x the
+      // scene's share), and the balance correction with it.
+      frame.gradeShare.value = 0.4;
       frame.updateSpriteLook(1, 0);
       const night = voxels.whiteBalance.value.toArray();
       expect(night).toEqual(vehicleBalanceGain(hd.settings.gradeBalance, 0.4, CINEMATIC.gradeBalance).toArray());
       expect(Math.abs(Math.log(night[2]! / night[1]!))).toBeLessThan(Math.abs(Math.log(day[2]! / day[1]!)));
       expect([voxels.exposure.value, voxels.topGain.value]).toEqual([CINEMATIC.exposure, CINEMATIC.topGain]);
-      frame.nightDisplay.value = 1;
+      frame.gradeShare.value = 0;
       frame.updateSpriteLook(1, 0);
       expect(voxels.whiteBalance.value.toArray()).toEqual([1, 1, 1]);
       // Airless maps: the grade keeps a neutral balance, so there is nothing to divide out; exposure and top gain stay.
-      frame.nightDisplay.value = 0;
+      frame.gradeShare.value = 1;
       frame.updateGrade(true);
       frame.updateSpriteLook(1, 0);
       expect(finish()).toEqual([CINEMATIC.exposure, CINEMATIC.topGain, 1, 1, 1]);

@@ -84,6 +84,38 @@ export function computeSceneMultipliers(
   return { terrain, objects };
 }
 
+/**
+ * Mean loss (encoded display units) of the engine's 16-bit RGB565 surface: the drawn palette colour is truncated to
+ * 5/6/5 bits and shown with bit replication, which loses about a - v / 32 (red, blue) and a - v / 64 (green) levels
+ * of 255 at value v, with a = 3.98 / 1.99. HD shows the palette colours themselves, so by day its dark tones sit those
+ * few levels above the original's (round 9e same-moment harbour pair, ungraded HD minus original in luma bins 24-36:
+ * +2.4..3.3 / +1.1..2.3 / +2.5..3.3, against 2.9 / 1.5 / 2.9 predicted). The level-dependent part scales with the
+ * palette and is already in the HD art's calibration; the constant part does not, so a palette scaled by s at run time
+ * loses a x (1 - s) more in the original than in HD (night [Lighting] edits: about 3 / 1.5 / 2.4 levels at s = 0.22 /
+ * 0.22 / 0.39, a fifth of the original's dark ground).
+ */
+export const SURFACE_565_LOSS: readonly [number, number, number] = [3.98 / 255, 1.99 / 255, 3.98 / 255];
+
+/**
+ * Display policy for a palette the game scales at run time (terrain multipliers, sRGB domain, without lightning
+ * flashes): the 16-bit surface's extra dark loss (SURFACE_565_LOSS), and the share of the look's grade kept, the
+ * luminance of the terrain multiplier (1 in the authored light). The grade's shadow tint and mid-tone lift are tuned
+ * on the authored day picture; evaluated on a picture the engine has darkened to a fifth they turned all of it into
+ * graded shadow (round 9e night edit of XMP27T8: ground B/G +14..46 % and 1.2-1.3x the original's brightness).
+ */
+export function ra2DisplayPolicy(terrain: readonly [number, number, number]): {
+  gradeShare: number;
+  darkLoss: [number, number, number];
+} {
+  const valid = terrain.every((v) => Number.isFinite(v) && v >= 0);
+  if (!valid) return { gradeShare: 1, darkLoss: [0, 0, 0] };
+  const level = 0.2126 * terrain[0] + 0.7152 * terrain[1] + 0.0722 * terrain[2];
+  return {
+    gradeShare: Math.min(1, level),
+    darkLoss: terrain.map((v, i) => SURFACE_565_LOSS[i]! * Math.max(0, 1 - v)) as [number, number, number],
+  };
+}
+
 /** Translate native palette/event policy into renderer-only presentation inputs. */
 export function ra2SceneLighting(
   map: MapLighting | null | undefined,
@@ -96,6 +128,7 @@ export function ra2SceneLighting(
   const storm = live.event === 'storm';
   return {
     ...multipliers,
+    ...ra2DisplayPolicy(multipliers.terrain),
     sunShadow: storm ? 0 : 1,
     overcast: storm ? 1 : 0,
     skyFlash: storm && Number.isFinite(skyFlash) ? Math.min(0.12, Math.max(0, skyFlash)) : 0,
