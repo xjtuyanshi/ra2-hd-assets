@@ -2838,6 +2838,59 @@ describe('live original to HD transition', () => {
     expect(harness.status).toHaveBeenLastCalledWith(null);
   });
 
+  it('does not carry a starved capacity notice over a dialog into a lighter battle being prepared', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    const view = fakeView();
+    view.settledFrames = 0;
+    liveView.create.mockResolvedValue(view);
+    harness.vm.getDiagnostics.mockImplementation(async () => health(performance.timeOrigin + 1000));
+    harness.setFrameSize(1280, 720);
+    harness.nativeFrame(false);
+    await advance(100, 30);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    // The player loads a small save from the in-game menu; the core cleared the starved episode on the load.
+    harness.nativeFrame(false, true);
+    await advance(100, 3);
+    harness.vm.getDiagnostics.mockImplementation(async () => health(null));
+    harness.nativeFrame(false);
+    for (let i = 0; i < 15; i++) {
+      await advance(100);
+      expect(harness.status).not.toHaveBeenLastCalledWith(capacity);
+    }
+    expect(harness.status).toHaveBeenLastCalledWith('Preparing the HD battlefield…');
+    harness.stop();
+  });
+
+  it('confirms a capacity recovery again after a dialog before showing its notice', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    const starvedAt = performance.timeOrigin + performance.now();
+    harness.vm.getDiagnostics.mockImplementation(async () => health(starvedAt));
+    harness.setState(null);
+    await advance(17);
+    await advance(100, 25);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    // A dialog, then another (lighter) battle whose capture is healthy: no stale notice while it loads.
+    harness.nativeFrame(false, true);
+    await advance(100, 3);
+    harness.vm.getDiagnostics.mockImplementation(async () => health(null));
+    harness.nativeFrame(false);
+    for (let i = 0; i < 20; i++) {
+      await advance(100);
+      expect(harness.status).not.toHaveBeenLastCalledWith(capacity);
+    }
+    // The same oversized battle after closing the options: the notice is back within about a second.
+    harness.nativeFrame(false, true);
+    await advance(100, 3);
+    harness.vm.getDiagnostics.mockImplementation(async () => health(starvedAt));
+    harness.nativeFrame(false);
+    await advance(100, 15);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    harness.stop();
+  });
+
   it('does not let a health report that never answers block the later checks', async () => {
     const harness = setup('?hd=1', 'WebGL2', 'native');
     harness.setFrameSize(1280, 720);

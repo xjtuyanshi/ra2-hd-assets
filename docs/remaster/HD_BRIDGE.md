@@ -72,7 +72,9 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    completed render state (`native.renderHealth.incompleteSinceEpochMs`; a match that outgrew the agent's per-frame
    copy) also returns to the live original, with a notice that the match is too large for HD, until a complete state
    arrives; before the first HD frame the same condition replaces the preparation notice (probed once a second after
-   2 s of preparation). Health reports time out after 2 s, so one that never answers cannot block later checks. A complete
+   2 s of preparation). A native dialog (save, load, options) may lead to another, lighter battle, so it clears that
+   finding: the preparation probe starts over, and a capacity recovery shows its notice again only after a health
+   report still says starved (no stale notice while a small save loads). Health reports time out after 2 s, so one that never answers cannot block later checks. A complete
    unkeyed native frame retires queued keyed frames immediately. A new complete state must draw settled art before
    HD cross-fades back; late replies from before the recovery cannot reveal an old picture. Real dialogs switch to
    the original immediately and preserve the ordinary return without another fade. A confirmed native menu video mode resets reveal state immediately,

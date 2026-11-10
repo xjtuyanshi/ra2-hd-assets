@@ -745,6 +745,12 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   /** The capture of this battle is starved (see CAPTURE_STARVED_MS) while the view has not been revealed yet. */
   let captureStarved = false;
   let awaitingRevealSince: number | null = null;
+  /**
+   * A dialog (save, load, options) came up during a capacity recovery: the battle after it may be another, lighter
+   * one, so its capture is confirmed starved again before the notice returns (round 9e #10: loading a small save after
+   * an oversized one showed the stale notice for about a second).
+   */
+  let capacityUnconfirmed = false;
   const isRecoveryNotice = (text: string | null) => text === recoveryNotice || text === capacityNotice;
   const clearFallback = () => {
     fallback = null;
@@ -755,7 +761,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     native && enabled && nativeBattleSurface && !nativeDialogSurface && !revealed && !fallback && !pollFailed;
   const syncPreparationNotice = () => {
     if (recoveringState) {
-      if (enabled && nativeBattleSurface && !nativeDialogSurface && !fallback) publish(recoveryText);
+      const onBattle = enabled && nativeBattleSurface && !nativeDialogSurface && !fallback;
+      if (onBattle && recoveryText === capacityNotice && capacityUnconfirmed) {
+        if (isRecoveryNotice(published)) publish(null);
+        confirmCapacity();
+      } else if (onBattle) publish(recoveryText);
       else if (isRecoveryNotice(published)) publish(null);
       return;
     }
@@ -926,6 +936,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const recoverOriginal = (reason: string, notice = recoveryNotice) => {
     hidePending = null;
     recoveryText = notice;
+    capacityUnconfirmed = false;
     setHole(null, reason);
     requestPassthrough(0);
     changePresentation('original', reason);
@@ -1002,6 +1013,16 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         healthPending = false;
       });
   };
+  /** After a dialog, a capacity recovery shows its notice again only once the health report still says starved. */
+  const confirmCapacity = () => {
+    const now = performance.now();
+    if (healthPending || now - healthCheckedAt < CAPTURE_PROBE_MS) return;
+    readHealth(now, (health) => {
+      if (!captureStarvedNow(health) || !capacityUnconfirmed) return;
+      capacityUnconfirmed = false;
+      syncPreparationNotice();
+    });
+  };
   /** Before the first HD frame nothing is hidden, so the preparation notice asks after a starved capture itself. */
   const probeCaptureWhilePreparing = (now: number) => {
     if (!awaitingReveal() || recoveringState) {
@@ -1023,6 +1044,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (native) {
       nativeDialogSurface = picture.menuVisible === true;
       if (nativeDialogSurface) {
+        // A dialog may load another battle: a starved capture is established again after it, for that battle, instead
+        // of announcing the previous one's capacity notice over it (round 9e #10).
+        captureStarved = false;
+        awaitingRevealSince = null;
+        if (recoveringState && recoveryText === capacityNotice) capacityUnconfirmed = true;
         // Dialogs keep the battle's video mode. Their native background and
         // question text must be opaque immediately, without the missing-state
         // grace period or the keyed battlefield's trailing frame.
