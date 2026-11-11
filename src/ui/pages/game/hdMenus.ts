@@ -55,6 +55,11 @@ const outlinePaths = new WeakMap<YrMenuFont, Map<string, Path2D>>();
 const glyphFits = new WeakMap<YrMenuFont, { fitter: CoverageGlyphFitter; scale: number }>();
 /** Per-frame fitting budget; unfinished screens stay original and retry next frame. */
 const GLYPH_FIT_BUDGET_MS = 8;
+/**
+ * Longest time a verified menu picture may stand in for incomplete snapshots of an unchanged dialog. A query that
+ * keeps timing out is no longer evidence that the dialog is still the one drawn, so the original picture is shown.
+ */
+export const MENU_SNAPSHOT_RETAIN_MS = 500;
 
 function glyphTarget(glyph: YrMenuTextGlyph): CoverageGlyphTarget | null {
   if (glyph.inkArea === undefined || !glyph.ink.width || !glyph.ink.height) return null;
@@ -475,6 +480,7 @@ export async function startHdMenus(
     let inputRevision = 0;
     let transitionTree: string | null = null;
     let transitionCandidate: string | null = null;
+    let retainedSince: number | null = null;
     let localPointer: { x: number; y: number } | null = null;
     let down = false;
     let pressedControl: number | null = null;
@@ -840,15 +846,18 @@ export async function startHdMenus(
         if (!disposed && revision === inputRevision) {
           // A bounded native state query can time out while pointer input is
           // flowing through an unchanged dialog. Keep its verified picture,
-          // but never retain it over a changed tree, null or an activation.
-          const verifiedNext =
+          // but never retain it over a changed tree, null or an activation,
+          // nor for longer than MENU_SNAPSHOT_RETAIN_MS.
+          const now = performance.now();
+          const retain =
             transitionTree === null &&
-            snapshot?.complete &&
-            next &&
+            !!snapshot?.complete &&
+            !!next &&
             !next.complete &&
-            dialogTree(next) === dialogTree(snapshot)
-              ? snapshot
-              : next;
+            dialogTree(next) === dialogTree(snapshot) &&
+            (retainedSince === null || now - retainedSince <= MENU_SNAPSHOT_RETAIN_MS);
+          retainedSince = retain ? (retainedSince ?? now) : null;
+          const verifiedNext = retain ? snapshot : next;
           const tree = verifiedNext?.complete ? dialogTree(verifiedNext) : null;
           // The native ACK precedes a handler's posted/animated dialog swap.
           // A new tree is usable immediately; an unchanged no-op dialog needs

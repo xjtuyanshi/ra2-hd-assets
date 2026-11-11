@@ -17,7 +17,7 @@ import {
 } from '../../packages/hd-renderer/src/ui/uiAssets';
 import { startHdUi } from '../../src/ui/pages/game/hdUi';
 import * as uiAssetsModule from '../../packages/hd-renderer/src/ui/uiAssets';
-import { startHdMenus } from '../../src/ui/pages/game/hdMenus';
+import { MENU_SNAPSHOT_RETAIN_MS, startHdMenus } from '../../src/ui/pages/game/hdMenus';
 import { menuSliderParts, menuSliderPlateFactor, menuSliderPlatePixels } from '../../src/ui/pages/game/hdMenuSlider';
 import type { VmFrameRenderer } from '../../src/ui/pages/game/vmFrameRenderer';
 import { hdSidebar } from '../helpers/hdSidebar';
@@ -350,6 +350,8 @@ describe('HD menu atomic fallback', () => {
     expect(canvas.style.display).toBe('block');
     const incomplete = snapshot();
     incomplete.complete = false;
+    let now = 1000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
     getMenuSnapshot.mockResolvedValueOnce(incomplete);
     polls.shift()!();
     await settle();
@@ -357,6 +359,30 @@ describe('HD menu atomic fallback', () => {
     // A bounded state query may time out while the same menu still exists.
     // Retain the last verified picture; a changed root or a real null does
     // not authorize retention and must expose the current original picture.
+    expect(canvas.style.display).toBe('block');
+    now += MENU_SNAPSHOT_RETAIN_MS;
+    getMenuSnapshot.mockResolvedValueOnce(incomplete);
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    // Queries that keep failing are no evidence the drawn dialog still exists:
+    // past the retention bound the original picture is shown.
+    now += 100;
+    getMenuSnapshot.mockResolvedValueOnce(incomplete);
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('none');
+    polls.shift()!();
+    await settle();
+    paint();
+    expect(canvas.style.display).toBe('block');
+    getMenuSnapshot.mockResolvedValueOnce(incomplete);
+    polls.shift()!();
+    await settle();
+    paint();
+    // A fresh verified picture starts a new retention window.
     expect(canvas.style.display).toBe('block');
     getMenuSnapshot.mockResolvedValueOnce({ ...incomplete, dialogHwnd: 10 });
     polls.shift()!();
