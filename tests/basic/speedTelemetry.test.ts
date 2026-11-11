@@ -111,6 +111,7 @@ describe('one record per window of a running battle', () => {
       time: '2026-10-07T07:00:00.000Z',
       windowMs: 5000,
       logicFps: 41.8,
+      logicSource: 'game',
       targetFps: 62.5,
       uncapped: false,
       gameSpeed: 1,
@@ -264,6 +265,42 @@ describe('the telemetry loop', () => {
     await t.tick();
     expect(t.posted).toHaveLength(0);
     expect(t.observe).toHaveBeenLastCalledWith(null, unavailable);
+    t.handle.dispose();
+  });
+  it('measures the logic rate from the native frame hook while the game counters are unreadable', async () => {
+    // Slider 5 in the original picture / capacity fallback: the mirror is incomplete, so no game counters.
+    const lost = (at: number, hook: number) => diagnostics(at, 0, { game: null, native: { logicFrames: hook } });
+    const t = telemetry([
+      diagnostics(0, 1000, { native: { logicFrames: 4000 } }),
+      lost(5000, 4300),
+      lost(10_000, 4612),
+      lost(15_000, 4612),
+      diagnostics(20_000, 2000, { game: { ...diagnostics(0, 0).game!, status: 'inactive' } }),
+      lost(25_000, 9000),
+      lost(30_000, 9300),
+    ]);
+    await t.settle();
+    await t.tick();
+    // A window that starts on game counters and ends on the hook mixes two clocks: no record.
+    expect(t.posted).toHaveLength(0);
+    await t.tick();
+    expect(t.posted[0]!.records[0]).toMatchObject({
+      logicFps: 62.4,
+      logicSource: 'host',
+      targetFps: 62.5,
+      gameSpeed: 1,
+      logicFrame: 1000,
+    });
+    expect(t.publish).toHaveBeenLastCalledWith(62.4, 62.5);
+    // The hook did not move (pause, or no battle): nothing is claimed and the line is cleared.
+    await t.tick();
+    expect(t.posted).toHaveLength(1);
+    expect(t.publish).toHaveBeenLastCalledWith(null, undefined);
+    // After the game reported no battle, hook counts are not attributed to it until it reports one again.
+    await t.tick();
+    await t.tick();
+    await t.tick();
+    expect(t.posted).toHaveLength(1);
     t.handle.dispose();
   });
   it('retains local records and toolbar rates without probing a server sink when endpoint is null', async () => {

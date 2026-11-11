@@ -902,6 +902,12 @@ slow" has its own measurement. In development the play page (with or without the
   1.001 `src/games/yr/performance.ts` reads it off the frame limiter: 62.5 / GameSpeed in a campaign or skirmish,
   so 62.5 at the skirmish slider's 5 and 20.8 at its 3; `uncapped` at the fastest setting; unknown in a network
   session). The setting is read at every sample, so moving the in-game slider shows in the next record;
+- `logicSource`: `game` for the above; `host` when a native-host session has no current game counters (the native
+  mirror is incomplete, e.g. in the original picture or the HD capacity fallback). `logicFps` then comes from the
+  agent's frame-hook count (`logicFrames` in the native diagnostics; the hook runs only in the battle logic loop),
+  and `targetFps`, `gameSpeed` and `logicFrame` are the last values the game reported in that battle. A window that
+  mixes the two clocks, a window in which the hook did not advance, and hook counts after the game reported no
+  battle give no record;
 - `presentedFps` (game frames the page presented), `hdFps`, `hdShown`, the HD view's quality `tier` and `hdPace`,
   the frame rate the view was held to at the end of the window (see "Frame pacing");
 - `objects` / `localObjects` and `map` from the bridge's last snapshot, `resolution` of the game frame, `gameSpeed`,

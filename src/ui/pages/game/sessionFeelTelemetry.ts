@@ -259,6 +259,7 @@ export function startSessionFeelTelemetry(host: SessionFeelHost) {
               'readerOperations',
               'decode',
               'cadence',
+              'logicFrames',
               'hookCalls',
               'hookP50Us',
               'hookP99Us',

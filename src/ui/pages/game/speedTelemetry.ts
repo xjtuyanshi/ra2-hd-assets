@@ -11,7 +11,9 @@ import type { VmDiagnostics, VmUsage } from '../../../adapter/vmDiagnostics';
  * HD view's quality tier, how many objects the match has, the game resolution and map, and where the emulator's
  * thread spent the window) and hands it to two sinks: the development server appends it to the file its operator
  * named (`POST /__perf/speed`, the stall recorder's route handler and file, see src/server/perfStallLog.ts), and the
- * host gets the two rates for one toolbar line. Outside a running battle nothing is recorded.
+ * host gets the two rates for one toolbar line. Outside a running battle nothing is recorded. While the native
+ * mirror is incomplete (the original picture, the HD capacity fallback) the rate comes from the native host's frame-hook
+ * count instead (`logicSource: 'host'`), so the owner's speed rule can be checked without the HD view.
  */
 
 /** What the HD bridge knows about the match right now; null without a bridge or outside a battle. */
@@ -100,6 +102,12 @@ export interface SpeedSample {
   usage: VmUsage | null;
   presented: number;
   hdFrames: number | null;
+  /**
+   * The native host's own count of the game's logic frames (the agent's frame hook, which runs only in a battle's
+   * logic loop), taken only while no current game counters exist: the original picture or the capacity fallback can
+   * leave the native mirror incomplete, and the logic rate must still be measurable there. Null otherwise.
+   */
+  hostLogicFrames: number | null;
 }
 
 export function speedSample(
@@ -111,6 +119,7 @@ export function speedSample(
   const game = diagnostics.game;
   // Frame 0 is the scenario still loading: a battle runs once the counter has moved.
   const running = diagnostics.phase === 'running' && !!game && game.status !== 'inactive' && game.frame > 0;
+  const hook = diagnostics.native?.logicFrames;
   return {
     vmAtMs: diagnostics.sampledAtMs,
     pageAtMs,
@@ -121,6 +130,8 @@ export function speedSample(
     usage: diagnostics.usage ?? null,
     presented,
     hdFrames: scene ? scene.hdFrames : null,
+    hostLogicFrames:
+      diagnostics.phase === 'running' && !game && typeof hook === 'number' && Number.isFinite(hook) ? hook : null,
   };
 }
 
@@ -149,6 +160,12 @@ export interface SpeedRecord {
   windowMs: number;
   /** Logic frames a second the game reached in the window. */
   logicFps: number;
+  /**
+   * Where logicFps comes from: 'game' is the game's own frame counter; 'host' is the native host's frame-hook count,
+   * used while the game counters are unreadable (targetFps and gameSpeed are then the last ones the game reported,
+   * and logicFrame that report's frame).
+   */
+  logicSource: 'game' | 'host';
   /** What the speed setting allows; null with `uncapped` true when the limiter is off, null alone when unknown. */
   targetFps: number | null;
   uncapped: boolean;
@@ -184,12 +201,25 @@ export function speedRecord(
     visible: boolean;
     frameSize: { width: number; height: number } | null;
     scene: SpeedScene | null;
+    /** The last game-reported sample of this battle, for a host-counted window (see SpeedSample.hostLogicFrames). */
+    lastGame?: SpeedSample | null;
   },
 ): SpeedRecord | null {
   const vmMs = current.vmAtMs - previous.vmAtMs;
   const pageMs = current.pageAtMs - previous.pageAtMs;
-  if (previous.frame === null || current.frame === null || current.frame < previous.frame) return null;
   if (!(vmMs > 0) || !(pageMs > 0)) return null;
+  const gameCounted = previous.frame !== null && current.frame !== null && current.frame >= previous.frame;
+  // The hook counts only battle logic; a window it did not advance is a pause or no battle, which it cannot tell apart.
+  const lastGame = context.lastGame?.frame != null ? context.lastGame : null;
+  const hostCounted =
+    !gameCounted &&
+    lastGame !== null &&
+    current.frame === null &&
+    previous.hostLogicFrames !== null &&
+    current.hostLogicFrames !== null &&
+    current.hostLogicFrames > previous.hostLogicFrames;
+  if (!gameCounted && !hostCounted) return null;
+  const rated = hostCounted ? lastGame! : current;
   const perSecond = (delta: number, ms: number) => round1((delta * 1000) / ms);
   const { scene, frameSize } = context;
   let vm: SpeedVmShares | null = null;
@@ -218,11 +248,14 @@ export function speedRecord(
     kind: 'speed',
     time: new Date(context.wallClock).toISOString(),
     windowMs: Math.round(vmMs),
-    logicFps: perSecond(current.frame - previous.frame, vmMs),
-    targetFps: typeof current.targetFps === 'number' ? round1(current.targetFps) : null,
-    uncapped: current.targetFps === null,
-    gameSpeed: current.gameSpeed,
-    logicFrame: current.frame,
+    logicFps: hostCounted
+      ? perSecond(current.hostLogicFrames! - previous.hostLogicFrames!, vmMs)
+      : perSecond(current.frame! - previous.frame!, vmMs),
+    logicSource: hostCounted ? 'host' : 'game',
+    targetFps: typeof rated.targetFps === 'number' ? round1(rated.targetFps) : null,
+    uncapped: rated.targetFps === null,
+    gameSpeed: rated.gameSpeed,
+    logicFrame: rated.frame!,
     presentedFps: perSecond(current.presented - previous.presented, pageMs),
     hdFps:
       current.hdFrames !== null && previous.hdFrames !== null && current.hdFrames >= previous.hdFrames
@@ -255,6 +288,8 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
   const endpoint = host.endpoint === undefined ? '/__perf/speed' : host.endpoint;
   const history: SpeedRecord[] = [];
   let previous: SpeedSample | null = null;
+  /** The last sample with game counters in the current battle; cleared when the battle ends or the VM is lost. */
+  let lastGame: SpeedSample | null = null;
   let asking = false;
   let disposed = false;
   let sinkGone = false;
@@ -280,9 +315,12 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
               visible: environment.visible(),
               frameSize: host.frameSize(),
               scene,
+              lastGame,
             })
           : null;
         previous = current;
+        if (current.frame !== null) lastGame = current;
+        else if (diagnostics.game) lastGame = null;
         // Incomplete native mirrors have no logic-rate record, but their failure counters still need a log.
         host.observe?.(record, diagnostics);
         if (!record) {
@@ -292,7 +330,7 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
         history.push(record);
         if (history.length > SPEED_HISTORY) history.shift();
         shown = true;
-        host.publish?.(record.logicFps, current.targetFps);
+        host.publish?.(record.logicFps, record.logicSource === 'host' ? lastGame?.targetFps : current.targetFps);
         if (sinkGone || endpoint === null) return;
         void environment.post(endpoint, JSON.stringify([record])).then(
           (result) => {
@@ -304,6 +342,7 @@ export function startSpeedTelemetry(host: SpeedTelemetryHost): SpeedTelemetry {
       .catch(() => {
         // The VM is gone or does not answer: the next window starts from a fresh sample.
         previous = null;
+        lastGame = null;
         if (!disposed) clear();
       })
       .finally(() => {
