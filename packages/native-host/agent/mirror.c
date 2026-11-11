@@ -10,6 +10,7 @@
 #include "mirror-profile.h"
 #include "mirror-budget.h"
 #include "mirror-backoff.h"
+#include "mirror-cadence.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
@@ -67,6 +68,8 @@ static uint64_t capture_attempts, captures_produced, mirrors_published, incomple
 static uint64_t in_flight_skips, publish_rejections, empty_subscription_skips, mirror_acks;
 static uint64_t mailbox_skips, ack_notifications, backoff_skips;
 static struct nh_capture_backoff capture_backoff;
+static struct nh_capture_cadence capture_cadence;
+static uint64_t cadence_skips;
 #define NH_TIMING_SAMPLES 32768u
 static uint32_t ack_times[NH_TIMING_SAMPLES], ack_time_count, ack_time_cursor;
 /* Keep the first actual fault for each incomplete publication. Stage and rule
@@ -561,6 +564,8 @@ void nh_logic_tick(void) {
     }
     /* A recent deadline miss defers the next full capture (mirror-backoff.h). */
     if (nh_capture_backoff_skip(&capture_backoff)) { ++backoff_skips; InterlockedIncrement(&dropped_updates); goto done; }
+    if (!nh_capture_cadence_due(&capture_cadence, start.QuadPart, frequency.QuadPart,
+            frame, applied_revision, reset_pending)) { ++cadence_skips; goto done; }
     memset(&current_fault, 0, sizeof(current_fault));
     attempted = 1;
     ++capture_attempts;
@@ -672,6 +677,7 @@ void nh_logic_tick(void) {
           shadow_bytes = capture_bytes; capture_bytes = bytes;
           shadow_pages = capture_pages; capture_pages = pages; }
         shadow_count = capture_count; generation = next_generation;
+        nh_capture_cadence_published(&capture_cadence, start.QuadPart, frame, applied_revision);
         reset_pending = 0; mirror_bytes += length; published = 1;
     } else { ++publish_rejections; InterlockedIncrement(&dropped_updates); }
 done:
@@ -943,6 +949,7 @@ void nh_mirror_disconnect(void) {
     memset(&subscription, 0, sizeof(subscription)); nh_page_seed_init(&fixed_seed);
     ++subscription_revision; shadow_count = 0; flights.count = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
     nh_capture_backoff_clear(&capture_backoff);
+    nh_capture_cadence_clear(&capture_cadence);
     LeaveCriticalSection(&state_lock);
 }
 static int compare_times(const void *a, const void *b) {
@@ -1028,6 +1035,8 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
         (unsigned long)flights.count, (unsigned long)(subscription.mirror_window ? subscription.mirror_window : 1),
         (unsigned long long)mailbox_skips, (unsigned long long)ack_notifications, (unsigned long long)backoff_skips);
     used = (uint32_t)strlen(out);
-    if (used < capacity) snprintf(out + used, capacity - used, ",\"captureProfile\":%s", profile);
+    if (used < capacity) snprintf(out + used, capacity - used,
+        ",\"captureCadenceSkips\":%llu,\"captureIntervalUs\":%u,\"captureProfile\":%s",
+        (unsigned long long)cadence_skips, NH_CAPTURE_INTERVAL_US, profile);
     LeaveCriticalSection(&state_lock);
 }

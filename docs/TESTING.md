@@ -86,6 +86,17 @@ Fixed-address/instruction evidence lives in game modules and their tests. Never 
 
 `pnpm run test:browser:audio` runs asset-free Chromium audio lifecycle acceptance against the configured development origin. It observes real Worklet messages through repeated playback/release cycles across separate AudioContexts, verifies bounded active-processor counts, and checks context closure. Basic CI includes it. This finite lifecycle test does not measure browser heap reclamation or establish full-match audio reliability.
 
+## Native mirror capture regressions
+
+`pnpm run check` includes `tests/basic/native/mirrorPacer.test.ts` and `tests/basic/native/core.test.ts`: ordered credit release, two-entry and legacy windows, hold timeout cancellation, teardown and continued draining of old revisions during subscription waits. Run the portable agent helpers separately with a host C compiler:
+
+```bash
+node --test scripts/remaster/native/mirror-*.test.mjs
+bash packages/native-host/build.sh
+```
+
+The C tests cover deadline backoff, complete-image cadence, membership/removals, ACK generations, page equality, read caching and exact protected reads. The native build needs the configured MinGW tools and vendored sources. Cadence tests model a fast consumer at 16 ms boundaries and verify immediate reset/revision/rewind eligibility, clock rounding and reconnect cleanup. They do not establish live logic FPS, HD smoothness or original-executable behavior. Measure same-scene HD/original windows at slider 5 after minute 10 separately.
+
 ## Save and cold-load regression
 
 `pnpm run check` runs the asset-free OLE callback, storage metadata, asynchronous file-open, time conversion, and window-order regressions: `tests/basic/vm/olePersistence.e2e.test.ts`, `tests/basic/shimOleStorage.test.ts`, `tests/basic/vmCore.test.ts`, `tests/basic/shimFile.test.ts`, `tests/basic/shimWindowZOrder.test.ts`, and `tests/basic/shimScrollbarOcclusion.test.ts`. These do not replace the real RA2/YR save/load regressions:
