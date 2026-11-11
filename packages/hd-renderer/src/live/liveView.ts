@@ -44,6 +44,7 @@ import type { MapObject, SpriteFrame, VoxelModel } from '../../../ra2-assets/src
 import type { TheaterId } from '../../../ra2-assets/src/theater';
 import { addHousePalettes, HD_SUPERSAMPLE_ABOVE_SCALE, paletteFor, type HdAtlas, type Ra2Cache } from '../ra2/cache';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from '../ra2/sprites';
+import { buildingUsesHouseConverter } from '../ra2/unlitPalette';
 import {
   assignPainterBias,
   objectYSort,
@@ -3104,6 +3105,7 @@ export class LiveView {
           this.cache.depthTemplate,
         );
         card.indexedHousePaint = !make.remap && make.palette !== 'iso';
+        card.houseConverter = buildingUsesHouseConverter(make.palette);
         this.queue(batch, card);
       }
       return false;
@@ -3124,6 +3126,7 @@ export class LiveView {
       );
       if (this.cache.depthTemplate) card.nativeDepth = { mode: 'ground', bonus: 2 };
       card.indexedHousePaint = !bib.remap && bib.palette !== 'iso';
+      card.houseConverter = buildingUsesHouseConverter(bib.palette);
       this.queue(batch, card);
     }
     const layers = type.building?.layers ?? EMPTY_LAYERS;
@@ -3184,6 +3187,7 @@ export class LiveView {
       );
       card.nativeDepth = nativeDepth;
       card.indexedHousePaint = !bodyArt.remap && bodyArt.palette !== 'iso';
+      card.houseConverter = buildingUsesHouseConverter(bodyArt.palette);
       // HD atlases intentionally clear shadow rectangles. An inclusive-cap source shadow used as a body
       // must sample its original indexed pixels instead of that empty HD rectangle.
       this.queue(batch, card, shownBody >= bodyArt.frames.length);
@@ -3201,6 +3205,7 @@ export class LiveView {
         );
         if (this.cache.depthTemplate) interior.nativeDepth = { mode: 'ground', bonus: 1 };
         interior.indexedHousePaint = !door!.remap && door!.palette !== 'iso';
+        interior.houseConverter = buildingUsesHouseConverter(door!.palette);
         this.queue(batch, interior);
       }
     }
@@ -3327,6 +3332,9 @@ export class LiveView {
       } else card.nativeDepth = attachedLayerDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
     }
     card.indexedHousePaint = !art.remap && art.palette !== 'iso';
+    // The building hands its anims its own converter (ShouldUseCellDrawer, default yes; stock artmd clears it only for
+    // FSIDLE, which the library does not record). Layer art on the iso palette keeps all indices lit here.
+    card.houseConverter = buildingUsesHouseConverter(art.palette);
     this.queue(batch, card);
   }
 
@@ -3531,6 +3539,8 @@ export class LiveView {
     const light = objectLight('infantry');
     const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
     card.opacity = object.translucent;
+    // Infantry, SHP vehicles and aircraft draw through DrawObject with the house converter (vtable 0x50C = 0x41C090).
+    card.houseConverter = true;
     if (this.groundCard(object))
       card.nativeDepth = { mode: 'card', bottom: spriteFrame.offset[1] + spriteFrame.rect[3] - 1, bonus: 12 };
     this.queue(batch, card);
@@ -3582,6 +3592,7 @@ export class LiveView {
     if (spriteFrame.rect[2] > 0) {
       const card = this.spritePool.take(anchor, spriteFrame, palette, cardPush(spriteFrame), false, undefined, light);
       card.opacity = object.translucent;
+      card.houseConverter = true;
       if (this.groundCard(object))
         card.nativeDepth = {
           mode: 'card',
@@ -3626,6 +3637,7 @@ export class LiveView {
           !nativeDepth,
         );
         if (nativeDepth) card.nativeDepth = { mode: 'ground', bonus: 2 };
+        card.houseConverter = buildingUsesHouseConverter(bib.palette);
         list.push(card);
       }
     }
@@ -3633,6 +3645,7 @@ export class LiveView {
     if (shadow) list.push(this.spritePool.take(anchor, shadow, palette, 0, true, true));
     const body = this.spritePool.take(anchor, frame, palette, push, false);
     body.nativeDepth = nativeDepth;
+    body.houseConverter = buildingUsesHouseConverter(entry.palette);
     list.push(body);
     for (const layer of entry.layers ?? EMPTY_IDS) {
       const art = manifest.sprites[layer];
@@ -3649,6 +3662,7 @@ export class LiveView {
           0.1,
         );
         card.nativeDepth = nativeDepth && attachedLayerDepth(nativeDepth, [0, 0], 0);
+        card.houseConverter = buildingUsesHouseConverter(art.palette);
         list.push(card);
       }
     }

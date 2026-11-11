@@ -348,6 +348,18 @@ scene bloom (their material sparkle remains); matching the former noon bloom hal
 The night toe is suppressed where self-lit colour survives; fractional filtered edges and GPU composition
 remain **UNVERIFIED** until replay captures are measured.
 
+House-converter light colours (`src/ra2/unlitPalette.ts`, evidence in `docs/remaster/research/yr-unlit-palette.md`):
+the engine's house colour-scheme converters leave palette indices 240-254 unlit, so building lights, Tesla arcs and
+the weather controller's ring show at their palette colour from object light 0.236 up, under any map tint, night or
+Ion Storm. Sprites the engine draws through that converter carry `SpriteInstance.houseConverter` (unit-palette
+building bodies, bibs, make art, doors and attached layers; infantry, SHP vehicles and aircraft; not iso/
+TerrainPalette art, terrain, overlays or anim-palette effects). Their 240-254 pixels skip the map grade, scene and
+event light, the night desaturation and display transform, local light headroom, window glow and the enhanced look's
+relight, occlusion and highlights, and go to the same self-lit attachment as ore at the engine's untinted multiplier;
+the object picture tint still applies. On HD pages the weight is the bilinear share of 240-254 texels among the
+opaque 3x3 index taps, sharpened with smoothstep(0.35, 0.65): full over each such texel, nothing beyond it, a band
+of about 0.3 original texel. Same-frame night/storm captures against the original are **UNVERIFIED**.
+
 The engine's own field-wide ore/gem glints (`src/ra2/cellGlints.ts`, drawn by `src/live/glintLayer.ts`) replace the
 pass HD mode skips on the native surface (TacticalClass 0x6D7840, see
 `docs/remaster/research/yr-ore-glints.md`): every ore or gem cell carries one single-pixel glint at a random spot

@@ -38,6 +38,7 @@ import {
   positionGeometry,
   positionWorld,
   pow,
+  property,
   luminance,
   round,
   screenCoordinate,
@@ -67,6 +68,12 @@ import {
 import type { ShaderNode } from '../tsl';
 import { sceneLitColour } from '../lighting';
 import { bindUnlitSpriteMaterial } from './unlitSprites';
+import {
+  houseConverterUnlitIndexNode,
+  houseConverterUnlitLevelNode,
+  unlitShareNode,
+  unlitTapWeightNode,
+} from './unlitPalette';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { hdSupersampled, paletteRowOf, type HdAtlas, type Ra2Cache } from './cache';
 import { mapLightAt, srgbScale } from './mapLighting';
@@ -100,6 +107,12 @@ export interface SpriteInstance {
   palette: string;
   /** Recover house paint from the indexed source when an HD page has no encoded paint for this art. */
   indexedHousePaint?: boolean;
+  /**
+   * The engine draws this art through its house's colour-scheme converter (ra2/unlitPalette.ts): building bodies on
+   * the unit palette (not TerrainPalette=yes) with their bibs and anims, infantry, SHP vehicles and aircraft. Its
+   * original light indices (240-254) then show at their palette colour, untouched by map, scene and look light.
+   */
+  houseConverter?: boolean;
   /** World units to pull the card towards the camera so terrain around the base never cuts it (see cardPush). */
   push: number;
   shadow: boolean;
@@ -463,9 +476,11 @@ class SpriteGraph {
       'flat',
       'either',
     );
-    // Two independent bits share this existing component; no extra instance attribute or vertex buffer is needed.
-    const indexedHousePaint: ShaderNode = step(1.5, aLighting.z).toVar('spriteIndexedHousePaint');
-    const aGradeExempt: ShaderNode = aLighting.z.sub(indexedHousePaint.mul(2)).toVar('spriteGradeExempt');
+    // Three independent bits share this existing component; no extra instance attribute or vertex buffer is needed.
+    const houseConverter: ShaderNode = step(3.5, aLighting.z).toVar('spriteHouseConverter');
+    const lightingBits: ShaderNode = aLighting.z.sub(houseConverter.mul(4)).toVar('spriteLightingBits');
+    const indexedHousePaint: ShaderNode = step(1.5, lightingBits).toVar('spriteIndexedHousePaint');
+    const aGradeExempt: ShaderNode = lightingBits.sub(indexedHousePaint.mul(2)).toVar('spriteGradeExempt');
     const aFlags: ShaderNode = attribute('spriteFlags', 'vec4');
     const aOcclusion: ShaderNode = attribute('spriteOcclusion', 'vec4');
     const aNative: ShaderNode = attribute('spriteNative', 'vec4');
@@ -502,6 +517,12 @@ class SpriteGraph {
     // construction yard at 1.46 of the native luminance on MoonPatr and Transylv, object level 0.57-0.60, against
     // 1.17-1.29 on maps at 0.98-1). 1 at an object level of 1 or more.
     const gradeLight: ShaderNode = objectLit(vec3(1)).toVar('spriteGradeLight');
+    // Share of this pixel that is a house converter's unlit palette colour (ra2/unlitPalette.ts), set by the colour
+    // graph and read by the unlit MRT split; whole self-lit instances (isUnlit) count as 1.
+    const unlitShareOut: ShaderNode = property('float', 'spriteUnlitShare');
+    const unlitWeight: ShaderNode = max(isUnlit, unlitShareOut);
+    // Light of the unlit indices: the engine's untinted multiplier at the object level (1 from 0.236 up).
+    const unlitLevel: ShaderNode = houseConverterUnlitLevelNode(grade.x).toVar('spriteUnlitLevel');
     const ppu = float(PIXELS_PER_CELL_EDGE);
 
     const material = new MeshBasicNodeMaterial();
@@ -681,6 +702,9 @@ class SpriteGraph {
         const fillWeight: ShaderNode = float(0).toVar();
         const houseIndex: ShaderNode | null = features.hd ? float(0).toVar() : null;
         const houseWeight: ShaderNode | null = features.hd ? float(0).toVar() : null;
+        // Bilinear tents of the opaque taps and of those with an unlit index (unlitPalette.ts unlitShare).
+        const unlitTaps: ShaderNode | null = features.hd ? float(0).toVar() : null;
+        const opaqueTaps: ShaderNode | null = features.hd ? float(0).toVar() : null;
         for (const oy of [-1, 0, 1]) {
           for (const ox of [-1, 0, 1]) {
             const k: ShaderNode = k0.add(vec2(ox, oy));
@@ -693,6 +717,11 @@ class SpriteGraph {
               const paintWeight: ShaderNode = w.mul(step(15.5, i)).mul(step(i, 31.5));
               houseIndex.addAssign(i.mul(paintWeight));
               houseWeight.addAssign(paintWeight);
+            }
+            if (unlitTaps && opaqueTaps) {
+              const tent: ShaderNode = unlitTapWeightNode(ox, oy, t0).mul(occupied);
+              opaqueTaps.addAssign(tent);
+              unlitTaps.addAssign(tent.mul(houseConverterUnlitIndexNode(i)));
             }
             if (ox === 0 && oy === 0) {
               index.assign(i.mul(occupied));
@@ -766,9 +795,18 @@ class SpriteGraph {
         let lit: ShaderNode;
         let litAlpha: ShaderNode;
         let litGlow: ShaderNode;
+        // House-converter art (upright cards and decals only): its unlit palette colours at their palette value, in
+        // the self-lit attachment's clear-noon scale. `unlitShare` is the share of the pixel that is one.
+        const houseArt: ShaderNode = houseConverter.mul(float(1).sub(step(1.5, aFlat)));
+        let unlitShare: ShaderNode;
+        let unlitColour: ShaderNode;
+        const unlitOf = (c: ShaderNode): ShaderNode => srgbScale(c, unlitLevel).mul(look.unlitBaseLight);
         if (!features.hd) {
           const shown: ShaderNode = mix(fill, index, step(0.5, index));
           const paint: ShaderNode = step(15.5, shown).mul(step(shown, 31.5));
+          // The native page shows each original texel's own colour, so the share is that texel's.
+          unlitShare = houseArt.mul(houseConverterUnlitIndexNode(shown)).toVar('spriteUnlitShareHere');
+          unlitColour = unlitOf(paletteColour(shown)).toVar('spriteUnlitColour');
           lit = shade(paletteColour(shown), paint).toVar();
           litGlow = glow.mul(edge).toVar();
           litAlpha = edge.toVar();
@@ -840,7 +878,10 @@ class SpriteGraph {
           const limit: ShaderNode = luminance(nearest)
             .div(max(luminance(colour), 1e-4))
             .min(1);
-          lit = shade(mix(colour.mul(limit), colour, solid), paint).toVar();
+          const fringed: ShaderNode = mix(colour.mul(limit), colour, solid).toVar('spriteFringedColour');
+          unlitShare = houseArt.mul(unlitShareNode(unlitTaps!, opaqueTaps!)).toVar('spriteUnlitShareHere');
+          unlitColour = unlitOf(fringed).toVar('spriteUnlitColour');
+          lit = shade(fringed, paint).toVar();
           litGlow = vec3(glow).toVar();
           litAlpha = hdArt.a.mul(edge).toVar();
           art = vec4(lit.add(litGlow), litAlpha);
@@ -1006,6 +1047,11 @@ class SpriteGraph {
             result.assign(vec4(lit.mul(0.9), alpha));
           });
         });
+        // Unlit palette colours of house-converter art skip what the engine skips for them: map and scene light, the
+        // night grade, window glow and the enhanced look's relight, occlusion and highlights (shadows, contact shades
+        // and reflections are other instance kinds and keep share 0). The picture tint below still applies.
+        result.rgb.assign(mix(result.rgb, unlitColour, unlitShare));
+        unlitShareOut.assign(unlitShare);
         // Black shadow/contact RGB naturally darkens the already transformed receiver. Only cast-shadow coverage
         // fades under overcast (decorative rain/snow sun share, scene-event overcast); foundation contact shades and
         // infantry contact blobs keep their grounding role in every weather. Clear weather leaves this untouched.
@@ -1038,7 +1084,7 @@ class SpriteGraph {
       })();
     } else material.colorNode = mainColour;
 
-    bindUnlitSpriteMaterial(material, isUnlit, nodes);
+    bindUnlitSpriteMaterial(material, unlitWeight, nodes);
 
     const readOnlyMaterial = new MeshBasicNodeMaterial();
     readOnlyMaterial.name = 'ra2-sprites-read-only';
@@ -1049,6 +1095,7 @@ class SpriteGraph {
     readOnlyMaterial.colorNode = colourNode();
     readOnlyMaterial.depthNode = cardDepth();
     readOnlyMaterial.depthWrite = false;
+    bindUnlitSpriteMaterial(readOnlyMaterial, unlitWeight, nodes);
 
     const unitMaterial = new MeshBasicNodeMaterial();
     unitMaterial.name = 'ra2-sprites-ground-units';
@@ -1058,6 +1105,7 @@ class SpriteGraph {
     unitMaterial.positionNode = placement('unit');
     unitMaterial.colorNode = material.colorNode;
     unitMaterial.depthNode = cardDepth();
+    bindUnlitSpriteMaterial(unitMaterial, unlitWeight, nodes);
 
     const translucentMaterial = new MeshBasicNodeMaterial();
     translucentMaterial.name = 'ra2-sprites-translucent';
@@ -1068,6 +1116,7 @@ class SpriteGraph {
     translucentMaterial.colorNode = colourNode();
     translucentMaterial.depthNode = cardDepth();
     translucentMaterial.depthWrite = false;
+    bindUnlitSpriteMaterial(translucentMaterial, unlitWeight, nodes);
 
     // Enhanced-look ground passes. In one draw call every ground decal wrote depth on the same plane (0.02 above the
     // ground), so coplanar decals z-fought: SHP shadows over contact shades, bibs and each other passed or failed by
@@ -1118,7 +1167,7 @@ class SpriteGraph {
       m.alphaTest = material.alphaTest;
       m.positionNode = placement(pass);
       m.colorNode = colourNode();
-      bindUnlitSpriteMaterial(m, isUnlit, nodes);
+      bindUnlitSpriteMaterial(m, unlitWeight, nodes);
       if (pass === 'under') {
         m.depthNode = cardDepth();
         m.depthWrite = false;
@@ -1425,7 +1474,11 @@ export class SpriteLayer {
         this.anchor.setXYZ(i, s.anchor.x, s.anchor.y, s.anchor.z);
         this.anchor.setComponent(i, 3, s.lightSample?.[0] ?? s.anchor.x);
         this.anchor.setComponent(i, 4, s.lightSample?.[1] ?? s.anchor.z);
-        this.anchor.setComponent(i, 5, (s.gradeExempt ? 1 : 0) + (s.indexedHousePaint ? 2 : 0));
+        this.anchor.setComponent(
+          i,
+          5,
+          (s.gradeExempt ? 1 : 0) + (s.indexedHousePaint ? 2 : 0) + (s.houseConverter ? 4 : 0),
+        );
         const tinted = !s.shadow && !s.kind;
         this.anchor.setComponent(i, 6, tinted ? (s.tintLight ?? 1) : 1);
         this.anchor.setComponent(i, 7, tinted ? (s.tintColour ?? 0) : 0);

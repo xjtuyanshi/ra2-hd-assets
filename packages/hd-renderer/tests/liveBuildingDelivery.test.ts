@@ -176,6 +176,15 @@ describe('live delivery building image', () => {
         expect(cards.length).toBeGreaterThan(0);
         expect(cards.every((card) => card.palette === expected)).toBe(true);
         expect(cards.every((card) => card.indexedHousePaint === (palette !== 'iso'))).toBe(true);
+        // The engine draws unit-palette building art through the house converter (unlit 240-254), iso art through
+        // the cell's terrain converter; shadows are never house art.
+        expect(cards.every((card) => card.houseConverter === (palette !== 'iso'))).toBe(true);
+        expect(
+          h
+            .draw()
+            .cards.filter((card) => card.shadow)
+            .every((card) => !card.houseConverter),
+        ).toBe(true);
       }
     },
   );

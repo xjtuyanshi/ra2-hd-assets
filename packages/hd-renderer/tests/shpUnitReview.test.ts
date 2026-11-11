@@ -75,6 +75,9 @@ describe('SHP vehicle sheet/review frame contract', () => {
       );
       expect(cards).toHaveLength(2);
       expect(cards[0]!.shadow).toBe(true);
+      // Remapable=no SHP vehicles still draw through the house converter (unlit 240-254).
+      expect(cards[1]!.houseConverter).toBe(true);
+      expect(cards[0]!.houseConverter).toBeUndefined();
       expect(cards[0]!.frame.rect[0]).toBe(cards[1]!.frame.rect[0]);
       return cards[1]!.frame.rect[0];
     };
