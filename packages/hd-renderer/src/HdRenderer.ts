@@ -89,8 +89,8 @@ import {
   ART_REFERENCE_HOUR,
   ART_SKY_SHARE,
   relightFactorUpper,
+  setShadowTransforms,
   shadowStretch,
-  shadowTransform,
   spriteLookFor,
   updateUnlitSpriteLook,
 } from './ra2/spriteLook';
@@ -2107,7 +2107,7 @@ export class HdRenderer {
     const stretch = shadowStretch(state.keyElevation, follow > 0 ? look.shadowLength.value : 1);
     look.shadowFollow.value = follow;
     look.shadowSoftness.value = s.shadowSoftness * day * Math.max(1, stretch);
-    shadowTransform(dir, stretch, follow, look.shadowMatrix.value);
+    setShadowTransforms(look, dir, stretch, follow);
     // Voxel units' engine-style shadows (voxelShadow.ts) turn and stretch by the same amount, about their own
     // direction, so vehicles agree with the buildings around them.
     if (follow > 0) {

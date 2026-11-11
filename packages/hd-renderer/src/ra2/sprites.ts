@@ -112,6 +112,11 @@ export interface SpriteInstance {
    * look never draws it lighter than its other shadows (infantryFootprintOpacity).
    */
   infantryBare?: boolean;
+  /**
+   * A terrain object's (tree's) SHP shadow: the enhanced look turns it with the sun like other shadows without a
+   * foundation, but stretches it at most TERRAIN_SHADOW_MAX_STRETCH (spriteLook.ts terrainShadowMatrix).
+   */
+  terrainShadow?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
   /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
@@ -478,6 +483,10 @@ class SpriteGraph {
     const isInfantryShadow: ShaderNode = step(1.5, aFlat)
       .mul(float(1).sub(step(2.5, aFlat)))
       .mul(step(0.5, aFlags.w));
+    // flags.w of a shadow: 1 or 2 an infantry footprint, -1 a terrain object's shadow (see SpriteInstance.terrainShadow).
+    const isTerrainShadow: ShaderNode = step(1.5, aFlat)
+      .mul(float(1).sub(step(2.5, aFlat)))
+      .mul(step(aFlags.w, -0.5));
     // The map's light for this instance's class, times its own extra light, in the palette's sRGB scale (see
     // mapLighting.ts): 'ambient' takes the level, 'full' the per-channel grade, 'none' nothing.
     const isFull: ShaderNode = step(0.5, aFlags.z).mul(float(1).sub(step(1.5, aFlags.z)));
@@ -532,7 +541,9 @@ class SpriteGraph {
     const foundationHalf: ShaderNode = select(hasFoundation, aOcclusion.xy.mul(0.5), vec2(0, 0));
     const baseCentre: ShaderNode = select(hasFoundation, foundationOrigin.add(foundationHalf), vec2(0, 0));
     // Sun-following shadow transform (spriteLook.ts followedShadowPoint): turned and stretched about the draw point.
-    const followed2d = (offset: ShaderNode): ShaderNode => followedShadowNode(offset, look.shadowMatrix);
+    // Terrain objects' shadows take the transform with the capped stretch (spriteLook.ts setShadowTransforms).
+    const followed2d = (offset: ShaderNode): ShaderNode =>
+      followedShadowNode(offset, select(isTerrainShadow.greaterThan(0.5), look.terrainShadowMatrix, look.shadowMatrix));
     // A reflection's quad spans the rows from the base line down to the mirror image of the frame's top.
     const reflectionRows = (): ShaderNode => {
       const top: ShaderNode = aParams.y;
@@ -1442,11 +1453,13 @@ export class SpriteLayer {
               ? s.infantryBare
                 ? 2
                 : 1
-              : s.flat || s.shadow || s.kind
-                ? 0
-                : s.painter
-                  ? spritePainterBias(s.painter, s.painterPart)
-                  : (s.tieBias ?? 0),
+              : s.shadow && s.terrainShadow
+                ? -1
+                : s.flat || s.shadow || s.kind
+                  ? 0
+                  : s.painter
+                    ? spritePainterBias(s.painter, s.painterPart)
+                    : (s.tieBias ?? 0),
         );
         const foundation = s.painter?.foundation;
         const dx = foundation ? s.anchor.x - s.painter!.x : 0;

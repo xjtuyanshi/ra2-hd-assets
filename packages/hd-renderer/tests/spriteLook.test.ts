@@ -8,7 +8,16 @@ import type { Ra2Cache } from '../src/ra2/cache';
 import { painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 import { SpritePool } from '../src/live/spritePool';
 import { float, vec2, vec3 } from 'three/tsl';
-import { ART_LIGHT, groundCrystalColour, shadowTransform, spriteLookFor } from '../src/ra2/spriteLook';
+import {
+  ART_LIGHT,
+  ART_SHADOW_DIRECTION,
+  groundCrystalColour,
+  setShadowTransforms,
+  shadowStretch,
+  shadowTransform,
+  spriteLookFor,
+  TERRAIN_SHADOW_MAX_STRETCH,
+} from '../src/ra2/spriteLook';
 import type { ShaderNode } from '../src/tsl';
 import { InstancedQuad } from '../src/instancedQuad';
 import { GROUND_PULL, SpriteLayer, groundPlaneDepth, type SpriteInstance } from '../src/ra2/sprites';
@@ -62,6 +71,64 @@ describe('enhanced look: shadows follow the sun', () => {
     const [tx, tz] = apply(m, 0, -1);
     expect(tx).toBeCloseTo(-1, 12);
     expect(tz).toBeCloseTo(0, 12);
+  });
+});
+
+describe('enhanced look: terrain-object shadows', () => {
+  const look = () => ({ shadowMatrix: { value: new Vector4() }, terrainShadowMatrix: { value: new Vector4() } });
+  const length = (m: Vector4) => Math.hypot(...apply(m, ART_SHADOW_DIRECTION[0], ART_SHADOW_DIRECTION[1]));
+  const turn = (m: Vector4) => Math.atan2(m.y, m.x);
+
+  it('caps the tree shadow stretch at the cinematic hour and keeps the turn of every other shadow', () => {
+    // The cinematic look: hour 16.5 on the sun arc (key elevation 34 degrees), shadowLength 1.4 -> about 1.62.
+    const stretch = shadowStretch(34, 1.4);
+    expect(stretch).toBeGreaterThan(1.5);
+    const sun = sunArcDirection(16.5, 0, (34 * Math.PI) / 180, new Vector3());
+    const m = look();
+    setShadowTransforms(m, sun, stretch, 1);
+    expect(length(m.shadowMatrix.value)).toBeCloseTo(stretch, 9);
+    expect(length(m.terrainShadowMatrix.value)).toBeCloseTo(TERRAIN_SHADOW_MAX_STRETCH, 9);
+    expect(TERRAIN_SHADOW_MAX_STRETCH).toBeLessThanOrEqual(1.3);
+    expect(turn(m.terrainShadowMatrix.value)).toBeCloseTo(turn(m.shadowMatrix.value), 9);
+    expect(Math.abs(turn(m.shadowMatrix.value))).toBeGreaterThan(0.1);
+  });
+
+  it('leaves shorter stretches and the faithful identity alone', () => {
+    const m = look();
+    setShadowTransforms(m, ART_LIGHT, 1.05, 1);
+    expect(m.terrainShadowMatrix.value.toArray()).toEqual(m.shadowMatrix.value.toArray());
+    setShadowTransforms(m, new Vector3(1, 0.4, 0), 2.8, 0);
+    expect(m.shadowMatrix.value.toArray()).toEqual([1, 0, 0, 1]);
+    expect(m.terrainShadowMatrix.value.toArray()).toEqual([1, 0, 0, 1]);
+  });
+
+  it('uploads both matrices on the shared look state', () => {
+    const state = spriteLookFor();
+    expect(state.terrainShadowMatrix.value).toBeInstanceOf(Vector4);
+    expect(state.terrainShadowMatrix).not.toBe(state.shadowMatrix);
+  });
+
+  it('marks only terrain-object shadows with flags.w = -1', () => {
+    const base: SpriteInstance = {
+      anchor: new Vector3(),
+      frame: { rect: [0, 0, 8, 8], offset: [-4, -8] },
+      palette: 'unit',
+      push: 0,
+      shadow: true,
+      flat: true,
+    };
+    const layer = new SpriteLayer(cache, [
+      { ...base, terrainShadow: true },
+      base,
+      { ...base, infantryShadow: true, terrainShadow: true },
+      { ...base, shadow: false, terrainShadow: true },
+    ]);
+    const flags = (layer as unknown as Buffers).flags;
+    const w = (i: number) => flags.array[i * flags.itemSize + 3];
+    expect([w(0), w(1), w(2), w(3)]).toEqual([-1, 0, 1, 0]);
+    layer.mesh.geometry.dispose();
+    layer.mesh.material.dispose();
+    layer.mesh.dispose();
   });
 });
 

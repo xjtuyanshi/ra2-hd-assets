@@ -251,7 +251,17 @@ export async function loadRa2World(
     // Shadows are cast on the ground: draw them as decals too. The painter carries the foundation the enhanced look
     // turns them about (flat decals take no depth from it).
     const shadow = entry.shadows?.[frameIndex];
-    if (shadow) sprites.push({ anchor, frame: shadow, palette, push: 0, shadow: true, flat: true, painter });
+    if (shadow)
+      sprites.push({
+        anchor,
+        frame: shadow,
+        palette,
+        push: 0,
+        shadow: true,
+        flat: true,
+        painter,
+        terrainShadow: object.kind === 'tree' || undefined,
+      });
     if (object.kind === 'building' && entry.foundation) {
       const [w, h] = entry.foundation;
       const margin = 30;

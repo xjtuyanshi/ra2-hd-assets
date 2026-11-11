@@ -76,6 +76,14 @@ export function relightFactorUpper(sunGain: number): number {
 /** Maximum sun-following stretch at neutral shadowLength, relative to the art's own shadow (readability). */
 export const MAX_SHADOW_STRETCH = 2;
 
+/**
+ * Longest sun-following stretch of a terrain object's (tree's) SHP shadow, relative to the art's own, whatever the
+ * look's shadowLength. Tree shadows are stippled art with holes between the leaves; at the cinematic look's 1.6x
+ * (hour 16.5, shadowLength 1.4) the holes became long light streaks and the shadows read as smears beside the
+ * original's compact tree shadows (Seattle ALL03UMD, stage8 v2s1 A/B). Shorter stretches (high sun) are kept.
+ */
+export const TERRAIN_SHADOW_MAX_STRETCH = 1.3;
+
 /** Wet paving reflects a faint image; even stacked look gains must not turn it into a second building. */
 export const WET_REFLECTION_MAX_OPACITY = 0.25;
 
@@ -150,6 +158,8 @@ export class SpriteLookState {
    * art's shadow direction to the current one, times a stretch along the art's direction.
    */
   readonly shadowMatrix = uniform(new Vector4(1, 0, 0, 1));
+  /** The same transform for terrain objects' (trees') shadows, stretched at most TERRAIN_SHADOW_MAX_STRETCH. */
+  readonly terrainShadowMatrix = uniform(new Vector4(1, 0, 0, 1));
   /**
    * CPU side: the ground passes of every sprite layer on this context (SpriteLayer.groundPasses). HdRenderer shows them
    * only while the look is on, so the faithful frame stays a single pass.
@@ -573,6 +583,20 @@ export function followedShadowPoint(
 /** Shader form of followedShadowPoint for a shadow without a foundation (vec2 `p`, relative to the draw point). */
 export function followedShadowNode(p: ShaderNode, m: ShaderNode): ShaderNode {
   return vec2(m.x.mul(p.x).add(m.z.mul(p.y)), m.y.mul(p.x).add(m.w.mul(p.y)));
+}
+
+/**
+ * Uploads both SHP shadow transforms for the current sun: `shadowMatrix` with the full stretch, and
+ * `terrainShadowMatrix` with the same turn and the stretch capped at TERRAIN_SHADOW_MAX_STRETCH.
+ */
+export function setShadowTransforms(
+  look: Pick<SpriteLookState, 'shadowMatrix' | 'terrainShadowMatrix'>,
+  current: Vector3,
+  stretch: number,
+  follow: number,
+): void {
+  shadowTransform(current, stretch, follow, look.shadowMatrix.value);
+  shadowTransform(current, Math.min(stretch, TERRAIN_SHADOW_MAX_STRETCH), follow, look.terrainShadowMatrix.value);
 }
 
 /** Degrees -> unit ground vector helper for CPU-side updates (see HdRenderer). */

@@ -103,6 +103,10 @@ describe('static map native ground cards', () => {
     for (const x of [9, 11, 12]) expect(spriteAt(x).nativeDepth).toBeUndefined();
     for (const sprite of fixture.sprites.filter((s) => s.shadow || s.kind === 'reflection'))
       expect(sprite.nativeDepth).toBeUndefined();
+    // Only the tree's SHP shadow takes the terrain-object stretch cap (spriteLook.ts terrainShadowMatrix).
+    const shadows = fixture.sprites.filter((s) => s.shadow);
+    expect(shadows.length).toBeGreaterThan(1);
+    expect(shadows.filter((s) => s.terrainShadow).map((s) => s.anchor.x)).toEqual([10.5]);
     for (const child of world.root.children)
       if (child instanceof VoxelUnit) for (const mesh of child.partMeshes) mesh.geometry.dispose();
     world.surfaceTexture!.dispose();

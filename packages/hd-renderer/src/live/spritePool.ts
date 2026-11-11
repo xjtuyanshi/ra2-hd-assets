@@ -58,6 +58,7 @@ export class SpritePool {
     instance.opacity = undefined;
     instance.infantryShadow = undefined;
     instance.infantryBare = undefined;
+    instance.terrainShadow = undefined;
     instance.flat = flat;
     instance.glint = undefined;
     instance.unlit = undefined;
