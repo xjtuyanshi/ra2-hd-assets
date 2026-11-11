@@ -1167,6 +1167,7 @@ describe('native core session and presenter lifecycle', () => {
   });
   it('waits for the applied subscription revision rather than an older in-flight delta or a reset', async () => {
     const { core, agent, mode } = setup();
+    agent.mirrorWindow = 2;
     const start = core.start();
     agent.hello(true, true);
     await start;
@@ -1187,6 +1188,9 @@ describe('native core session and presenter lifecycle', () => {
     agent.mirror(3, [], 0, 1);
     await flush();
     expect(settled).toBe(false);
+    expect(
+      agent.requests.filter((request) => request.type === NativeMessageType.Ack).map((request) => u32(request.payload)),
+    ).toContain(3);
     agent.mirror(4, [], 1);
     await flush();
     expect(settled).toBe(false);

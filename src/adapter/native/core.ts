@@ -622,6 +622,9 @@ export class NativeCore {
       waiter.resolve();
       this.waiters.delete(waiter);
     }
+    // An older in-flight revision can arrive after a barrier released its first
+    // credits. Keep draining until every outstanding wait condition is met.
+    if (this.waiters.size) this.pacer.releaseForBarrier();
     this.finishRenderPublicationWait('publication');
   }
   private pictureArrived(picture: NativePicture): void {

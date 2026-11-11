@@ -109,4 +109,31 @@ describe('native mirror capture pacing', () => {
       vi.useRealTimers();
     }
   });
+
+  it('preserves arrival order across frame reuse and cancels old timers at barriers and teardown', () => {
+    vi.useFakeTimers();
+    try {
+      const acks: number[] = [];
+      const instance = new NativeMirrorPacer({ acknowledge: (frame) => acks.push(frame), window: () => 2, holdMs: 50 });
+      instance.arrived(100, 1, true);
+      instance.arrived(101, 2, true);
+      instance.releaseForBarrier();
+      expect(acks).toEqual([100, 101]);
+      vi.advanceTimersByTime(40);
+      instance.arrived(0, 3, true);
+      instance.consume(3);
+      vi.advanceTimersByTime(10); // The old hold timer must not return the new match's credit.
+      expect(acks).toEqual([100, 101]);
+      instance.arrived(1, 4, true);
+      instance.consume(4);
+      expect(acks).toEqual([100, 101, 0]);
+      instance.consume(3); // A late read cannot rewind consumption or return a duplicate ACK.
+      instance.reset();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(1000);
+      expect(acks).toEqual([100, 101, 0]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
