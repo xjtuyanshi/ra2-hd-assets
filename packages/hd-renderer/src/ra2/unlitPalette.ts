@@ -1,5 +1,6 @@
 import { abs, float, floor, max, min, smoothstep, step } from 'three/tsl';
 import type { ShaderNode } from '../tsl';
+import { tintLight, tintedSrgb, type ObjectTint } from '../objectTint';
 
 /**
  * Palette indices that RA2/YR's house colour-scheme converters leave unlit (YR gamemd.exe 1.001, static reading; see
@@ -14,8 +15,10 @@ import type { ShaderNode } from '../tsl';
  *
  * The converter is the drawing house's: building bodies and damaged frames (TechnoClass::DrawObject 0x705E00 through
  * GetRemapColour 0x705D70), their ShouldUseCellDrawer anims (0x451A70..0x451AF5), infantry and SHP vehicles/aircraft
- * (0x41C090). TerrainPalette buildings use the cell's iso converter (all indices lit), and standalone anims the plain
- * ANIM.PAL converter (no table). Index 0 is transparent whatever the table says.
+ * (0x41C090). Custom Palette= schemes are built the same way (0x716D82..0x716DA4), so a custom palette does not
+ * change it. The bodies of TerrainPalette=yes buildings (BuildingType +0x1702) use the cell's iso converter instead (all
+ * indices lit and map-tinted), but their anims still get the house converter (0x705D70 has no TerrainPalette check);
+ * standalone anims use the plain ANIM.PAL converter (no table). Index 0 is transparent whatever the table says.
  */
 export const HOUSE_CONVERTER_UNLIT_INDICES: Readonly<{ first: number; last: number }> = { first: 240, last: 254 };
 
@@ -43,6 +46,22 @@ export function houseConverterUnlitLevel(level: number): number {
   const hi = Math.min(254, (intensity * 261) >> 11);
   const row = Math.min(HOUSE_CONVERTER_ROWS - 1, Math.floor((NEUTRAL_ABUFFER * hi * 52) / 32258));
   return Math.min(1, row / HOUSE_CONVERTER_DARK_ROWS);
+}
+
+/**
+ * Display colour (sRGB 0..1) of an unlit index whose palette colour is `srgb`, drawn at object light `level` with the
+ * picture tint `tint` (CPU twin of the sprite shader). The tint's light factor scales the draw intensity, which these
+ * indices ignore from 0.236 up and are never brightened by, so it only enters the level; the blitter's added colour
+ * applies as to any pixel.
+ */
+export function houseConverterUnlitSrgb(
+  srgb: readonly [number, number, number],
+  level: number,
+  tint?: ObjectTint,
+): [number, number, number] {
+  const k = houseConverterUnlitLevel(level * tintLight(tint));
+  const scaled = srgb.map((v) => Math.min(1, v * k)) as [number, number, number];
+  return tintedSrgb(scaled, tint?.add ? { light: 1, add: tint.add } : undefined);
 }
 
 /** Shader twin of houseConverterUnlitLevel for an object light level node. */
@@ -98,16 +117,30 @@ export function unlitShareNode(unlit: ShaderNode, opaque: ShaderNode): ShaderNod
 }
 
 /**
- * Whether building art on source palette `palette` (a body, bib, make or attached anim) is drawn through the house
- * converter: every palette but the iso one, which TerrainPalette=yes art uses with the cell's terrain converter
- * (BuildingType +0x1702, DrawObject 0x705EC1..0x705F59, table 0 = all lit).
+ * Whether a building's own picture (body and damaged frames, make art and bib) is drawn through the house converter:
+ * yes unless its art has TerrainPalette=yes (LibraryBuilding.terrainPalette, SpriteEntry.terrainPalette), whose body
+ * DrawObject draws with the cell's iso LightConvert (0x705EC1..0x705F59, table 0 = all indices lit). Art the HD
+ * assets resolved onto the `iso` palette (a caller-supplied ISO source contract, see the ra2-assets README) stands for
+ * that same terrain draw. Attached and delivery anims are always house-converter art
+ * (BUILDING_ANIM_USES_HOUSE_CONVERTER).
  */
-export function buildingUsesHouseConverter(palette: string): boolean {
-  return palette !== 'iso';
+export function buildingBodyUsesHouseConverter(terrainPalette: boolean | undefined, palette?: string): boolean {
+  return !terrainPalette && palette !== 'iso';
 }
 
-/** Map objects whose art the engine draws through the house converter: buildings off the iso palette, and units. */
-export function mapObjectUsesHouseConverter(kind: string, palette: string): boolean {
-  if (kind === 'building') return buildingUsesHouseConverter(palette);
+/**
+ * Whether a building's attached anim (Active/Idle/Super/Special/Production layers, delivery anims) is drawn through the
+ * house converter: always, since the spawner (0x451A70..0x451AF5) hands every ShouldUseCellDrawer anim the building's
+ * GetRemapColour (0x705D70), which does not check TerrainPalette. Stock artmd clears ShouldUseCellDrawer only for
+ * FSIDLE, which the library does not record.
+ */
+export const BUILDING_ANIM_USES_HOUSE_CONVERTER = true;
+
+/**
+ * Map-cache objects whose main picture the engine draws through the house converter: buildings without TerrainPalette
+ * (`terrainPalette` is the sprite entry's flag; caches extracted before it was recorded lack it), and units.
+ */
+export function mapObjectUsesHouseConverter(kind: string, terrainPalette?: boolean, palette?: string): boolean {
+  if (kind === 'building') return buildingBodyUsesHouseConverter(terrainPalette, palette);
   return kind === 'infantry' || kind === 'vehicle' || kind === 'aircraft';
 }

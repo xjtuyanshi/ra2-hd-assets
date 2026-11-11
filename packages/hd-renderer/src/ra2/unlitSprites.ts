@@ -1,5 +1,5 @@
 import { MRTNode, type MeshBasicNodeMaterial, type NodeBuilder } from 'three/webgpu';
-import { Fn, float, output, vec4 } from 'three/tsl';
+import { Fn, If, float, output, vec4 } from 'three/tsl';
 import type { AtmosphereNodes } from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { unlitDisplayColour } from '../unlit';
@@ -31,6 +31,14 @@ export function bindUnlitSpriteMaterial(
       if (!builder.renderer.getMRT()?.has('unlit')) return output;
       return vec4(output.rgb.mul(float(1).sub(unlit)), output.a);
     })(),
-    unlit: vec4(unlitDisplayColour(output.rgb, nodes).mul(unlit), output.a),
+    // The display transform (faithful/AgX/Neutral/ACES tone maps, vignette, grade) runs only where something is
+    // self-lit; most sprite fragments have a weight of 0 and write black with the same coverage.
+    unlit: Fn(() => {
+      const colour: ShaderNode = vec4(0, 0, 0, output.a).toVar('unlitSpriteColour');
+      If(unlit.greaterThan(0), () => {
+        colour.rgb.assign(unlitDisplayColour(output.rgb, nodes).mul(unlit));
+      });
+      return colour;
+    })(),
   });
 }

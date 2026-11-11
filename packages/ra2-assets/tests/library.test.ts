@@ -422,6 +422,47 @@ describe('art name resolution', () => {
   });
 });
 
+describe('map-cache building TerrainPalette', () => {
+  it('records art TerrainPalette=yes on the building sprite entry and keeps the unit palette', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ra2-terrain-palette-'));
+    const install = fakeInstall(
+      { 'xlamp.shp': bodyAndShadow(2), 'xhut.shp': bodyAndShadow(2) },
+      {
+        'rulesmd.ini': '[BuildingTypes]\n0=XLAMP\n1=XHUT\n[XLAMP]\n[XHUT]\n',
+        'artmd.ini': '[XLAMP]\nTerrainPalette=yes\n[XHUT]\n',
+        [THEATERS.temperate.controlIni]: '[General]\nClearTile=0\n',
+      },
+    );
+    const opened = Object.assign(install, {
+      report: { mounted: [], missing: [], unreadable: [] },
+      tmp: () => undefined,
+    });
+    const spy = vi.spyOn(GameInstall, 'open').mockReturnValue(opened as unknown as GameInstall);
+    try {
+      const map = join(root, 'source.map');
+      writeFileSync(
+        map,
+        '[Map]\nTheater=TEMPERATE\n[Structures]\n' +
+          '0=Neutral,XLAMP,256,5,5,0,None,1,0,1,0,0,None,None,None,0,0\n' +
+          '1=Neutral,XHUT,256,8,5,0,None,1,0,1,0,0,None,None,None,0,0\n',
+      );
+      const { manifest } = extractMap({
+        gameDir: root,
+        map,
+        outDir: join(root, 'out'),
+        defaultVoxels: [],
+        log: () => {},
+      });
+      expect(manifest.sprites['building:XLAMP']).toMatchObject({ palette: 'unit', terrainPalette: true });
+      expect(manifest.sprites['building:XHUT']!.palette).toBe('unit');
+      expect(manifest.sprites['building:XHUT']!.terrainPalette).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('type library records', () => {
   const temp: string[] = [];
   afterEach(() => {

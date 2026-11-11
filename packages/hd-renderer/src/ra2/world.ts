@@ -9,7 +9,7 @@ import { addHousePalettes, decodeBase64, loadRa2Cache, paletteFor, type Ra2Cache
 import type { MapLightGrade } from './mapLighting';
 import { Ra2NightDressing } from './nightDressing';
 import { SpriteLayer, cardPush, isUnlitMapOverlay, objectAnchor, type SpriteInstance } from './sprites';
-import { buildingUsesHouseConverter, mapObjectUsesHouseConverter } from './unlitPalette';
+import { buildingBodyUsesHouseConverter, mapObjectUsesHouseConverter } from './unlitPalette';
 import { loadSpriteMaterials } from './spriteMaterials';
 import type { SpriteMaterialAtlas } from './spriteLook';
 import { objectYSort, painterObject } from './painterOrder';
@@ -247,7 +247,8 @@ export async function loadRa2World(
           shadow: false,
           flat: true,
           lighting,
-          houseConverter: object.kind === 'building' && buildingUsesHouseConverter(bib.palette),
+          houseConverter:
+            object.kind === 'building' && buildingBodyUsesHouseConverter(entry.terrainPalette, bib.palette),
         });
     }
     // Shadows are cast on the ground: draw them as decals too. The painter carries the foundation the enhanced look
@@ -294,7 +295,7 @@ export async function loadRa2World(
       glint: object.kind === 'overlay' && flat && lighting === 'none' ? 1 : undefined,
       unlit: isUnlitMapOverlay(object),
       lighting,
-      houseConverter: mapObjectUsesHouseConverter(object.kind, entry.palette),
+      houseConverter: mapObjectUsesHouseConverter(object.kind, entry.terrainPalette, entry.palette),
       // A deck is lit at its own height, four levels above the owner cell on the river (bridgeDepth.ts).
       light: deckHeight !== undefined && manifest.lighting ? highBridgeLight(manifest.lighting, object.z) : undefined,
       painter: object.kind === 'overlay' ? undefined : painter,
@@ -318,7 +319,7 @@ export async function loadRa2World(
           lighting,
           painter,
           painterPart: 0.1,
-          houseConverter: object.kind === 'building' && buildingUsesHouseConverter(art.palette),
+          houseConverter: object.kind === 'building',
         });
     }
   }

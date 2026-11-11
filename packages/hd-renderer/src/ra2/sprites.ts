@@ -521,8 +521,10 @@ class SpriteGraph {
     // graph and read by the unlit MRT split; whole self-lit instances (isUnlit) count as 1.
     const unlitShareOut: ShaderNode = property('float', 'spriteUnlitShare');
     const unlitWeight: ShaderNode = max(isUnlit, unlitShareOut);
-    // Light of the unlit indices: the engine's untinted multiplier at the object level (1 from 0.236 up).
-    const unlitLevel: ShaderNode = houseConverterUnlitLevelNode(grade.x).toVar('spriteUnlitLevel');
+    // Light of the unlit indices: the engine's untinted multiplier at the object's draw intensity, 1 from 0.236 up.
+    // The picture tint's light factor (Iron Curtain and Force Shield pulse, laser designator, deactivated vehicles;
+    // see objectTint.ts) is a change of that intensity, so it enters here and never scales these colours directly.
+    const unlitLevel: ShaderNode = houseConverterUnlitLevelNode(grade.x.mul(aTint.x)).toVar('spriteUnlitLevel');
     const ppu = float(PIXELS_PER_CELL_EDGE);
 
     const material = new MeshBasicNodeMaterial();
@@ -800,7 +802,15 @@ class SpriteGraph {
         const houseArt: ShaderNode = houseConverter.mul(float(1).sub(step(1.5, aFlat)));
         let unlitShare: ShaderNode;
         let unlitColour: ShaderNode;
-        const unlitOf = (c: ShaderNode): ShaderNode => srgbScale(c, unlitLevel).mul(look.unlitBaseLight);
+        // The level is 1 for every object light the game uses (it drops only below 0.236), so the display-scale
+        // multiply and its sRGB round trip run only for the rare dark object; the branch is uniform over an instance.
+        const unlitOf = (c: ShaderNode): ShaderNode => {
+          const colour: ShaderNode = vec3(c).toVar('spriteUnlitArt');
+          If(unlitLevel.lessThan(1), () => {
+            colour.assign(srgbScale(colour, unlitLevel));
+          });
+          return colour.mul(look.unlitBaseLight);
+        };
         if (!features.hd) {
           const shown: ShaderNode = mix(fill, index, step(0.5, index));
           const paint: ShaderNode = step(15.5, shown).mul(step(shown, 31.5));
@@ -1049,8 +1059,7 @@ class SpriteGraph {
         });
         // Unlit palette colours of house-converter art skip what the engine skips for them: map and scene light, the
         // night grade, window glow and the enhanced look's relight, occlusion and highlights (shadows, contact shades
-        // and reflections are other instance kinds and keep share 0). The picture tint below still applies.
-        result.rgb.assign(mix(result.rgb, unlitColour, unlitShare));
+        // and reflections are other instance kinds and keep share 0). They are mixed in after the picture tint below.
         unlitShareOut.assign(unlitShare);
         // Black shadow/contact RGB naturally darkens the already transformed receiver. Only cast-shadow coverage
         // fades under overcast (decorative rain/snow sun share, scene-event overcast); foundation contact shades and
@@ -1059,11 +1068,12 @@ class SpriteGraph {
         If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(sunShare.notEqual(1)), () => {
           result.a.mulAssign(sunShare);
         });
-        // The object's picture tint last: the game darkens, flashes and colours the whole finished picture.
-        return vec4(
-          applyObjectTint(result.rgb, aTint.x, aTint.y, grade.x, look.unlitBaseLight),
-          result.a.mul(bodyOpacity),
-        );
+        // The object's picture tint last: the game darkens, flashes and colours the whole finished picture. On the
+        // unlit colours its light factor is already in unlitLevel (the converter ignores the intensity from 0.236 up
+        // and never brightens them), so only the blitter's added colour applies there.
+        const tintedLit: ShaderNode = applyObjectTint(result.rgb, aTint.x, aTint.y, grade.x, look.unlitBaseLight);
+        const tintedUnlit: ShaderNode = applyObjectTint(unlitColour, float(1), aTint.y, 1, look.unlitBaseLight);
+        return vec4(mix(tintedLit, tintedUnlit, unlitShare), result.a.mul(bodyOpacity));
       })();
     const mainColour = colourNode();
     if (capture) {

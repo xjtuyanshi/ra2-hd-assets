@@ -49,6 +49,8 @@ Applies:
   when ShouldUseCellDrawer (AnimType+0x35C, default 1 at 0x4276A9) is set; in stock artmd only FSIDLE clears it.
   0x705D70 does not check TerrainPalette, so even TerrainPalette buildings' anims take the unit-palette converter
   (inferred, not seen on screen).
+- Art with a custom TechnoType `Palette=` (+0xDF0, read at 0x716D82..0x716DA4): those schemes are built by the same
+  ColorScheme 0x68C710 with the table, so the source palette does not decide the converter.
 - Infantry, SHP vehicles and SHP aircraft: vtable 0x50C = 0x41C090 calls 0x705E00.
 - Also, not modelled by the HD sprite path: infantry death anims (0x518AA1..0x518AF9), IsVeins anims
   (0x423122..0x42314B) and overlays (0x5FDB08..0x5FDB9A), building damage-fire anims of types with a custom
@@ -80,14 +82,34 @@ needed to settle the small red deficit.
 
 ## HD policy
 
-- `SpriteInstance.houseConverter` marks the sprites of the draws above that the HD sprite layer models: library and
-  map-cache building bodies, bibs, make art, delivery doors and attached layers on any palette but `iso`, and
-  infantry, SHP vehicles and aircraft (Remapable= does not matter).
+- `SpriteInstance.houseConverter` marks the sprites of the draws above that the HD sprite layer models
+  (`ra2/unlitPalette.ts`): infantry, SHP vehicles and aircraft (Remapable= does not matter); building bodies,
+  damaged frames, make art and bibs unless the art has TerrainPalette=yes (`LibraryBuilding.terrainPalette` for
+  library types, `SpriteEntry.terrainPalette` for map-cache buildings); and every building's attached layers,
+  delivery images and doors, TerrainPalette or not. A custom `Palette=` does not change it (those schemes carry the
+  table too); body art the HD assets resolved onto the `iso` palette (a caller-supplied ISO contract) stands for the
+  TerrainPalette draw. Stock YR has 25 TerrainPalette types (GALITE, the *LAMP types, CITY06 and others), all on
+  the unit palette in the type library; CITY06's body has 232 pixels in 240-254, which the engine lights and map-tints
+  like terrain. Map caches extracted before `SpriteEntry.terrainPalette` was recorded lack the flag, so their
+  TerrainPalette bodies are still treated as house art until the map is extracted again.
 - For those pixels the sprite shader replaces the lit colour by the art colour at the engine's untinted multiplier
   (`houseConverterUnlitLevel` of the object level), in the clear-noon scale of the renderer's self-lit attachment. The
   map grade, scene light and event tints, the night desaturation and display transform, local light headroom, night
-  window glow and the enhanced look's relight, occlusion, highlights and glass are skipped; the object picture tint
-  (Iron Curtain, Force Shield) still applies to the finished colour.
+  window glow and the enhanced look's relight, occlusion, highlights and glass are skipped.
+- The object picture tint (`src/games/yr/technoTint.ts`) is a change of the draw intensity I by its light factor
+  (Iron Curtain and Force Shield pulse 0.2-0.5 with a flash to 2, laser designator 1-2, deactivated vehicles halved)
+  plus an added 5/6/5 colour. For the unlit pixels the factor only enters the level (`houseConverterUnlitLevel` of
+  object level x factor, CPU twin `houseConverterUnlitSrgb`): they stay at palette value while that product is at
+  least 0.236 and are never brightened; only the added colour applies to them as to any pixel. The lit share takes
+  the full tint as before.
+- Cost: the darkening multiply (an sRGB round trip) runs only when the level is below 1, and the self-lit display
+  transform of the attachment split only where a fragment's unlit weight is above 0 (`unlitSprites.ts`). The first
+  branch is uniform over an instance; the second is taken only on light pixels and self-lit instances. Same-scene
+  GPU-bound frame cost (`HdRenderer.benchmark`, sandbox, WebGPU on Apple silicon, trees interleaved per round)
+  against the parent renderer: XMP29U2 wide framing at night and noon 13.10 / 12.82 ms against 13.07 / 12.66 ms in
+  the one round without outside GPU load, and a live-path replay of a battle (66 buildings, 50 vehicles, 138
+  infantry, 3456x2160) 21.7-22.8 ms against 21.8-24.1 ms per round: no difference above the run-to-run noise
+  (about 2 % when quiet). A live six-player match at speed slider 5 was not measured.
 - Edge weight on HD pages: the bilinear tent share of 240-254 texels among the opaque texels of the 3x3 index taps,
   sharpened with smoothstep(0.35, 0.65) (`unlitShare`). The bilinear share is exactly 0.5 on the boundary between an
   unlit and a lit texel, so every unlit texel keeps its full square, including single-texel blinkers, and nothing

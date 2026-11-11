@@ -240,8 +240,10 @@ export interface LibraryBuilding {
   /** art Height= (cells), a sorting hint. */
   height?: number;
   /**
-   * art TerrainPalette=yes (lamp posts, CITY06), recorded raw and not applied: the sprite keeps the unit palette,
-   * because gglite.shp drawn with iso<th>.pal is colour noise while unit<th>.pal gives natural colours.
+   * art TerrainPalette=yes (lamp posts, CITY06). Not applied to the palette: the sprite keeps the unit palette,
+   * because gglite.shp drawn with iso<th>.pal is colour noise while unit<th>.pal gives natural colours. Renderers use
+   * it for the engine's converter choice: the body, damaged frames, make art and bib are lit like terrain (the cell's
+   * iso converter, no house-converter unlit indices), while the building's anims keep the house converter.
    */
   terrainPalette?: boolean;
   /** art AltPalette=yes (bunkers, CAMIAM01): recorded, not applied (unit palette kept; meaning unverified). */

@@ -16,10 +16,13 @@ import { HeldPicture } from '../src/live/heldPicture';
 import { SpritePool } from '../src/live/spritePool';
 import type { Ra2Cache } from '../src/ra2/cache';
 import { SpriteLayer, type SpriteInstance } from '../src/ra2/sprites';
+import { tintedSrgb } from '../src/objectTint';
 import {
+  BUILDING_ANIM_USES_HOUSE_CONVERTER,
   HOUSE_CONVERTER_UNLIT_INDICES,
-  buildingUsesHouseConverter,
+  buildingBodyUsesHouseConverter,
   houseConverterUnlitLevel,
+  houseConverterUnlitSrgb,
   isHouseConverterUnlitIndex,
   mapObjectUsesHouseConverter,
   unlitShare,
@@ -98,13 +101,35 @@ describe('house converter unlit palette indices (gamemd.exe 0x83E1AC)', () => {
   });
 
   it('applies to the engine paths of the house converter only', () => {
-    expect(buildingUsesHouseConverter('unit')).toBe(true);
-    expect(buildingUsesHouseConverter('iso')).toBe(false);
-    for (const kind of ['infantry', 'vehicle', 'aircraft'])
-      expect(mapObjectUsesHouseConverter(kind, 'unit')).toBe(true);
-    expect(mapObjectUsesHouseConverter('building', 'unit')).toBe(true);
-    expect(mapObjectUsesHouseConverter('building', 'iso')).toBe(false);
-    for (const kind of ['tree', 'overlay', 'smudge']) expect(mapObjectUsesHouseConverter(kind, 'unit')).toBe(false);
+    // Building pictures follow TerrainPalette (the cell's iso converter, all lit); their anims never do (0x705D70).
+    expect(buildingBodyUsesHouseConverter(undefined)).toBe(true);
+    expect(buildingBodyUsesHouseConverter(false)).toBe(true);
+    expect(buildingBodyUsesHouseConverter(true)).toBe(false);
+    expect(buildingBodyUsesHouseConverter(false, 'unit')).toBe(true);
+    expect(buildingBodyUsesHouseConverter(true, 'unit')).toBe(false);
+    expect(buildingBodyUsesHouseConverter(false, 'iso')).toBe(false);
+    expect(BUILDING_ANIM_USES_HOUSE_CONVERTER).toBe(true);
+    for (const kind of ['infantry', 'vehicle', 'aircraft']) expect(mapObjectUsesHouseConverter(kind)).toBe(true);
+    expect(mapObjectUsesHouseConverter('building')).toBe(true);
+    expect(mapObjectUsesHouseConverter('building', true)).toBe(false);
+    for (const kind of ['tree', 'overlay', 'smudge']) expect(mapObjectUsesHouseConverter(kind)).toBe(false);
+  });
+
+  it('takes the picture tint light as a change of draw intensity: never dimmed above 0.236, never brightened', () => {
+    const lamp: [number, number, number] = [1, 0.9, 0.4];
+    // Iron Curtain / Force Shield pulse (0.2-0.5, flash to 2), laser designator (1-2), deactivated vehicle (0.5).
+    for (const light of [0.3, 0.5, 1, 1.5, 2]) expect(houseConverterUnlitSrgb(lamp, 1, { light })).toEqual(lamp);
+    expect(houseConverterUnlitSrgb(lamp, 0.6, { light: 0.5 })).toEqual(lamp);
+    // Lit pixels at the same tint do change.
+    expect(tintedSrgb(lamp, { light: 0.5 })).not.toEqual(lamp);
+    // Only when level x factor drops below 0.236: 1 x 0.2 = 0.2 is the 5/6 row, like a level of 0.2 untinted.
+    const dim = houseConverterUnlitSrgb(lamp, 1, { light: 0.2 });
+    expect(dim).toEqual(houseConverterUnlitSrgb(lamp, 0.2));
+    dim.forEach((v, i) => expect(v).toBeCloseTo((lamp[i]! * 5) / 6, 12));
+    // The blitter's added colour (Force Shield blue) applies as to any pixel.
+    const added = houseConverterUnlitSrgb([0.2, 0.2, 0.2], 1, { light: 0.4, add: [0, 0, 0.5] });
+    expect(added[0]).toBeCloseTo(0.2, 12);
+    expect(added[2]).toBeCloseTo(0.2 + 16 / 31, 12);
   });
 });
 
@@ -176,6 +201,12 @@ describe('house converter sprites in the sprite layer', () => {
       expect(written).toBeGreaterThan(-1);
       expect(code.slice(written + 20).search(/\bspriteUnlitShare\b/)).toBeGreaterThan(-1);
       expect(code).toMatch(/max\( \w+, spriteUnlitShare \)/);
+      // The unlit level is taken at the object level times the picture tint's light factor (draw intensity).
+      const level = code.split('\n').find((line) => /\bspriteUnlitLevel = /.test(line));
+      expect(level).toBeDefined();
+      expect(level).toMatch(/spriteTintFlat\.x/);
+      // The tint's light factor is not applied to the unlit colour: its own tint call passes a light of 1.
+      expect(code.match(/objectTintDisplay\w* = /g)?.length ?? 0).toBeGreaterThanOrEqual(2);
       expect(code).toMatch(/output\.m1 = /);
     }
     target.dispose();
