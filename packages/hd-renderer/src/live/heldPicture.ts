@@ -10,6 +10,7 @@ interface HeldSprite {
   frame: SpriteFrame;
   palette: string;
   indexedHousePaint?: boolean;
+  houseConverter?: boolean;
   push: number;
   shadow: boolean;
   flat: boolean;
@@ -71,6 +72,7 @@ export class HeldPicture {
       to.frame = from.frame;
       to.palette = from.palette;
       to.indexedHousePaint = from.indexedHousePaint;
+      to.houseConverter = from.houseConverter;
       to.push = from.push;
       to.shadow = from.shadow;
       to.flat = !!from.flat;
@@ -107,6 +109,7 @@ export class HeldPicture {
       );
       instance.opacity = sprite.opacity;
       instance.indexedHousePaint = sprite.indexedHousePaint;
+      instance.houseConverter = sprite.houseConverter;
       instance.infantryShadow = sprite.infantryShadow;
       instance.nativeDepth = sprite.nativeDepth;
       instance.depthWrite = sprite.depthWrite;

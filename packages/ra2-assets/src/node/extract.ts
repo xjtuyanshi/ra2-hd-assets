@@ -388,6 +388,7 @@ export function extractMap(opts: ExtractOptions): ExtractResult {
     const remapable = secBool(sec, 'Remapable', true);
     const s = addShp(id, shpCandidates(image, sec), src.customPalette(sec) ?? 'unit', remapable, {
       foundation,
+      ...(secBool(sec, 'TerrainPalette') ? { terrainPalette: true } : {}),
       ...(layerIds.length ? { layers: layerIds } : {}),
       ...(underIds.length ? { underlays: underIds } : {}),
     });

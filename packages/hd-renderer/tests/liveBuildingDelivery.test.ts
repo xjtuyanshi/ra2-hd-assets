@@ -176,9 +176,53 @@ describe('live delivery building image', () => {
         expect(cards.length).toBeGreaterThan(0);
         expect(cards.every((card) => card.palette === expected)).toBe(true);
         expect(cards.every((card) => card.indexedHousePaint === (palette !== 'iso'))).toBe(true);
+        // The engine draws building art through the house converter (unlit 240-254); a body resolved onto the iso
+        // palette stands for the TerrainPalette draw (cell converter, all lit), while anims keep the house converter.
+        // Shadows are never house art.
+        const anim = (card: SpriteInstance) => h.sprites.active!.frames.includes(card.frame);
+        expect(cards.every((card) => card.houseConverter === (anim(card) || palette !== 'iso'))).toBe(true);
+        expect(
+          h
+            .draw()
+            .cards.filter((card) => card.shadow)
+            .every((card) => !card.houseConverter),
+        ).toBe(true);
       }
     },
   );
+
+  it('draws a TerrainPalette=yes building picture lit like terrain, its anims through the house converter', () => {
+    // Shaped like the stock GALITE/CITY06 library records: sprite palette 'unit', terrainPalette recorded.
+    const h = deliveryView();
+    h.type.building!.terrainPalette = true;
+    for (const state of ['building', 'done'] as const) {
+      h.object.buildState = state;
+      h.object.buildupFrame = state === 'building' ? 0 : undefined;
+      const cards = h.draw().cards.filter((card) => !card.shadow);
+      const make = cards.filter((card) => h.sprites.make!.frames.includes(card.frame));
+      const body = cards.filter((card) => h.sprites.body!.frames.includes(card.frame));
+      const bib = cards.filter((card) => h.sprites.bib!.frames.includes(card.frame));
+      const active = cards.filter((card) => h.sprites.active!.frames.includes(card.frame));
+      if (state === 'building') expect(make.length).toBe(1);
+      else expect(body.length + bib.length + active.length).toBe(3);
+      for (const card of [...make, ...body, ...bib]) expect(card.houseConverter).toBe(false);
+      for (const card of active) expect(card.houseConverter).toBe(true);
+    }
+    // Damaged frame: the same body SHP, the same converter.
+    h.object.buildingFrame = 1;
+    h.object.buildingDamaged = true;
+    const damaged = h.draw().cards.find((card) => card.frame === h.sprites.body!.frames[1]);
+    expect(damaged?.houseConverter).toBe(false);
+    // A delivery image is the DeployingAnim and its door: anims, so house-converter art.
+    h.object.buildingFrame = 0;
+    h.object.buildingDamaged = false;
+    h.object.unloading = 'door';
+    const delivery = h.draw().cards.filter((card) => !card.shadow);
+    const deploy = delivery.find((card) => card.frame === h.sprites.deploy!.frames[0]);
+    const door = delivery.find((card) => card.frame === h.sprites.door!.frames[0]);
+    expect(deploy?.houseConverter).toBe(true);
+    expect(door?.houseConverter).toBe(true);
+  });
 
   it('keeps legacy building profiles only when the template is absent', () => {
     const h = deliveryView();
@@ -436,5 +480,44 @@ describe('live delivery building image', () => {
     h.object.buildState = 'building';
     delete h.type.building!.buildup;
     expect(h.draw().cards[2]!.frame).toBe(h.sprites.body!.frames[0]);
+  });
+});
+
+describe('map-cache building converter', () => {
+  it.each([false, true])('follows the sprite entry TerrainPalette flag (%s) for body and bib, not layers', (flag) => {
+    const frame = (x: number): SpriteFrame => ({ rect: [x, 0, 32, 64], offset: [-16, -48] });
+    const entry = (x: number, extra: Partial<SpriteEntry> = {}): SpriteEntry => ({
+      frames: [frame(x)],
+      canvas: [32, 64],
+      palette: 'unit',
+      remap: true,
+      ...extra,
+    });
+    const sprites: Record<string, SpriteEntry> = {
+      'building:LAMP': entry(0, {
+        foundation: [1, 1],
+        underlays: ['bib:LAMP'],
+        layers: ['anim:LAMP_A'],
+        ...(flag ? { terrainPalette: true } : {}),
+      }),
+      'bib:LAMP': entry(40),
+      'anim:LAMP_A': entry(80),
+    };
+    const pool = new SpritePool();
+    const view = Object.assign(Object.create(LiveView.prototype), {
+      cache: { manifest: { sprites }, paletteRow: new Map() },
+      spritePool: pool,
+    }) as {
+      mapBuildingSprites(object: LiveObject, visual: unknown, batch: Map<string, SpriteInstance[]>): void;
+    };
+    pool.begin();
+    const batch = new Map<string, SpriteInstance[]>();
+    const object = { x: 128, y: 128, z: 0, health: 1, buildState: 'done' } as LiveObject;
+    view.mapBuildingSprites(object, { sprite: 'building:LAMP', paletteKey: '' }, batch);
+    const cards = batch.get('map')!;
+    const of = (id: string) => cards.find((card) => card.frame === sprites[id]!.frames[0])!;
+    expect(of('building:LAMP').houseConverter).toBe(!flag);
+    expect(of('bib:LAMP').houseConverter).toBe(!flag);
+    expect(of('anim:LAMP_A').houseConverter).toBe(true);
   });
 });

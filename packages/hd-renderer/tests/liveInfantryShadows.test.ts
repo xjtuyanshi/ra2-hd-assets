@@ -68,6 +68,9 @@ describe('live infantry footprint', () => {
     expect(art.frame).toBe(body);
     expect(sh.anchor.toArray()).toEqual(art.anchor.toArray());
     expect(art.infantryShadow).toBeUndefined();
+    // Infantry draws through its house converter (unlit 240-254); its footprint is not house art.
+    expect(art.houseConverter).toBe(true);
+    expect(sh.houseConverter).toBeUndefined();
     entry.shadows[1] = { ...shadow, rect: [0, 0, 0, 0] };
     pool.begin();
     batch.clear();

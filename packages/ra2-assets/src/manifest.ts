@@ -9,7 +9,8 @@
  * Optional fields added by the extractor (packages/ra2-assets, all backwards compatible with version 1):
  * - HdCacheManifest.houses, HdCacheManifest.paletteSources, HdCacheManifest.lighting, HdCacheManifest.extractor,
  *   HdCacheManifest.mapSize, HdCacheManifest.visibleRect
- * - SpriteEntry.file, SpriteEntry.underlays, SpriteEntry.frameCount, SpriteEntry.sourceFrames, SpriteEntry.loop
+ * - SpriteEntry.file, SpriteEntry.underlays, SpriteEntry.frameCount, SpriteEntry.sourceFrames, SpriteEntry.loop,
+ *   SpriteEntry.terrainPalette
  * - MapObject.drawOffset, MapObject.subCell, MapObject.flat, MapObject.health, MapObject.lighting
  * - VoxelModel.file, VoxelModel.turretOffset, VoxelModel.turretVariants
  * - SpriteFrame.page (atlas page for multi-page atlases such as the type library's; absent = 0)
@@ -228,6 +229,12 @@ export interface SpriteEntry {
   sourceFrames?: number[];
   /** Added: the anim's art LoopStart/LoopEnd (source frame indices, inclusive), for renderers that animate later. */
   loop?: [start: number, end: number];
+  /**
+   * Added: a building body whose art has TerrainPalette=yes (lamp posts, CITY06). Recorded, not applied to the
+   * palette (the sprite keeps the unit palette, see LibraryBuilding.terrainPalette); renderers use it for the
+   * engine's converter choice (the body is lit like terrain: no house-converter unlit indices).
+   */
+  terrainPalette?: boolean;
 }
 
 export type MapObjectKind = 'building' | 'vehicle' | 'infantry' | 'aircraft' | 'tree' | 'overlay' | 'smudge';
