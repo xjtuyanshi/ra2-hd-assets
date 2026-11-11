@@ -48,6 +48,12 @@ import type { NativeRange, NativeTransactionHost, NativeWrite } from './memory';
  * start, well under this; the bound keeps a lost or unreadable counter from hiding the match.
  */
 export const STALE_BATTLEFIELD_HOLD_MS = 1500;
+/**
+ * A picture credit still unanswered after this long is sent again. The agent coalesces credits (one permission, never
+ * a second mailbox) and wakes the game's GUI thread on each, so a repeat is harmless; without it a credit whose
+ * capture was lost leaves the native picture frozen until some other path invalidates it.
+ */
+export const PICTURE_CREDIT_REISSUE_MS = 1000;
 
 export class NativeUnsupportedError extends Error {
   constructor(operation: string) {
@@ -245,6 +251,8 @@ export class NativeCore {
   private closed = false;
   private running = false;
   private creditOutstanding = false;
+  private creditIssuedAt = -Infinity;
+  private creditReissues = 0;
   private readonly unsubscribe: (() => void)[] = [];
   private readonly waiters = new Set<MirrorWaiter>();
   private renderPublicationWaiter: RenderPublicationWaiter | null = null;
@@ -878,7 +886,10 @@ export class NativeCore {
         };
       // Attached to a running match: ask for the repaint before the first HD state read, which can take seconds.
       this.repaintAttachedBattlefield();
-      this.mirrorWatchdog = setInterval(() => this.checkMirrorHealth(), 250);
+      this.mirrorWatchdog = setInterval(() => {
+        this.checkPictureCredit();
+        this.checkMirrorHealth();
+      }, 250);
       this.status('running', '已连接本机游戏');
       this.requestNextFrame();
     } catch (error) {
@@ -1533,12 +1544,23 @@ export class NativeCore {
   requestNextFrame(): void {
     if (!this.running || this.closed || this.creditOutstanding) return;
     this.creditOutstanding = true;
+    this.sendPictureCredit();
+  }
+  private sendPictureCredit(): void {
+    this.creditIssuedAt = performance.now();
     const count = this.hello?.limits.menuIdentity ? 0x80000001 : 1;
     const credit = this.options.drawJournal && this.hello?.limits.drawJournal ? encodeU32(count, 1) : encodeU32(count);
     void this.connection.request(NativeMessageType.Credit, credit).catch((error) => {
       this.creditOutstanding = false;
       this.fail(error instanceof Error ? error : new Error(String(error)));
     });
+  }
+  /** Re-sends a credit that has gone unanswered for PICTURE_CREDIT_REISSUE_MS (see there). */
+  private checkPictureCredit(): void {
+    if (!this.running || this.closed || !this.creditOutstanding) return;
+    if (performance.now() - this.creditIssuedAt < PICTURE_CREDIT_REISSUE_MS) return;
+    this.creditReissues++;
+    this.sendPictureCredit();
   }
   private input(kind: number, a: number, b: number, c: number): void {
     if (!this.running || this.closed) return;
@@ -1696,6 +1718,7 @@ export class NativeCore {
         },
         decode: this.connection.decodeDiagnostics(),
         frames: this.hostFrames,
+        creditReissues: this.creditReissues,
         inputQueueLength: this.inputQueue.length,
         inputOutstanding: this.inputOutstanding,
         ...this.movieState,

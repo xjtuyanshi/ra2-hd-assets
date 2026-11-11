@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NativeCore, NativeUnsupportedError, STALE_BATTLEFIELD_HOLD_MS } from '../../../src/adapter/native/core';
+import {
+  NativeCore,
+  NativeUnsupportedError,
+  STALE_BATTLEFIELD_HOLD_MS,
+  PICTURE_CREDIT_REISSUE_MS,
+} from '../../../src/adapter/native/core';
 import type { NativeCoreOptions, NativeGamePolicyFactory } from '../../../src/adapter/native/core';
 import type { NativeWebSocket } from '../../../src/adapter/native/connection';
 import {
@@ -1374,6 +1379,26 @@ describe('native core session and presenter lifecycle', () => {
     agent.picture(3, false);
     scheduled.shift()!();
     expect([...frames.mock.calls[1]![0].rgb565]).toEqual([0xf81f, 0xf81f]);
+  });
+  it('re-sends a picture credit left unanswered for a second, but never one already answered', async () => {
+    vi.useFakeTimers();
+    const frames = vi.fn();
+    const { core, agent, scheduled } = await started({ onFrame: frames });
+    expect(agent.count(NativeMessageType.Credit)).toBe(1);
+    await vi.advanceTimersByTimeAsync(PICTURE_CREDIT_REISSUE_MS - 300);
+    expect(agent.count(NativeMessageType.Credit)).toBe(1);
+    // The capture behind this credit was lost: without a repeat the native picture stays frozen.
+    await vi.advanceTimersByTimeAsync(600);
+    expect(agent.count(NativeMessageType.Credit)).toBe(2);
+    agent.picture(2);
+    scheduled.shift()!();
+    expect(frames).toHaveBeenCalledOnce();
+    // Answered: the next credit waits for the presenter, however long that takes.
+    await vi.advanceTimersByTimeAsync(5 * PICTURE_CREDIT_REISSUE_MS);
+    expect(agent.count(NativeMessageType.Credit)).toBe(2);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({ creditReissues: 1 });
+    core.requestNextFrame();
+    expect(agent.count(NativeMessageType.Credit)).toBe(3);
   });
   it('suppresses a queued frame after stopping and reports emulator-only operations as unsupported', async () => {
     const frames = vi.fn();
