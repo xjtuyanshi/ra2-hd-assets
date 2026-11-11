@@ -1156,6 +1156,7 @@ export async function startVmPage(canvas: HTMLCanvasElement, resumedSource?: Gam
           presentedFrames: () => presentedFrames,
           frameSize: () => (presenter.frame ? { width: presenter.frame.width, height: presenter.frame.height } : null),
           scene: () => hdCleanup?.scene() ?? null,
+          battle: () => hdCleanup?.battle?.() ?? null,
           publish: (actual, target) => toolbar.setGameSpeed(actual, target),
           observe: (record, diagnostics) => feelTelemetry?.speed(record, diagnostics.native),
         });

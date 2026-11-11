@@ -444,6 +444,11 @@ export type HdBridgeControl = (() => void) & {
   scene(): HdBridgeScene | null;
   /** Last observed faction art family; retained while a modal hides battlefield state. */
   menuSide?(): number | null;
+  /**
+   * Serial of the native battle surface on screen (see `battleSerial`): changes when a battle starts, stays through
+   * the original picture and the capacity fallback; null while no battle surface is shown or without the native host.
+   */
+  battle?(): number | null;
   /** Reuse the already sampled battle ownership without another state read. */
   battleActive?(): boolean;
   /** Only sampled when a frame interval is long, never in every pointer event. */
@@ -535,6 +540,11 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   let nativeMenuSurface = false;
   let nativeDialogSurface = false;
   let battleEpoch = 0;
+  /**
+   * Battles the native picture has entered (a battle-sized surface after a menu-sized one or none). Unlike battleEpoch,
+   * a recovery to the original picture inside the battle keeps it: speed telemetry tells battles apart by it.
+   */
+  let battleSerial = 0;
   let preparationMap: string | null = null;
   let preparationAsking = false;
   let preparationAskedAt = -Infinity;
@@ -1063,6 +1073,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       if (battleSurface) {
         if (!nativeBattleSurface) {
           battleEpoch++;
+          battleSerial++;
           nativeDrawQueue.length = 0;
         }
         nativeMenuSurface = false;
@@ -1913,6 +1924,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     menuSide: () => menuSide,
     // A failed mirror does not turn a real battlefield into a menu or release its input confinement.
     battleActive: () => (inBattle || (native && nativeBattleSurface)) && !nativeDialogSurface,
+    battle: () => (native && nativeBattleSurface && !stopped ? battleSerial : null),
     activity: () => live?.activity() ?? null,
   });
 }

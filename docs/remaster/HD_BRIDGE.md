@@ -905,9 +905,13 @@ slow" has its own measurement. In development the play page (with or without the
 - `logicSource`: `game` for the above; `host` when a native-host session has no current game counters (the native
   mirror is incomplete, e.g. in the original picture or the HD capacity fallback). `logicFps` then comes from the
   agent's frame-hook count (`logicFrames` in the native diagnostics; the hook runs only in the battle logic loop),
-  and `targetFps`, `gameSpeed` and `logicFrame` are the last values the game reported in that battle. A window that
-  mixes the two clocks, a window in which the hook did not advance, and hook counts after the game reported no
-  battle give no record;
+  and `targetFps`, `gameSpeed` and `logicFrame` are the last values the game reported in that battle. The bridge
+  tells battles apart by a serial of the native battle surface (`HdBridgeControl.battle`: it changes when a
+  battle-sized picture follows a menu-sized one and stays through the original picture and the capacity fallback);
+  in a battle the game has not reported yet (a loaded save shown in the original picture from its start) the three
+  are null and only the rate is given. A window that mixes the two clocks, a window across two battles, a window in
+  which the hook did not advance, and hook counts after the game reported no battle (without a battle serial) give
+  no record;
 - `presentedFps` (game frames the page presented), `hdFps`, `hdShown`, the HD view's quality `tier` and `hdPace`,
   the frame rate the view was held to at the end of the window (see "Frame pacing");
 - `objects` / `localObjects` and `map` from the bridge's last snapshot, `resolution` of the game frame, `gameSpeed`,

@@ -202,6 +202,7 @@ function telemetry(
   answers: Array<VmDiagnostics | Error>,
   post: SpeedEnvironment['post'] = async () => true,
   endpoint?: string | null,
+  battles?: Array<number | null>,
 ) {
   let run: () => void = () => undefined;
   const stopped = vi.fn();
@@ -223,6 +224,7 @@ function telemetry(
     scene: () => scene({ hdFrames: Math.round(at * 0.06) }),
     publish,
     observe,
+    ...(battles ? { battle: () => (battles.length > 1 ? battles.shift()! : battles[0]!) } : {}),
     environment: {
       now: () => at,
       wallClock: () => 1_800_000_000_000 + at,
@@ -301,6 +303,58 @@ describe('the telemetry loop', () => {
     await t.tick();
     await t.tick();
     expect(t.posted).toHaveLength(1);
+    t.handle.dispose();
+  });
+  it('never lends the setting and frame of one battle to the host-counted records of the next', async () => {
+    // Live: Transylv at frame 4029 in HD, quit, then a loaded save shown in the original picture from its start.
+    const lost = (at: number, hook: number) => diagnostics(at, 0, { game: null, native: { logicFrames: hook } });
+    const t = telemetry(
+      [
+        diagnostics(0, 4000, { native: { logicFrames: 9000 } }),
+        diagnostics(5000, 4029, { native: { logicFrames: 9029 } }),
+        lost(10_000, 9100),
+        lost(15_000, 9412),
+        lost(20_000, 9724),
+      ],
+      undefined,
+      undefined,
+      // One answer per sample: battle 1, then the loaded game (battle 2) from the third sample on.
+      [1, 1, 2, 2, 2],
+    );
+    await t.settle();
+    await t.tick();
+    expect(t.posted).toHaveLength(1);
+    // The window across the two battles is no window of either.
+    await t.tick();
+    expect(t.posted).toHaveLength(1);
+    await t.tick();
+    expect(t.posted[1]!.records[0]).toMatchObject({
+      logicFps: 62.4,
+      logicSource: 'host',
+      targetFps: null,
+      uncapped: false,
+      gameSpeed: null,
+      logicFrame: null,
+    });
+    // The toolbar shows the rate with an unknown target, not Transylv's.
+    expect(t.publish).toHaveBeenLastCalledWith(62.4, undefined);
+    await t.tick();
+    expect(t.posted[2]!.records[0]).toMatchObject({ logicSource: 'host', logicFrame: null, targetFps: null });
+    t.handle.dispose();
+  });
+  it('keeps the setting of the same battle for host-counted records after a capacity fallback', async () => {
+    const lost = (at: number, hook: number) => diagnostics(at, 0, { game: null, native: { logicFrames: hook } });
+    const t = telemetry(
+      [diagnostics(0, 1000, { native: { logicFrames: 4000 } }), lost(5000, 4100), lost(10_000, 4412)],
+      undefined,
+      undefined,
+      [3],
+    );
+    await t.settle();
+    await t.tick();
+    await t.tick();
+    expect(t.posted[0]!.records[0]).toMatchObject({ logicSource: 'host', targetFps: 62.5, logicFrame: 1000 });
+    expect(t.publish).toHaveBeenLastCalledWith(62.4, 62.5);
     t.handle.dispose();
   });
   it('retains local records and toolbar rates without probing a server sink when endpoint is null', async () => {
