@@ -67,7 +67,7 @@ import { selectVoxelTurretModel, selectedVoxelTurretIndex } from '../ra2/voxelTu
 import {
   addRefineryFoundation,
   harvesterRefineryBonus,
-  attachedBodyDepth,
+  attachedLayerDepth,
   buildingDepthProfile,
   type NativeSpriteDepth,
 } from '../ra2/nativeDepth';
@@ -3324,7 +3324,7 @@ export class LiveView {
         card.depthWrite = false;
       } else if (layer.key === 'UnderDoorAnim' || layer.key === 'UnderRoofDoorAnim') {
         card.nativeDepth = { mode: 'ground', bonus: 1 };
-      } else card.nativeDepth = attachedBodyDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
+      } else card.nativeDepth = attachedLayerDepth(nativeDepth, [dx, dy], dy * GROUND_DEPTH);
     }
     card.indexedHousePaint = !art.remap && art.palette !== 'iso';
     this.queue(batch, card);
@@ -3648,7 +3648,7 @@ export class LiveView {
           undefined,
           0.1,
         );
-        card.nativeDepth = nativeDepth;
+        card.nativeDepth = nativeDepth && attachedLayerDepth(nativeDepth, [0, 0], 0);
         list.push(card);
       }
     }
