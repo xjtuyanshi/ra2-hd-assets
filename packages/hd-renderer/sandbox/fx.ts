@@ -75,6 +75,9 @@
  *                             the rest as the clock passes their frames (frame sequences of one replay)
  *   &pipelines=async          compile render pipelines off the frame, as the game page does (HdRenderer
  *                             enableAsyncPipelines): wait for `__fx.live.hd.pendingPipelines === 0` before a capture
+ *   &outofsight=1             keep the view out of sight, as the game page does while it prepares a match: LiveView
+ *                             asks for the renderer's warm-up (HdRenderer.warm) and its frames are not for showing;
+ *                             for timing the warm-up's main-thread tasks, not for captures
  *
  * `performance.now` and `Math.random` are replaced by a controllable clock and a seeded generator before the renderer
  * exists, so the same query always renders the same picture. `window.__fx` exposes the view, a `step` helper (whole
@@ -141,6 +144,7 @@ const live = await LiveView.create(canvas, {
 });
 // As the game page shows it: pipelines compiled off the frame (objects appear when theirs is ready).
 if (params.get('pipelines') === 'async') live.hd.enableAsyncPipelines();
+if (params.get('outofsight') === '1') live.outOfSight = true;
 (window as unknown as { __hd: unknown }).__hd = {
   hd: live.hd,
   world: live.world,

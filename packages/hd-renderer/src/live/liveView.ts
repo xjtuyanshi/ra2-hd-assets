@@ -1910,6 +1910,8 @@ export class LiveView {
         this.hd.warm();
       }
     }
+    // A view shown while it still warms draws the rest in full warm frames: a slice frame has only some objects in it.
+    if (!this.hiddenFromSight && this.hd.warming) this.hd.finishWarm();
     this.hd.frame(dt);
     // Loads settle between frames, never inside one: what is still on its way now was missing from this frame. A
     // warm frame (HdRenderer.warm) is not a frame of the match either: it draws what is hidden and builds shaders.

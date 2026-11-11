@@ -68,6 +68,7 @@ import { LightField, type DynamicLight } from './lightField';
 import { Lighting, clearLightAt, noonFlatLuminance } from './lighting';
 import { applyMaterialFallbacks, failedPipelineMaterials, type PipelineHost } from './materialFallback';
 import { installAsyncPipelines, type AsyncPipelines } from './asyncPipelines';
+import { showOnly, warmGroups, WarmSlicer } from './warmSlices';
 import { resolveSceneLighting, type SceneLighting } from './sceneLighting';
 import { Mist, MIST_CAP } from './mist';
 import { ObjectLayer } from './objects';
@@ -682,6 +683,17 @@ const RAISED_DEVICE_LIMITS = [
 /** Frames between two checks for materials whose pipeline the GPU refused (about a quarter of a second). */
 const PIPELINE_HEALTH_FRAMES = 15;
 
+/**
+ * Time a slice frame of a warm-up should take (ms; see HdRenderer.warm). The original picture shares the thread while
+ * the view warms out of sight, so a slice leaves most of a 60 Hz frame to it; one material group is never split.
+ */
+const WARM_SLICE_MS = 12;
+/**
+ * The thread's own clock for that budget, taken when this module loads: a bench that replaces `performance.now` with
+ * a frozen scene clock (sandbox/fx.ts) must not make every slice look free.
+ */
+const wallNow: () => number = performance.now.bind(performance);
+
 /** A post graph that is not drawing: kept for a form the frame takes again (see HdRenderer.switchPipeline). */
 interface ParkedPipeline {
   pipeline: RenderPipeline;
@@ -740,6 +752,13 @@ export class HdRenderer {
   private softShadows: boolean | null = null;
   /** Forms of the post graph (with mist or without) still to be drawn out of sight (see warm); null while not warming. */
   private warmQueue: boolean[] | null = null;
+  /**
+   * The scene's objects still to be drawn a slice at a time before the full warm frames (see warm); null when none
+   * are left or the warm-up was asked to finish at once (finishWarm).
+   */
+  private warmSlicer: WarmSlicer | null = null;
+  /** The clock a slice frame's cost is measured with (the thread's wall clock; see wallNow). */
+  private warmClock: () => number = wallNow;
   /** The tier whose state is applied (see drawTier). */
   private drawnTier = 0;
   /** The top target may still hold art of an earlier frame and is drawn (cleared) once more. */
@@ -1907,6 +1926,11 @@ export class HdRenderer {
    * capture and the water mirrors even when nothing asks for them. The top pass joins the post graph now (it is drawn
    * only while top-layer art shows), and one frame is drawn per form of the post graph, with mist and without, so
    * the first top-layer art and the first mist of a match build nothing either.
+   *
+   * Building every shader of a running match in one frame took 2.0-2.2 s in one task, and the page's original picture
+   * stood still meanwhile (live, six players). So the objects are first drawn a few material groups per frame
+   * (warmSlices.ts), each frame about `WARM_SLICE_MS` long, and the full warm frames that follow find their graphs
+   * built. A host that shows the view before the warm-up is through calls finishWarm.
    */
   warm(): void {
     if (!this.pipeline || this.warmQueue) return;
@@ -1917,6 +1941,15 @@ export class HdRenderer {
     // The form in use comes last: its render targets are the ones that stay.
     const mist = this.mist.amount.value > 0;
     this.warmQueue = [!mist, mist];
+    this.warmSlicer = new WarmSlicer({ budgetMs: WARM_SLICE_MS, first: 1 });
+  }
+
+  /**
+   * Draw what is left of a warm-up as the full warm frames, without further slices: for a view that is about to be
+   * shown, where a frame with only some objects in it must not be seen.
+   */
+  finishWarm(): void {
+    this.warmSlicer = null;
   }
 
   /** Whether warm frames are still being drawn (see warm). */
@@ -1926,29 +1959,40 @@ export class HdRenderer {
 
   private renderWarmFrame(): void {
     const queue = this.warmQueue!;
-    this.warmMist = queue.shift()!;
+    const slice = this.warmSlicer?.next(warmGroups([this.scene, this.topScene])) ?? null;
+    if (slice === null) this.warmSlicer = null;
+    // A slice frame draws in the first form; the form is used up by the full warm frame after the last slice.
+    this.warmMist = slice ? queue[0]! : queue.shift()!;
     if (this.pipelineKey !== this.settingsPipelineKey()) this.switchPipeline();
     const hidden: Object3D[] = [];
+    let restore: (() => void) | null = null;
     try {
       // Poses and the visibility that follows from them first (shadow twins decide theirs while their matrices are
       // updated): what is flipped below is flipped back afterwards and nothing else changes in between.
       this.scene.updateMatrixWorld();
       this.topScene.updateMatrixWorld();
-      for (const root of [this.scene, this.topScene])
-        root.traverse((object) => {
-          if (object.visible) return;
-          object.visible = true;
-          hidden.push(object);
-        });
+      // The terrain draws its water mirrors, which draw the scene again: it stays in every slice (see showOnly).
+      if (slice) restore = showOnly([this.scene, this.topScene], slice, this.terrain?.mesh ? [this.terrain.mesh] : []);
+      else
+        for (const root of [this.scene, this.topScene])
+          root.traverse((object) => {
+            if (object.visible) return;
+            object.visible = true;
+            hidden.push(object);
+          });
       this.topEffectsStale = true;
       this.terrainDepth.warm();
       (this.terrain as { mirrorAtlas?: { warm(): void } | null } | undefined)?.mirrorAtlas?.warm();
+      const started = this.warmClock();
       this.renderPipeline();
+      this.warmSlicer?.report(this.warmClock() - started);
     } catch (error) {
       // Something that is hidden cannot be drawn yet: no warm-up then, and frames go on as before.
       console.warn('[HD] warm frame failed; shaders will be built when first used', error);
       queue.length = 0;
+      this.warmSlicer = null;
     } finally {
+      restore?.();
       for (const object of hidden) object.visible = false;
     }
     if (!queue.length) {

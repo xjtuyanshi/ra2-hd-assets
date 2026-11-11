@@ -228,7 +228,12 @@ with mist and without. The first request also puts the top-layer pass into the p
 top-layer art shows), so neither the first top-layer art nor the first mist of a match builds anything. `LiveView`
 asks for warm frames behind the loading screen and again when the opening's art is in, and does not count as
 settled while they run or while pipelines are pending; `EffectSpriteLayer.warm` adds one idle page mesh of every
-kind and pass for them to build.
+kind and pass for them to build. Before those full frames, the scene's drawable objects are drawn a few material
+groups per frame (`src/warmSlices.ts`: objects that build the same node graphs form a group; each slice is sized
+from the cost of the frame before to about 12 ms), because three builds node graphs on the drawing thread and one
+frame that built a running match's ~400 shaders took 2.0-2.2 s, freezing the original picture shown meanwhile. The
+full frames then find the graphs built. A view shown before the slices are through (`HdRenderer.finishWarm`, called
+by `LiveView` once it is in sight) draws the rest as full frames.
 
 **Quality tiers (`HdRenderer.setQualityTier`, `HdRenderer.QUALITY_TIERS`).** What the renderer gives up to hold a
 frame rate, least visible first; no tier changes the resolution of anything or the outline pass (see "Outlines"

@@ -35,6 +35,8 @@ function renderer(settings: Record<string, unknown> = {}) {
     softShadows: null,
     warmQueue: null,
     warmMist: null,
+    warmSlicer: null,
+    warmClock: () => performance.now(),
     mistInPipeline: false,
     mist: { amount: { value: 0 } },
     outlineSearch: 12,
@@ -56,6 +58,8 @@ function renderer(settings: Record<string, unknown> = {}) {
     renderPipeline(): void;
     renderWarmFrame(): void;
     pipeline: object;
+    warmSlicer: object | null;
+    warmClock: () => number;
     pipelineKey: string;
     pipelineNodes: object[];
     mainPasses: { renderTarget: { dispose(): void } }[];
@@ -98,7 +102,11 @@ function renderer(settings: Record<string, unknown> = {}) {
       top: internal.topEffectsStale,
     });
   });
-  return { hd, internal, build, render, drawn, watched, scene, topScene, nodes, state, released };
+  /** Warm frames until the warm-up is through: the slice frames first, then one full frame per form. */
+  const warmThrough = () => {
+    for (let i = 0; hd.warming && i < 1000; i++) internal.renderWarmFrame();
+  };
+  return { hd, internal, build, render, drawn, watched, scene, topScene, nodes, state, released, warmThrough };
 }
 
 describe('quality tiers of the frame-time safeguard', () => {
@@ -214,7 +222,7 @@ describe('quality tiers of the frame-time safeguard', () => {
   });
 
   it('warms one frame per form of the post graph, with everything hidden made visible and the top pass in', () => {
-    const { hd, internal, build, drawn, watched, scene, topScene, state } = renderer();
+    const { hd, internal, build, drawn, watched, scene, topScene, state, warmThrough } = renderer();
     internal.topEffectsPass = false;
     const before = internal.pipeline;
     const shown = new Mesh();
@@ -244,12 +252,18 @@ describe('quality tiers of the frame-time safeguard', () => {
     // The governor may ask for a tier meanwhile: tiers change no graph.
     hd.setQualityTier(1);
     expect(internal.drawnTier).toBe(1);
-    for (let i = 0; i < 2; i++) internal.renderWarmFrame();
+    warmThrough();
     expect(hd.warming).toBe(false);
-    expect(drawn.map((frame) => frame.mist)).toEqual([true, false]);
-    expect(drawn[0]!.pipeline).not.toBe(clear);
-    expect(drawn[1]!.pipeline).toBe(clear);
-    for (const frame of drawn) {
+    // The slices (see the slicing test) draw in the first form, then come the two full frames.
+    const full = drawn.slice(-2);
+    const slices = drawn.slice(0, -2);
+    expect(slices.length).toBeGreaterThan(0);
+    for (const frame of slices) expect(frame.mist).toBe(true);
+    expect(full.map((frame) => frame.mist)).toEqual([true, false]);
+    expect(full[0]!.pipeline).not.toBe(clear);
+    expect(full[0]!.pipeline).toBe(slices[0]!.pipeline);
+    expect(full[1]!.pipeline).toBe(clear);
+    for (const frame of full) {
       // Hidden meshes, the children of a hidden group and top-layer art were all drawn; the top pass was forced.
       expect(frame.visible).toEqual([true, true, true, true]);
       expect(frame.top).toBe(true);
@@ -262,8 +276,8 @@ describe('quality tiers of the frame-time safeguard', () => {
       true,
       false,
     ]);
-    expect(state.terrainDepth.warm).toHaveBeenCalledTimes(2);
-    expect(state.terrain.mirrorAtlas.warm).toHaveBeenCalledTimes(2);
+    expect(state.terrainDepth.warm).toHaveBeenCalledTimes(drawn.length);
+    expect(state.terrain.mirrorAtlas.warm).toHaveBeenCalledTimes(drawn.length);
     expect(hd.quality).toBe(1);
     // The misty graph was built once and is parked; the one in use was taken back from where it was parked.
     expect(build).toHaveBeenCalledTimes(2);
@@ -274,19 +288,20 @@ describe('quality tiers of the frame-time safeguard', () => {
     hd.warm();
     hd.warm();
     expect(internal.warmQueue).toEqual([true, false]);
-    for (let i = 0; i < 2; i++) internal.renderWarmFrame();
+    warmThrough();
     expect(build).toHaveBeenCalledTimes(2);
     expect(internal.pipeline).toBe(clear);
   });
 
   it('warms a misty map the other way round: the clear form first, the misty one in use last', () => {
-    const { hd, internal, drawn, state } = renderer();
+    const { hd, internal, drawn, state, warmThrough } = renderer();
     state.mist.amount.value = 0.05;
     internal.buildPipeline();
     const misty = internal.pipeline;
     hd.warm();
     expect(internal.warmQueue).toEqual([false, true]);
-    for (let i = 0; i < 2; i++) internal.renderWarmFrame();
+    warmThrough();
+    // An empty scene has no slice: just the two full frames.
     expect(drawn.map((frame) => frame.mist)).toEqual([false, true]);
     expect(internal.pipeline).toBe(misty);
     expect(internal.mistInPipeline).toBe(true);
@@ -311,5 +326,77 @@ describe('quality tiers of the frame-time safeguard', () => {
     expect(internal.pipeline).toBe(before);
     expect(internal.mistInPipeline).toBe(false);
     warn.mockRestore();
+  });
+
+  it('builds a running match a few material groups per frame, then draws the full warm frames', () => {
+    const { hd, internal, render, drawn, watched, scene, state } = renderer();
+    // Thirty objects with materials of their own (as many kinds of art), half of them hidden, one inside a hidden
+    // group; three more share one material and build together.
+    const meshes: Mesh[] = [];
+    const hiddenGroup = new Group();
+    hiddenGroup.visible = false;
+    scene.add(hiddenGroup);
+    for (let i = 0; i < 30; i++) {
+      const mesh = new Mesh();
+      mesh.visible = i % 2 === 0;
+      (i === 7 ? hiddenGroup : scene).add(mesh);
+      meshes.push(mesh);
+    }
+    const shared = new Mesh().material;
+    for (let i = 0; i < 3; i++) {
+      const mesh = new Mesh(undefined, shared);
+      scene.add(mesh);
+      meshes.push(mesh);
+    }
+    watched.push(...meshes);
+    const before = meshes.map((mesh) => mesh.visible);
+    // A frame costs 3 ms per object drawn in it (what three's first builds cost, scaled down).
+    let clock = 0;
+    internal.warmClock = () => clock;
+    render.mockImplementation(() => {
+      const visible = meshes.map((mesh) => mesh.visible && (mesh.parent?.visible ?? true));
+      drawn.push({ mist: internal.mistInPipeline, pipeline: internal.pipeline, visible, top: true });
+      clock += 3 * visible.filter(Boolean).length;
+    });
+    hd.warm();
+    internal.renderWarmFrame();
+    // The first frame draws one group, not the whole match.
+    expect(drawn[0]!.visible.filter(Boolean).length).toBe(1);
+    for (let i = 0; hd.warming && i < 100; i++) internal.renderWarmFrame();
+    expect(hd.warming).toBe(false);
+    const slices = drawn.slice(0, -2);
+    const full = drawn.slice(-2);
+    // 31 groups (30 own materials, 1 shared by three) at 12 ms: about four groups a frame, each object in one slice.
+    expect(slices.length).toBeGreaterThanOrEqual(8);
+    expect(slices.length).toBeLessThanOrEqual(12);
+    for (const frame of slices) expect(frame.visible.filter(Boolean).length * 3).toBeLessThanOrEqual(18);
+    for (let m = 0; m < meshes.length; m++) expect(slices.filter((frame) => frame.visible[m]).length).toBe(1);
+    // The three objects of the shared material were drawn in the same slice.
+    const sharedSlice = slices.findIndex((frame) => frame.visible[30]);
+    expect(slices[sharedSlice]!.visible.slice(30)).toEqual([true, true, true]);
+    // The full frames still draw everything, as before, and the scene is left as it was.
+    for (const frame of full) expect(frame.visible.every(Boolean)).toBe(true);
+    expect(meshes.map((mesh) => mesh.visible)).toEqual(before);
+    expect(hiddenGroup.visible).toBe(false);
+    expect(state.terrainDepth.warm).toHaveBeenCalledTimes(slices.length + 2);
+  });
+
+  it('draws the rest of a warm-up in full frames once the host asks it to finish', () => {
+    const { hd, internal, drawn, watched, scene } = renderer();
+    for (let i = 0; i < 20; i++) {
+      const mesh = new Mesh();
+      scene.add(mesh);
+      watched.push(mesh);
+    }
+    hd.warm();
+    internal.renderWarmFrame();
+    expect(drawn[0]!.visible.filter(Boolean).length).toBe(1);
+    hd.finishWarm();
+    internal.renderWarmFrame();
+    internal.renderWarmFrame();
+    expect(hd.warming).toBe(false);
+    expect(drawn.length).toBe(3);
+    expect(drawn[1]!.visible.every(Boolean)).toBe(true);
+    expect(drawn[2]!.visible.every(Boolean)).toBe(true);
   });
 });
