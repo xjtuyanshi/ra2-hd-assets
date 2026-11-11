@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Group } from 'three/webgpu';
-import { painterObject } from '../src/ra2/painterOrder';
+import { bodyTemplatePush } from '../src/ra2/nativeDepth';
+import { painterObject, spritePainterBias } from '../src/ra2/painterOrder';
 import type { SpriteInstance } from '../src/ra2/sprites';
 import type { LibraryType } from '../../ra2-assets/src/library';
 import type { SpriteEntry, SpriteFrame } from '../../ra2-assets/src/manifest';
@@ -199,6 +200,50 @@ describe('live delivery building image', () => {
     expect(layer.nativeDepth).toMatchObject({ mode: 'body', origin: [168, 371], base: 12, offset: [12, -6] });
     expect(layer.anchor.x - body.anchor.x).toBeCloseTo(0);
     expect(layer.anchor.z - body.anchor.z).toBeCloseTo(-0.4);
+  });
+
+  it('keeps an attached layer in front of its own body when its template lookup lands one texel off', () => {
+    // Body and layer frames of a Weather Control Device pair (GAWETH and GAWETH_G): same draw point, different
+    // offsets and sizes. Only the rectangles are used, no art.
+    const h = deliveryView();
+    h.sprites.body!.frames[0] = { rect: [0, 0, 111, 105], offset: [-56, -32], page: 0 };
+    h.sprites.active!.frames[0] = { rect: [200, 0, 107, 94], offset: [-52, -32], page: 0 };
+    const cards = h.draw().cards;
+    const body = cards[2]!;
+    const layer = cards[3]!;
+    expect(body.frame).toBe(h.sprites.body!.frames[0]);
+    expect(layer.frame).toBe(h.sprites.active!.frames[0]);
+    expect(layer.anchor.equals(body.anchor)).toBe(true);
+    // Synthetic template with BUILDNGZ's neighbour steps inside a shape: 0 or 1 unit per row, 2 per column.
+    const { width, height } = { width: 396, height: 477 };
+    const bytes = new Uint8Array(width * height);
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++)
+        bytes[y * width + x] = (Math.max(-100, Math.min(100, Math.floor((400 - y) / 2))) + 2 * (x & 1)) & 255;
+    // CPU form of cardDepthNode's native body branch (cardDepth.ts) plus the painter tie-break: larger is nearer.
+    const nearness = (card: SpriteInstance, x: number, y: number) => {
+      const native = card.nativeDepth!;
+      if (native.mode !== 'body') throw new Error('Expected a body-mode native profile');
+      const [ox, oy] = native.offset ?? [0, 0];
+      return (
+        bodyTemplatePush(bytes, width, height, native.origin, native.base, x + ox, y + oy) -
+        (native.anchorPush ?? 0) +
+        spritePainterBias(card.painter, card.painterPart)
+      );
+    };
+    // The two cards interpolate their own quads, so at a screen pixel on (or within float error of) a native pixel
+    // boundary their floor() can pick neighbouring texels; at the 2.5 view that is every fifth device row and column.
+    const eps = 1e-4;
+    const near = [-eps, eps];
+    let worst = Infinity;
+    for (let y = -31; y < 62; y++)
+      for (let x = -51; x < 55; x++)
+        for (const by of near)
+          for (const bx of near)
+            for (const ly of near)
+              for (const lx of near)
+                worst = Math.min(worst, nearness(layer, x + lx, y + ly) - nearness(body, x + bx, y + by));
+    expect(worst).toBeGreaterThan(0);
   });
 
   it('draws DoorAnim with native ground depth without writing unit-occluding depth', () => {

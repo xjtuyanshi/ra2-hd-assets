@@ -211,7 +211,14 @@ for HD internal/overlap ordering. Their sprite child pass and cloned voxel mater
 so opaque-queue precedence cannot put units before the door; airborne and shadow materials retain their physical
 paths. The native ground-unit sprite child shares the main instance buffers and fireball capture codes/registration.
 Attached Active/Idle/Special/Production/Super parts, lights and conveyor cards inherit their owner's body template
-origin and clipped frame baseline, with the existing small component bias. Draw offsets, including `yDrawOffset`,
+origin and clipped frame baseline, with the existing small component bias. Attached anim layers (and the layers of
+library-less map buildings) are in addition `ATTACHED_LAYER_FRONT_ROWS = 4` units in front of that profile
+(`attachedLayerDepth`, `src/ra2/nativeDepth.ts`): the layer and body cards interpolate separate quads, so on a native
+pixel boundary their `floor()` lookups can land on neighbouring template texels, which inside BUILDNGZ differ by up
+to 1 unit per row and 2 per column. With only the component bias the body won those pixels and showed through as
+rows of 1-pixel dashes (the ready Weather Control Device globe). The engine draws these anims test-only with their
+art ZAdjust (GAWETH_E..H -20, others up to -200); the full value is not applied because HD units depth-test against
+the layer, whereas the engine orders test-only units and anims by traversal. Draw offsets, including `yDrawOffset`,
 are measured back from the owner draw anchor so a shifted animation cannot invent a nearer depth surface.
 
 Ground units use the native upright-card rule:

@@ -101,6 +101,33 @@ export function attachedBodyDepth(
   return { ...body, offset, anchorPush };
 }
 
+/**
+ * Native Z units (screen rows) an attached building image (Active/Idle/Special/Production/Super anims, and the
+ * layers of library-less map buildings) stands in front of its own body.
+ *
+ * The layer and the body are separate cards that interpolate their own quads, so at a screen pixel on, or within
+ * float error of, a native pixel boundary their floor() template lookups can pick neighbouring texels (at the 2.5
+ * view every fifth device row and column falls exactly on one). Inside a BUILDNGZ shape neighbouring samples
+ * differ by up to 1 unit per row and 2 per column, which beat the 0.001 painter tie-break: the body won those
+ * pixels and showed through the ready Weather Control Device's globe as rows of dark 1-pixel dashes. Four units
+ * exceed a row step plus a column step, so a one-texel miss in any direction can no longer let the body through.
+ *
+ * The engine draws these anims test-only with their art ZAdjust (GAWETH_E..H: -20, other layers up to -200), so it
+ * never shows its body through them either. The full ZAdjust is not used here: HD units also depth-test against the
+ * layer, while the engine orders test-only units and anims by traversal, so a -200 layer would hide units standing
+ * in front of the building.
+ */
+export const ATTACHED_LAYER_FRONT_ROWS = 4;
+
+/** attachedBodyDepth plus ATTACHED_LAYER_FRONT_ROWS of nearness over the owner body. */
+export function attachedLayerDepth(
+  body: NativeSpriteDepth,
+  offset: readonly [number, number],
+  anchorPush: number,
+): NativeSpriteDepth {
+  return attachedBodyDepth(body, offset, anchorPush - ATTACHED_LAYER_FRONT_ROWS * GROUND_DEPTH);
+}
+
 export function bodyTemplatePush(
   bytes: ArrayLike<number>,
   width: number,
