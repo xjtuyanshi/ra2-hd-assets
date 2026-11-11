@@ -24,7 +24,6 @@ import {
   cameraFar,
   cameraNear,
   clamp,
-  cos,
   dFdx,
   dFdy,
   exp,
@@ -187,6 +186,61 @@ function instanceRank(s: SpriteInstance): number {
 
 /** Draw passes of a sprite layer: the main one, and the enhanced look's ground passes (SpriteLayer.groundPasses). */
 type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent';
+
+/**
+ * Largest penumbra radius (1x texels) of the enhanced look's shadow softness. Six texels laid the shadows of thin parts
+ * (a crane jib, a chimney) out as faint smears; three keeps a soft golden-hour edge on a still solid shadow.
+ */
+export const SHADOW_PENUMBRA_TEXELS = 3;
+/** Penumbra taps (unit radius): eight on two rings, as the shader samples them around the filtered coverage. */
+const PENUMBRA_TAPS: readonly (readonly [number, number])[] = Array.from({ length: 8 }, (_, i) => {
+  const angle = (i / 8) * Math.PI * 2 + 0.4;
+  const r = i % 2 === 0 ? 1 : 0.55;
+  return [Math.cos(angle) * r, Math.sin(angle) * r] as const;
+});
+
+/**
+ * Penumbra radius (1x texels) of a shadow point `offset` (world x/z from the draw point) under softness `softness`: it
+ * grows with the distance from the object's base, a building's foundation (`centre`, `half`) or the draw point.
+ */
+export function shadowPenumbraRadius(
+  offset: readonly [number, number],
+  softness: number,
+  foundation?: { centre: readonly [number, number]; half: readonly [number, number] },
+): number {
+  const dx = Math.max(0, Math.abs(offset[0] - (foundation?.centre[0] ?? 0)) - (foundation?.half[0] ?? 0));
+  const dz = Math.max(0, Math.abs(offset[1] - (foundation?.centre[1] ?? 0)) - (foundation?.half[1] ?? 0));
+  return Math.min(SHADOW_PENUMBRA_TEXELS, softness * Math.hypot(dx, dz) * 2.2);
+}
+
+/**
+ * CPU twin of the softened shadow coverage at `texel` (1x atlas texels, texel centres at k + 0.5): the filtered
+ * `coverage` there averaged with the eight penumbra taps, each reading the mask `occupied(kx, ky)` (1 or 0)
+ * bilinearly, and blended in as the radius grows.
+ */
+export function shadowPenumbraCoverage(
+  occupied: (kx: number, ky: number) => number,
+  texel: readonly [number, number],
+  coverage: number,
+  radius: number,
+): number {
+  let soft = Math.min(1, Math.max(0, coverage));
+  for (const [dx, dy] of PENUMBRA_TAPS) {
+    const ax = texel[0] + dx * radius - 0.5;
+    const ay = texel[1] + dy * radius - 0.5;
+    const kx = Math.floor(ax);
+    const ky = Math.floor(ay);
+    const fx = ax - kx;
+    const fy = ay - ky;
+    const top = occupied(kx, ky) * (1 - fx) + occupied(kx + 1, ky) * fx;
+    const bottom = occupied(kx, ky + 1) * (1 - fx) + occupied(kx + 1, ky + 1) * fx;
+    soft += top * (1 - fy) + bottom * fy;
+  }
+  const t = Math.min(1, Math.max(0, (radius - 0.3) / 1.2));
+  const w = t * t * (3 - 2 * t);
+  const c = Math.min(1, Math.max(0, coverage));
+  return c + (soft / (PENUMBRA_TAPS.length + 1) - c) * w;
+}
 
 /**
  * How far (world units along the view) the enhanced look's 'over' pass pulls SHP shadows and wet reflections in front
@@ -877,23 +931,38 @@ class SpriteGraph {
             const alpha: ShaderNode = shadowCoverage.mul(shadowOpacity);
             result.assign(vec4(0, 0, 0, alpha));
           });
-          // Shadows grow a penumbra with distance from their object's base (golden-hour softness).
+          // Shadows grow a penumbra with distance from their object's base (golden-hour softness): CPU twin
+          // shadowPenumbraRadius / shadowPenumbraCoverage. The base is a building's foundation (its walls) or the
+          // draw point; measured from the foundation centre, a yard's shadow was blurred to the maximum right at its
+          // walls. The filtered coverage is averaged with eight taps on two rings, each tap reading the 1x mask
+          // bilinearly: nearest-texel taps laid eight hard copies of the mask over each other, which showed as
+          // stair-stepped bands along every edge (live construction yards on XMP27T8). (Turning the rings per pixel
+          // traded the bands for visible grain at 1:1.)
           If(
             isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowSoftness.greaterThan(1e-4)),
             () => {
               const offset: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
-              const reach: ShaderNode = length(offset.sub(baseCentre));
-              const radius: ShaderNode = look.shadowSoftness.mul(reach).mul(2.2).min(6);
-              const soft: ShaderNode = float(0).toVar();
-              for (let i = 0; i < 8; i++) {
-                const angle = (i / 8) * Math.PI * 2 + 0.4;
-                const r = i % 2 === 0 ? 1 : 0.55;
-                const k: ShaderNode = floor(texel.add(vec2(cos(angle), sin(angle)).mul(radius.mul(r))));
+              const reach: ShaderNode = length(max(offset.sub(baseCentre).abs().sub(foundationHalf), vec2(0, 0)));
+              const radius: ShaderNode = look.shadowSoftness.mul(reach).mul(2.2).min(SHADOW_PENUMBRA_TEXELS);
+              const occupiedAt = (k: ShaderNode): ShaderNode => {
                 const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
-                const occupied: ShaderNode = step(0.5, texture(atlasPage, k.add(0.5).div(atlasSize)).r.mul(255));
-                soft.addAssign(occupied.mul(inside.x).mul(inside.y));
+                const index: ShaderNode = texture(atlasPage, k.add(0.5).div(atlasSize)).r.mul(255);
+                return step(0.5, index).mul(inside.x).mul(inside.y);
+              };
+              const soft: ShaderNode = clamp(coverage, 0, 1).toVar();
+              for (const [dx, dy] of PENUMBRA_TAPS) {
+                const at: ShaderNode = texel.add(vec2(dx, dy).mul(radius)).sub(0.5);
+                const k0: ShaderNode = floor(at);
+                const f: ShaderNode = at.sub(k0);
+                const top: ShaderNode = mix(occupiedAt(k0), occupiedAt(k0.add(vec2(1, 0))), f.x);
+                const bottom: ShaderNode = mix(occupiedAt(k0.add(vec2(0, 1))), occupiedAt(k0.add(vec2(1, 1))), f.x);
+                soft.addAssign(mix(top, bottom, f.y));
               }
-              const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
+              const blended: ShaderNode = mix(
+                clamp(coverage, 0, 1),
+                soft.div(PENUMBRA_TAPS.length + 1),
+                smoothstep(0.3, 1.5, radius),
+              );
               result.assign(vec4(0, 0, 0, blended.mul(shadowOpacity)));
             },
           );
