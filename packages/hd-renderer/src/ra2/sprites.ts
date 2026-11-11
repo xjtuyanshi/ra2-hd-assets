@@ -108,6 +108,11 @@ export interface SpriteInstance {
   opacity?: number;
   /** Infantry's inline SHP footprint stays at the draw point with a solid contact core in every look. */
   infantryShadow?: boolean;
+  /**
+   * Infantry footprint of art whose HD body page has no contact shadow of its own (ra2/infantryArt.ts): an enhanced
+   * look never draws it lighter than its other shadows (infantryFootprintOpacity).
+   */
+  infantryBare?: boolean;
   /** Lay the art on the ground as a decal (ore, smudges, flat overlays) instead of a camera-facing card. */
   flat?: boolean;
   /** Flat decals only: 0..1 ground-crystal relighting, highlights and animated sparkle; absent = unchanged art. */
@@ -211,6 +216,16 @@ export const INFANTRY_SHADOW_OPACITY = 1;
  * 0.4 -> 0.47 / 0.42, 0.2 -> 0.55 / 0.50, 0 (the body page's shadow alone) -> 0.62 / 0.56.
  */
 export const INFANTRY_SHADOW_SOFT_OPACITY = 0.35;
+/**
+ * Core opacity of an infantry footprint under a look with footprint opacity `look` and shadow darkness `darkness`.
+ * The soft footprint opacity counts on the HD body page's own contact shadow; art without one (`bare`, animals) would
+ * keep almost no shadow, so it takes at least the look's opacity for every other shadow (the engine's half shadow
+ * times the darkness, as buildings and vehicles get). The faithful looks (1) stay solid for all.
+ */
+export function infantryFootprintOpacity(look: number, bare: boolean, darkness = 1): number {
+  return bare ? Math.max(look, Math.min(0.9, darkness * ENGINE_SHADOW_OPACITY)) : look;
+}
+
 /**
  * Coverage ramp of infantry contact shadows. The original draws them as solid palette-index-12 blobs inside the body
  * frames; the filtered/upscaled mask is only ~0.5 at the blob's own edge, so a linear ramp left half of every blob
@@ -852,7 +867,14 @@ class SpriteGraph {
           If(
             isShadow.greaterThan(0.5).and(isInfantryShadow.greaterThan(0.5)).and(look.infantryShadow.notEqual(1)),
             () => {
-              result.assign(vec4(0, 0, 0, infantryAlpha.mul(look.infantryShadow).min(1)));
+              // infantryFootprintOpacity: art without its own contact shadow (code 2) keeps the look's shadow opacity.
+              const bare: ShaderNode = step(1.5, aFlags.w);
+              const opacity: ShaderNode = mix(
+                look.infantryShadow,
+                max(look.infantryShadow, look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9)),
+                bare,
+              );
+              result.assign(vec4(0, 0, 0, infantryAlpha.mul(opacity).min(1)));
             },
           );
           const shadowOpacity: ShaderNode = look.shadowDarkness.mul(SHADOW_OPACITY).min(0.9);
@@ -1366,7 +1388,9 @@ export class SpriteLayer {
           instanceCode(s) === 1
             ? Math.max(0, Math.min(1, s.glint ?? 0))
             : s.shadow && s.infantryShadow
-              ? 1
+              ? s.infantryBare
+                ? 2
+                : 1
               : s.flat || s.shadow || s.kind
                 ? 0
                 : s.painter

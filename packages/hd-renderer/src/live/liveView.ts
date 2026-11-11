@@ -1,3 +1,4 @@
+import { hdInfantryPageIsBare } from '../ra2/infantryArt';
 import {
   BoxGeometry,
   Color,
@@ -3497,6 +3498,7 @@ export class LiveView {
     if (shadow && shadow.rect[2] > 0 && shadow.rect[3] > 0) {
       const instance = this.spritePool.take(anchor, shadow, palette, 0, true, true);
       instance.infantryShadow = true;
+      instance.infantryBare = hdInfantryPageIsBare(type.image) || undefined;
       this.queue(batch, instance);
     }
     const light = objectLight('infantry');
