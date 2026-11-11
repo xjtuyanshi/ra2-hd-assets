@@ -1,5 +1,10 @@
 # AI setup runbook: Build 12 HD on a Windows PC (port, not yet verified)
 
+**For a friend's independent Windows port, start with [START_HERE.md](START_HERE.md).**
+It defines the friend's account and local-only work scope, superseding this runbook's
+original-author login/push instructions for that use. The "HD cache" below is the
+finished HD resource pack to download and restore, not art to generate again.
+
 This file is written for a coding agent on the owner's Windows PC. Read it together with
 [AI_SETUP.md](AI_SETUP.md), which is the verified macOS runbook; this file only says what
 is the same on Windows, what is different, and what still has to be built.

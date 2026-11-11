@@ -10,6 +10,10 @@ the same backup; this runbook supersedes it where they differ.
 
 For the owner's Windows PC, see [WINDOWS_SETUP.md](WINDOWS_SETUP.md) (port plan, not yet verified).
 
+For a friend's independent Windows port, use [START_HERE.md](START_HERE.md) first.
+Its account and local-only work scope replaces this file's original-author login/push
+instructions for that use; only the resource restoration sections carry over to Windows.
+
 ## 0. Ground rules for the agent
 
 - Never download game files. The owner supplies their own Yuri's Revenge copy (step 9).
