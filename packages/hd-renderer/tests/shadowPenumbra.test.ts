@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { SHADOW_PENUMBRA_TEXELS, shadowPenumbraCoverage, shadowPenumbraRadius } from '../src/ra2/sprites';
+import {
+  SHADOW_PENUMBRA_TEXELS,
+  SHADOW_QUAD_PAD_TEXELS,
+  shadowPenumbraCoverage,
+  shadowPenumbraRadius,
+  shadowQuadPad,
+} from '../src/ra2/sprites';
 
 describe('enhanced shadow penumbra', () => {
   it("grows from a building's walls, not from its foundation centre", () => {
@@ -43,5 +49,47 @@ describe('enhanced shadow penumbra', () => {
     // A solid interior stays solid; a small radius keeps the filtered coverage alone.
     expect(shadowPenumbraCoverage(occupied, [10, 4], 1, 3)).toBe(1);
     expect(shadowPenumbraCoverage(occupied, [19.6, 4], 0.4, 0.2)).toBe(0.4);
+  });
+});
+
+describe('enhanced shadow quad margin', () => {
+  // The filtered coverage (quadratic B-spline over the texel centres, as frameCoverage) of a 1-D mask.
+  const spline = (u: number) => {
+    const d = Math.abs(u);
+    return d < 0.5 ? 0.75 - d * d : d < 1.5 ? 0.5 * (1.5 - d) ** 2 : 0;
+  };
+
+  it('draws the whole softened shadow of art that fills its trimmed frame', () => {
+    // A trimmed shadow frame: the art fills texels 0..11 of a 12-texel-wide rect and touches its right edge (x = 12).
+    const width = 12;
+    const occupied = (kx: number) => (kx >= 0 && kx < width ? 1 : 0);
+    const bspline = (x: number) => {
+      let sum = 0;
+      for (let k = Math.floor(x) - 2; k <= Math.floor(x) + 2; k++) sum += occupied(k) * spline(x - k - 0.5);
+      return sum;
+    };
+    // Far from the object's base the penumbra takes its widest radius; past the right edge the shadow fades out.
+    const at = (x: number) => shadowPenumbraCoverage(occupied, [x, 3.5], bspline(x), SHADOW_PENUMBRA_TEXELS);
+    let reach = width;
+    for (let x = width; x < width + 10; x += 0.01) if (at(x) > 1e-9) reach = x;
+    // The soft edge reaches well past the rect: the old quad (the rect itself) cut it off at x = 12 with a straight
+    // line at about half the shadow's strength, the arrowheads seen on XMP27T8.
+    expect(at(width)).toBeGreaterThan(0.2);
+    expect(reach).toBeGreaterThan(width + SHADOW_PENUMBRA_TEXELS);
+    // The widened quad holds all of it.
+    expect(reach).toBeLessThanOrEqual(width + SHADOW_QUAD_PAD_TEXELS);
+    expect(at(width + SHADOW_QUAD_PAD_TEXELS)).toBe(0);
+  });
+
+  it('widens only softened SHP shadows of the enhanced look', () => {
+    const shadow = { shadow: true };
+    expect(shadowQuadPad(shadow, true)).toBe(SHADOW_QUAD_PAD_TEXELS);
+    // The faithful look keeps every quad exactly on its frame rect.
+    expect(shadowQuadPad(shadow, false)).toBe(0);
+    // Infantry footprints, upright cards, contact shades and wet reflections keep their quads.
+    expect(shadowQuadPad({ shadow: true, infantryShadow: true }, true)).toBe(0);
+    expect(shadowQuadPad({ shadow: false }, true)).toBe(0);
+    expect(shadowQuadPad({ shadow: false, kind: 'contact' }, true)).toBe(0);
+    expect(shadowQuadPad({ shadow: false, kind: 'reflection' }, true)).toBe(0);
   });
 });

@@ -211,6 +211,27 @@ type GroundPass = 'main' | 'under' | 'over' | 'readOnly' | 'unit' | 'translucent
  * (a crane jib, a chimney) out as faint smears; three keeps a soft golden-hour edge on a still solid shadow.
  */
 export const SHADOW_PENUMBRA_TEXELS = 3;
+/**
+ * Margin (1x texels) by which the enhanced look widens the quad of a softened SHP shadow on every side. A frame's rect
+ * is trimmed to its art, so the art touches all four edges; the filtered coverage reaches 1.5 texels past the art and
+ * the penumbra taps SHADOW_PENUMBRA_TEXELS + 1 more, and none of that was drawn outside the rect. Turned with the sun
+ * the rect's edges ran across the ground as straight diagonal cuts, sharpest at the far end where the penumbra is
+ * widest: tree and palm shadows ending in arrowheads and a rock's shadow left as a cut wedge (live XMP27T8 by day,
+ * cinematic look). The margin covers the widest reach; texels outside the rect still read as empty.
+ */
+export const SHADOW_QUAD_PAD_TEXELS = SHADOW_PENUMBRA_TEXELS + 2;
+
+/**
+ * Margin (1x texels) of an instance's quad around its frame rect (CPU twin of the shader's): SHADOW_QUAD_PAD_TEXELS
+ * for an SHP shadow other than an infantry footprint while the enhanced look is on, 0 otherwise, so the faithful look
+ * and every upright card keep their exact quads.
+ */
+export function shadowQuadPad(
+  s: Pick<SpriteInstance, 'shadow' | 'kind' | 'infantryShadow'>,
+  enhanced: boolean,
+): number {
+  return enhanced && s.shadow && !s.kind && !s.infantryShadow ? SHADOW_QUAD_PAD_TEXELS : 0;
+}
 /** Penumbra taps (unit radius): eight on two rings, as the shader samples them around the filtered coverage. */
 const PENUMBRA_TAPS: readonly (readonly [number, number])[] = Array.from({ length: 8 }, (_, i) => {
   const angle = (i / 8) * Math.PI * 2 + 0.4;
@@ -542,10 +563,29 @@ class SpriteGraph {
     // Edges are soft (filtered coverage, see colorNode) and blend; only fully clear fragments are discarded. No
     // alpha-to-coverage: under MSAA it turns the translucent shadows opaque.
     material.alphaTest = 0.04;
+    // Margin of the quad around the frame rect (shadowQuadPad): softened SHP shadows under the enhanced look only.
+    const quadPad: ShaderNode = step(0.5, look.enabled)
+      .mul(step(1.5, aFlat))
+      .mul(float(1).sub(step(2.5, aFlat)))
+      .mul(float(1).sub(isInfantryShadow))
+      .mul(SHADOW_QUAD_PAD_TEXELS)
+      .toVar('spriteQuadPad');
+    // Quad UV (0..1 across the padded quad) to frame-relative coordinates (0..1 across the rect, beyond it in the pad).
+    // Unpadded instances keep the UV itself: the round trip through the rect size is not exact in floating point and
+    // moved texel lookups of upright cards at texel boundaries.
+    const unpad = (t: ShaderNode, size: ShaderNode): ShaderNode =>
+      select(
+        quadPad.greaterThan(0),
+        t
+          .mul(size.add(quadPad.mul(2)))
+          .sub(quadPad)
+          .div(max(size, 1)),
+        t,
+      );
     // Raster-relative coordinates from the quad's own UVs (u right, v down). positionLocal cannot be used here: once
     // positionNode is set it refers to the displaced position in the fragment stage.
-    const u: ShaderNode = uv().x;
-    const vCard: ShaderNode = float(1).sub(uv().y);
+    const u: ShaderNode = unpad(uv().x, aRect.z);
+    const vCard: ShaderNode = unpad(float(1).sub(uv().y), aRect.w);
     const pushAmount: ShaderNode = aParams.w;
     // Enhanced-look instance kinds (codes 3 and 4) and the art's base line under a column (the foundation's front edges
     // for buildings, the draw point's row otherwise), for mirror images on wet ground.
@@ -603,9 +643,9 @@ class SpriteGraph {
         { data: aNative, offset: aNativeOffset, template: cache.depthTemplate },
       );
     material.depthNode = cardDepth();
-    // Vertex stage: corners from the untouched geometry attribute (+-0.5).
-    const gu: ShaderNode = positionGeometry.x.add(0.5);
-    const gv: ShaderNode = float(0.5).sub(positionGeometry.y);
+    // Vertex stage: corners from the untouched geometry attribute (+-0.5), widened by the quad's margin.
+    const gu: ShaderNode = unpad(positionGeometry.x.add(0.5), aRect.z);
+    const gv: ShaderNode = unpad(float(0.5).sub(positionGeometry.y), aRect.w);
     // Enhanced-look ground passes (see SpriteLayer.groundPasses): with the look on, the main pass draws only upright
     // cards; decals and contact shades go to the 'under' pass, SHP shadows and wet reflections to the 'over' pass.
     const enhancedOn: ShaderNode = step(0.5, look.enabled);
@@ -1164,7 +1204,7 @@ class SpriteGraph {
         .add(c.y.mul(screenCoordinate.x))
         .add(c.z.mul(screenCoordinate.y))
         .add(c.w.mul(level));
-      const texel = vec2(aRect.x.add(uv().x.mul(aRect.z)), aRect.y.add(vCard.mul(aRect.w)));
+      const texel = vec2(aRect.x.add(u.mul(aRect.z)), aRect.y.add(vCard.mul(aRect.w)));
       const indexedCoverage = frameCoverage(atlasPage, atlasSize, texel, aRect);
       const coverage = features.hd
         ? mix(indexedCoverage, max(indexedCoverage, texture(hdColour, texel.div(atlasSize)).a), isInfantryShadow)
