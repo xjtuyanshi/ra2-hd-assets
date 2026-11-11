@@ -30,7 +30,7 @@ function dispose(layer: SpriteLayer): void {
 }
 
 describe('live building shadow pivot', () => {
-  it("keeps the building's foundation on its SHP shadow so the sun-follow pivot is the foundation centre", () => {
+  it("keeps the building's foundation on its SHP shadow (penumbra base, no sun-follow transform)", () => {
     const pool = new SpritePool();
     pool.begin();
     const painter = painterObject(2, 100);
@@ -65,65 +65,38 @@ describe('live building shadow pivot', () => {
   });
 });
 
-describe('sun-following building shadow pivot', () => {
+describe('sun-following SHP shadows', () => {
   const yard = { origin: [-0.5, -0.5] as const, size: [4, 4] as const };
   const [s0x, s0z] = ART_SHADOW_DIRECTION;
-  // Edge of the yard on the art's shadow side, and a point one cell out from it (the cast shadow by the wall).
+  // The yard's shadow-side edge, a point one cell out from it, and points beside its side walls.
   const edge: [number, number] = [1.5 + s0x * 2, 1.5 + s0z * 2];
   const out: [number, number] = [edge[0] + s0x, edge[1] + s0z];
+  const beside: [number, number][] = [
+    [3.6, 0.5],
+    [4.5, 2.5],
+    [-0.6, 1],
+  ];
 
-  it('keeps the cast shadow on the wall it leaves instead of carrying it away with the stretch', () => {
-    const m = shadowTransform(new Vector3(0, 0.5, 1), 1.62, 1, new Vector4());
-    // Same sun azimuth as the art: pure stretch along the art's direction.
-    const e = followedShadowPoint(edge, m, yard);
-    expect(e.point[0]).toBeCloseTo(edge[0], 9);
-    expect(e.point[1]).toBeCloseTo(edge[1], 9);
-    const o = followedShadowPoint(out, m, yard);
-    expect(Math.hypot(o.point[0] - edge[0], o.point[1] - edge[1])).toBeCloseTo(1.62, 9);
-    // The centre pivot (the old transform) left (1.62 - 1) x 2 cells of bare ground between wall and shadow.
-    const centreEdge = [1.5 + (edge[0] - 1.5) * 1.62, 1.5 + (edge[1] - 1.5) * 1.62];
-    expect(Math.hypot(centreEdge[0] - edge[0], centreEdge[1] - edge[1])).toBeGreaterThan(1.2);
+  it("keeps a building's shadow where the art draws it under a turned and stretched sun", () => {
+    // The cinematic look at 16.5 h: turned 21 degrees and stretched 1.62 times. Every transform of the flat shadow
+    // tore it off the walls somewhere (live construction yards: smaller, lighter and stepped against the original).
+    const m = shadowTransform(new Vector3(-0.297, 0.559, 0.774), 1.62, 1, new Vector4());
+    for (const p of [edge, out, [1.5, 1.5] as [number, number], ...beside])
+      expect(followedShadowPoint(p, m, yard)).toEqual(p);
   });
 
-  it('keeps the whole shadow-side wall line in place when the sun turns, casting along the turned direction', () => {
-    const sun = new Vector3(-0.297, 0.559, 0.774);
-    const m = shadowTransform(sun, 1.62, 1, new Vector4());
-    // Points along the shadow-side edge, from one end of the wall to the other: none moves.
-    const ex = -s0z;
-    const ez = s0x;
-    for (const u of [-2, -1, 0, 1, 2]) {
-      const p: [number, number] = [edge[0] + ex * u, edge[1] + ez * u];
-      const r = followedShadowPoint(p, m, yard);
-      expect(r.point[0]).toBeCloseTo(p[0], 9);
-      expect(r.point[1]).toBeCloseTo(p[1], 9);
-      // One cell out from that wall point the shadow lies along M s0 (away from the sun), at the stretched length.
-      const q = followedShadowPoint([p[0] + s0x, p[1] + s0z], m, yard);
-      expect(q.point[0] - p[0]).toBeCloseTo(m.x * s0x + m.z * s0z, 9);
-      expect(q.point[1] - p[1]).toBeCloseTo(m.y * s0x + m.w * s0z, 9);
-      expect((q.point[0] - p[0]) * -sun.x + (q.point[1] - p[1]) * -sun.z).toBeGreaterThan(0);
-      expect(q.hidden).toBe(false);
-    }
-  });
-
-  it('drops the under-foundation shadow that the stretch would push out on the sunny side', () => {
-    const m = shadowTransform(new Vector3(0, 0.5, 1), 1.62, 1, new Vector4());
-    const sunnyEdge: [number, number] = [1.5 - s0x * 1.9, 1.5 - s0z * 1.9];
-    expect(followedShadowPoint(sunnyEdge, m, yard).hidden).toBe(true);
-    expect(followedShadowPoint([1.5, 1.5], m, yard).hidden).toBe(false);
-    expect(followedShadowPoint(out, m, yard).hidden).toBe(false);
-  });
-
-  it('is the identity when the look does not follow the sun, and pivots on the draw point without a foundation', () => {
-    const id = shadowTransform(new Vector3(-0.3, 0.5, 0.8), 1.62, 0, new Vector4());
-    for (const p of [edge, out, [0.2, 3.1] as [number, number]]) {
-      const r = followedShadowPoint(p, id, yard);
-      expect(r.point[0]).toBeCloseTo(p[0], 12);
-      expect(r.point[1]).toBeCloseTo(p[1], 12);
-      expect(r.hidden).toBe(false);
-    }
+  it('turns and stretches shadows without a foundation (trees, SHP units) about their draw point', () => {
     const m = shadowTransform(new Vector3(-0.3, 0.5, 0.8), 1.62, 1, new Vector4());
     const r = followedShadowPoint([1, 2], m);
-    expect(r.point[0]).toBeCloseTo(m.x * 1 + m.z * 2, 12);
-    expect(r.point[1]).toBeCloseTo(m.y * 1 + m.w * 2, 12);
+    expect(r[0]).toBeCloseTo(m.x * 1 + m.z * 2, 12);
+    expect(r[1]).toBeCloseTo(m.y * 1 + m.w * 2, 12);
+    // Along the art's own direction: the stretched length.
+    const along = followedShadowPoint([s0x, s0z], shadowTransform(new Vector3(0, 0.5, 1), 1.62, 1, new Vector4()));
+    expect(Math.hypot(along[0], along[1])).toBeCloseTo(1.62, 9);
+    // Without follow the transform is the identity.
+    const id = shadowTransform(new Vector3(-0.3, 0.5, 0.8), 1.62, 0, new Vector4());
+    const q = followedShadowPoint([0.2, 3.1], id);
+    expect(q[0]).toBeCloseTo(0.2, 12);
+    expect(q[1]).toBeCloseTo(3.1, 12);
   });
 });

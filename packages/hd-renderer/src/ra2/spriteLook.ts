@@ -17,7 +17,6 @@ import {
   normalize,
   pow,
   reflect,
-  select,
   sin,
   smoothstep,
   sqrt,
@@ -548,57 +547,32 @@ export const ART_SHADOW_DIRECTION: readonly [number, number] = (() => {
 })();
 
 /**
- * Where the sun-following look moves one ground point of a building's SHP shadow (CPU reference of the shader in
- * sprites.ts; points are world x/z relative to the draw point, `m` the uploaded shadow matrix, column-major m00, m10,
- * m01, m11). The art's shadow leaves the foundation through its edge on the ART_SHADOW_DIRECTION side. A point t cells
- * beyond that edge line is read as the shadow of something t / |L0| high standing on the edge, and moves to where
- * that height casts under the current sun: p + t (M s0 - s0), a shear that keeps the whole edge line in place. Turning
- * and stretching about one pivot cannot do that for a foundation several cells wide: about the centre the cast part
- * moved (k - 1) x half a foundation off the wall (a 4-cell yard at stretch 1.6: over a cell of bare ground), and about
- * any single edge point the turn swung the far corners off the edge. The part of the shadow under the foundation
- * shears the other way and would stick out on the sunny side; `hidden` marks those points (source inside the
- * foundation, destination outside it) so the shader drops them. Without a foundation the whole shadow turns and
- * stretches about the draw point, as before.
+ * Where the sun-following look moves one ground point of an SHP shadow (CPU reference of the shader in sprites.ts;
+ * points are world x/z relative to the draw point, `m` the uploaded shadow matrix, column-major m00, m10, m01, m11).
+ * Shadows without a foundation (trees, SHP units) turn and stretch about the draw point. A building's shadow (one
+ * with a foundation) stays where the art draws it. The art's shadow is the shadow of walls and roofs at heights it
+ * does not record, standing anywhere inside the foundation, so no transform of the flat shadow can follow a turned
+ * sun without tearing it off the building:
+ * - turned about the draw point, it landed under or behind the building (live construction yards);
+ * - about the foundation centre, the stretch carried it more than a cell off the walls;
+ * - sheared off the foundation's shadow-side edge, the shadow beside the side wall was pulled back towards
+ *   the sun, leaving bare ground at the wall and a smaller, stepped shadow (live XMP27T8 and IrvineCa: 0.56 and 0.69
+ *   of the ground against the original's 0.44 and 0.52); even clamped to the shadow beyond the edge, the yard's art
+ *   shadow starts half a cell or more out from that edge, so the turn still opened a gap at the wall.
+ * The enhanced look keeps the darkness and softness of a building's shadow; its length and direction are the art's.
  */
 export function followedShadowPoint(
   src: readonly [number, number],
   m: Vector4,
   foundation?: { origin: readonly [number, number]; size: readonly [number, number] },
-): { point: [number, number]; hidden: boolean } {
-  if (!foundation) return { point: [m.x * src[0] + m.z * src[1], m.y * src[0] + m.w * src[1]], hidden: false };
-  const [s0x, s0z] = ART_SHADOW_DIRECTION;
-  const halfW = foundation.size[0] / 2;
-  const halfH = foundation.size[1] / 2;
-  const cx = foundation.origin[0] + halfW;
-  const cz = foundation.origin[1] + halfH;
-  const reach = Math.min(halfW / Math.max(Math.abs(s0x), 1e-4), halfH / Math.max(Math.abs(s0z), 1e-4));
-  const t = (src[0] - cx) * s0x + (src[1] - cz) * s0z - reach;
-  const point: [number, number] = [
-    src[0] + t * (m.x * s0x + m.z * s0z - s0x),
-    src[1] + t * (m.y * s0x + m.w * s0z - s0z),
-  ];
-  const inside = (x: number, z: number) => Math.abs(x - cx) <= halfW && Math.abs(z - cz) <= halfH;
-  return { point, hidden: inside(src[0], src[1]) && !inside(point[0], point[1]) };
+): [number, number] {
+  if (foundation) return [src[0], src[1]];
+  return [m.x * src[0] + m.z * src[1], m.y * src[0] + m.w * src[1]];
 }
 
-/**
- * Shader form of followedShadowPoint for one ground point `p` (vec2, relative to the draw point). `centre` and `half`
- * describe the foundation (both zero without one) and `hasFoundation` selects the shear over the plain transform.
- */
-export function followedShadowNode(
-  p: ShaderNode,
-  centre: ShaderNode,
-  half: ShaderNode,
-  hasFoundation: ShaderNode,
-  m: ShaderNode,
-): ShaderNode {
-  const [s0x, s0z] = ART_SHADOW_DIRECTION;
-  const reach: ShaderNode = min(half.x.div(Math.max(Math.abs(s0x), 1e-4)), half.y.div(Math.max(Math.abs(s0z), 1e-4)));
-  const t: ShaderNode = p.x.sub(centre.x).mul(s0x).add(p.y.sub(centre.y).mul(s0z)).sub(reach);
-  const cast: ShaderNode = vec2(m.x.mul(s0x).add(m.z.mul(s0z)).sub(s0x), m.y.mul(s0x).add(m.w.mul(s0z)).sub(s0z));
-  const sheared: ShaderNode = p.add(cast.mul(t));
-  const turned: ShaderNode = vec2(m.x.mul(p.x).add(m.z.mul(p.y)), m.y.mul(p.x).add(m.w.mul(p.y)));
-  return select(hasFoundation, sheared, turned);
+/** Shader form of followedShadowPoint for a shadow without a foundation (vec2 `p`, relative to the draw point). */
+export function followedShadowNode(p: ShaderNode, m: ShaderNode): ShaderNode {
+  return vec2(m.x.mul(p.x).add(m.z.mul(p.y)), m.y.mul(p.x).add(m.w.mul(p.y)));
 }
 
 /** Degrees -> unit ground vector helper for CPU-side updates (see HdRenderer). */

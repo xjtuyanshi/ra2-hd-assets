@@ -21,7 +21,6 @@ import {
   Fn,
   Discard,
   If,
-  abs,
   cameraFar,
   cameraNear,
   clamp,
@@ -477,14 +476,8 @@ class SpriteGraph {
     const hasFoundation: ShaderNode = aOcclusion.x.greaterThan(0);
     const foundationHalf: ShaderNode = select(hasFoundation, aOcclusion.xy.mul(0.5), vec2(0, 0));
     const baseCentre: ShaderNode = select(hasFoundation, foundationOrigin.add(foundationHalf), vec2(0, 0));
-    // Sun-following shadow transform (spriteLook.ts followedShadowPoint): sheared off the foundation's shadow-side edge,
-    // or turned and stretched about the draw point for objects without a foundation.
-    const followed2d = (offset: ShaderNode): ShaderNode =>
-      followedShadowNode(offset, baseCentre, foundationHalf, hasFoundation, look.shadowMatrix);
-    const inFoundation = (p: ShaderNode): ShaderNode => {
-      const d: ShaderNode = abs(p.sub(baseCentre));
-      return step(d.x, foundationHalf.x).mul(step(d.y, foundationHalf.y)).mul(step(0.5, hasFoundation.select(1, 0)));
-    };
+    // Sun-following shadow transform (spriteLook.ts followedShadowPoint): turned and stretched about the draw point.
+    const followed2d = (offset: ShaderNode): ShaderNode => followedShadowNode(offset, look.shadowMatrix);
     // A reflection's quad spans the rows from the base line down to the mirror image of the frame's top.
     const reflectionRows = (): ShaderNode => {
       const top: ShaderNode = aParams.y;
@@ -573,13 +566,15 @@ class SpriteGraph {
         const decal = lifted(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60))).add(this.toCamera.mul(rowBias));
         const placed = aFlat.greaterThan(0.5).select(decal, card);
         // Enhanced look (spriteLook.ts). Shadows follow the sun: their ground offsets turn and stretch about the object's
-        // base (the foundation's edge on the shadow side, or the draw point); the faithful path keeps the untouched decal.
+        // draw point (not a building's: see followedShadowPoint); the faithful path keeps the untouched decal.
         const isShadowKind: ShaderNode = step(1.5, aFlat).mul(float(1).sub(step(2.5, aFlat)));
         const turned: ShaderNode = followed2d(vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60))));
         const followed = lifted(turned.x, turned.y);
         // Inline infantry footprints share the body's screen offsets; rotating them would detach them from its feet.
+        // A building's shadow (one with a foundation) keeps the art's own shape and place, see followedShadowPoint.
         const follow: ShaderNode = isShadowKind
           .mul(float(1).sub(isInfantryShadow))
+          .mul(hasFoundation.select(0, 1))
           .mul(step(1e-4, look.shadowFollow))
           .mul(look.enabled);
         // Contact shades and reflections exist only while their effect is on; otherwise they collapse to a point.
@@ -900,20 +895,6 @@ class SpriteGraph {
               }
               const blended: ShaderNode = mix(clamp(coverage, 0, 1), soft.div(8), smoothstep(0.3, 1.5, radius));
               result.assign(vec4(0, 0, 0, blended.mul(shadowOpacity)));
-            },
-          );
-          // Sun-following building shadows pivot on the foundation's shadow-side edge; the part that lay under the
-          // foundation and would now stick out on the sunny side is dropped (spriteLook.ts followedShadowPoint).
-          If(
-            isShadow
-              .greaterThan(0.5)
-              .and(isInfantryShadow.lessThan(0.5))
-              .and(hasFoundation)
-              .and(look.shadowFollow.greaterThan(1e-4)),
-            () => {
-              const source: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
-              const stray: ShaderNode = inFoundation(source).mul(float(1).sub(inFoundation(followed2d(source))));
-              result.assign(vec4(result.rgb, result.a.mul(float(1).sub(stray))));
             },
           );
           // Contact shade: soft darkening of the ground around a foundation.
