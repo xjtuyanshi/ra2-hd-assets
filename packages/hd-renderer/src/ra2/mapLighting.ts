@@ -42,6 +42,11 @@ import type { ShaderNode } from '../tsl';
  * light-source pools from the same [Lighting]; applying both would light the map twice. The weight is baked into the
  * texels (re-encoded only when it changes), so no shader uniform is involved. Dusk keeps the complete engine grade
  * at its authored golden hour; its separate light field does not duplicate the sources.
+ *
+ * The grade is built from the map's authored [Lighting] until the live game reports a different normal (event-free)
+ * [Lighting] (an edited map, a light-changing trigger): setBase then rebuilds it from the live values, because the
+ * engine adds its light sources to the live ambient. Scaling a grade built from the authored light by live/authored
+ * scaled the sources too (a night edit's radiation glow was 40-50 % of the original's; B2 #7a).
  */
 
 /** The engine clamps a cell's intensity to 2; texels store multiplier / MAP_LIGHT_RANGE in 8 bits. */
@@ -54,11 +59,15 @@ export class MapLightGrade {
   readonly texture: DataTexture;
   readonly width: number;
   readonly height: number;
+  /** The map's authored [Lighting] (engine precision); the grade's current base is `base`. */
   readonly lighting: EngineLighting;
   private readonly grid: CellGrid;
   private light: CellLight;
-  /** The map's [Lighting] alone, without light sources (see setSourceWeight). */
-  private readonly plain: CellLight;
+  /** The base [Lighting] alone, without light sources (see setSourceWeight). */
+  private plain: CellLight;
+  /** The [Lighting] the cells are lit with now: the authored one until setBase replaces it. */
+  private baseLighting: EngineLighting;
+  private sources: readonly EngineLight[] = [];
   private key = '';
   private weight = 1;
   private sourceWeight = 1;
@@ -70,6 +79,7 @@ export class MapLightGrade {
     // Cells outside the map rhombus still get the plain light (never black), so filtering at its edge stays level.
     this.grid = { ...grid, exists: new Uint8Array(grid.width * grid.height).fill(1) };
     this.lighting = engineLighting(lighting);
+    this.baseLighting = this.lighting;
     this.texture = new DataTexture(
       new Uint8Array(grid.width * grid.height * 4),
       grid.width,
@@ -95,8 +105,32 @@ export class MapLightGrade {
     const key = sources.map((s) => `${s.position.join(',')}:${s.radius}:${s.intensity}:${s.tint.join(',')}`).join(';');
     if (!force && key === this.key) return;
     this.key = key;
-    this.light = engineCellLight(this.grid, this.lighting, sources, this.light);
+    this.sources = sources.slice();
+    this.light = engineCellLight(this.grid, this.baseLighting, this.sources, this.light);
     this.encode();
+  }
+
+  /** The [Lighting] the cells are lit with now (engine precision): `lighting` until setBase replaces it. */
+  get base(): EngineLighting {
+    return this.baseLighting;
+  }
+
+  /**
+   * Light the cells with another normal [Lighting] (raw INI or engine precision), keeping the light sources: the same
+   * texels as a new grade built with that light. Never pass event light (Ion storm, Dominator, nuke flash): the
+   * scene multipliers scale events relative to this base. Returns whether the base changed (compared in the engine's
+   * percent / per-mille precision); an unchanged or invalid light keeps the current texels.
+   */
+  setBase(lighting: EngineLighting): boolean {
+    const values = [lighting.ambient, lighting.red, lighting.green, lighting.blue, lighting.ground, lighting.level];
+    if (!values.every(Number.isFinite)) return false;
+    const next = engineLighting(lighting);
+    if (sameLighting(next, this.baseLighting)) return false;
+    this.baseLighting = next;
+    this.plain = engineCellLight(this.grid, next, [], this.plain);
+    this.light = engineCellLight(this.grid, next, this.sources, this.light);
+    this.encode();
+    return true;
   }
 
   /** How much of the engine light applies (0 = neutral, 1 = the engine's); re-encodes only on a visible change. */
@@ -178,6 +212,19 @@ export class MapLightGrade {
   dispose(): void {
     this.texture.dispose();
   }
+}
+
+/** Whether two [Lighting] sets are equal in the engine's stored precision (percent / per-mille). */
+export function sameLighting(a: EngineLighting, b: EngineLighting): boolean {
+  const mille = (v: number) => Math.round(v * 1000);
+  return (
+    mille(a.ambient) === mille(b.ambient) &&
+    mille(a.red) === mille(b.red) &&
+    mille(a.green) === mille(b.green) &&
+    mille(a.blue) === mille(b.blue) &&
+    mille(a.ground) === mille(b.ground) &&
+    mille(a.level) === mille(b.level)
+  );
 }
 
 /** The engine's drawn terrain multiplier of cell `c` for a continuous terrain intensity (see engineShade). */

@@ -116,23 +116,75 @@ export function ra2DisplayPolicy(terrain: readonly [number, number, number]): {
   };
 }
 
-/** Translate native palette/event policy into renderer-only presentation inputs. */
+/**
+ * Translate native palette/event policy into renderer-only presentation inputs. `base` is the [Lighting] the map
+ * light grade is lit with now (MapLightGrade.base; the authored `map` light until the grade follows a live normal
+ * light): the multipliers scale relative to it, so a grade rebuilt from the live light is not dimmed a second time.
+ * The display policy (grade share, 16-bit dark loss) stays relative to the authored light, which the HD art and the
+ * look's grade are calibrated on.
+ */
 export function ra2SceneLighting(
   map: MapLighting | null | undefined,
   live: Ra2SceneLighting | null | undefined,
   medianZ: number,
   skyFlash = 0,
+  base: MapLighting | null | undefined = map,
 ): SceneLighting | null {
   if (!live) return null;
-  const multipliers = computeSceneMultipliers(map, live, medianZ);
+  const multipliers = computeSceneMultipliers(base ?? map, live, medianZ);
+  const authored = base && base !== map ? computeSceneMultipliers(map, live, medianZ) : multipliers;
   const storm = live.event === 'storm';
   return {
     ...multipliers,
-    ...ra2DisplayPolicy(multipliers.terrain),
+    ...ra2DisplayPolicy(authored.terrain),
     sunShadow: storm ? 0 : 1,
     overcast: storm ? 1 : 0,
     skyFlash: storm && Number.isFinite(skyFlash) ? Math.min(0.12, Math.max(0, skyFlash)) : 0,
   };
+}
+
+/**
+ * The live normal [Lighting] (MapLighting fields, engine precision) when no event light is active, else null: the
+ * light a map light grade may be rebuilt from (MapLightGrade.setBase). Ion storms, the nuke flash, TimeWarp and
+ * Dominator states 1..4 report an event; their light is never baked into the grade.
+ */
+export function liveNormalLighting(live: Ra2SceneLighting | null | undefined): MapLighting | null {
+  if (!live || live.event !== null || live.override !== null) return null;
+  const tint = live.tint;
+  const values = [live.ambient, live.ground, live.level];
+  if (!values.every(Number.isFinite) || tint?.length !== 3 || !tint.every((v) => Number.isFinite(v) && v >= 0))
+    return null;
+  return { ambient: live.ambient, ground: live.ground, level: live.level, red: tint[0], green: tint[1], blue: tint[2] };
+}
+
+/**
+ * Logic frames a changed live normal [Lighting] must hold before the map light grade is rebuilt from it. A rebuild
+ * relights every cell and uploads the grade texture; ramps (Dominator state 5 restores the ambient step by step with
+ * no event reported) would otherwise rebuild on every step. Until then the scene multipliers scale the change.
+ */
+export const LIGHT_BASE_STABLE_FRAMES = 15;
+
+/**
+ * Decides when the map light grade follows the live normal light (see liveNormalLighting): returns the light to
+ * rebuild the grade with once the same event-free light has been reported for LIGHT_BASE_STABLE_FRAMES logic frames,
+ * else null. Feed it the snapshot's own values, never interpolated ones.
+ */
+export class NormalLightFollower {
+  private candidate: { key: string; since: number } | null = null;
+
+  update(live: Ra2SceneLighting | null | undefined, frame: number): MapLighting | null {
+    const normal = liveNormalLighting(live);
+    if (!normal || !Number.isFinite(frame)) {
+      this.candidate = null;
+      return null;
+    }
+    const mille = (v: number) => Math.round(v * 1000);
+    const key = [normal.ambient, normal.red, normal.green, normal.blue, normal.ground, normal.level].map(mille).join();
+    // A changed light, or a frame counter that went back (a loaded save), starts the wait again.
+    if (!this.candidate || this.candidate.key !== key || frame < this.candidate.since)
+      this.candidate = { key, since: frame };
+    return frame - this.candidate.since >= LIGHT_BASE_STABLE_FRAMES ? normal : null;
+  }
 }
 
 /** Interpolate only adjacent known publications in the same event; event switches and unknown reads are immediate. */

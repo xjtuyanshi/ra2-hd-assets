@@ -315,6 +315,17 @@ therefore gives terrain `0.562 x (0.4, 0.4, 0.7)` at median height 4 instead of 
 live and authored RGB keep the exact identity path. Only light level and tint follow the live values: the day/dusk/night
 staging, sun and shadows still come from the cached map.
 
+That ratio alone also scaled the light sources, which the engine adds to the live ambient (cell formula above): under
+the same night edit a RadSite's green came out at `0.22 (1 + s) / (0.55 + s)`, about 0.4 of the original's (B2 #7a;
+four night-nuke A/B takes measured 0.34-0.53, the day take about 1). The live view therefore rebuilds the map light
+grade from the live normal `[Lighting]` (`MapLightGrade.setBase`) once an event-free light that differs from the
+grade's base has held for 15 logic frames (`NormalLightFollower`; ramps such as Dominator state 5 rebuild only when
+they settle), and `computeSceneMultipliers` then runs against the grade's base: identity outside events, the event
+relative to the last normal light during one. The terrain now picks its shade row at the live intensity, as the
+engine does (night edit: row 9 of 53 = 0.346 instead of the continuous 0.385, 10 % darker ground; the same-moment
+b3flip1 night pair had HD ground luma at 1.14x the original's). `ra2DisplayPolicy` and the white-balance tint
+(`MapLightGrade.lighting`) stay relative to the authored light.
+
 Two display effects follow such a run-time scale (`ra2DisplayPolicy`, `SceneLighting.gradeShare` / `darkLoss`). The
 engine draws into a 16-bit RGB565 surface: truncating to 5/6/5 bits and showing the result with bit replication loses
 about `a - v / 32` (red, blue) and `a - v / 64` (green) levels of 255 at value v, with a = 3.98 / 1.99. HD shows the

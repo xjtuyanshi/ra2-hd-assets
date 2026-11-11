@@ -30,6 +30,7 @@ import { HdRenderer } from '../HdRenderer';
 import type { SceneLighting } from '../sceneLighting';
 import {
   interpolateSceneLighting,
+  NormalLightFollower,
   ra2SceneLighting,
   stormStrikeLight,
   type Ra2SceneLighting,
@@ -1017,6 +1018,8 @@ export class LiveView {
   /** Whether the engine supplied the grade's light list when lightKey was last applied, and that list's identity. */
   private lightKeyEngine = false;
   private engineLightKey: string | null = null;
+  /** Created on first use (see updateLightBase). */
+  private lightBase?: NormalLightFollower;
   private windowKey: string | null = null;
   private blockedKey: string | null = null;
 
@@ -1024,12 +1027,26 @@ export class LiveView {
 
   private scenePresentation(lighting: Ra2SceneLighting | null | undefined, skyFlash = 0): SceneLighting | null {
     if (!lighting) return null;
+    const mapLight = this.world.mapLight;
     return ra2SceneLighting(
-      this.world.mapLight?.lighting ?? this.state.map.lighting,
+      mapLight?.lighting ?? this.state.map.lighting,
       lighting,
       this.sceneMedianZ,
       skyFlash,
+      mapLight?.base,
     );
+  }
+
+  /**
+   * The map light grade follows the live normal [Lighting] once it has held (NormalLightFollower): the engine adds
+   * its light sources (radiation, lamps) to the live ambient, so a grade built from the authored light and scaled by
+   * live / authored dimmed them with it (B2 #7a: a night edit's radiation glow at 40-50 % of the original's).
+   */
+  private updateLightBase(snapshot: LiveSnapshot): void {
+    const mapLight = this.world?.mapLight;
+    if (!mapLight) return;
+    const normal = (this.lightBase ??= new NormalLightFollower()).update(snapshot.lighting, snapshot.frame);
+    if (normal) mapLight.setBase(normal);
   }
 
   private constructor(
@@ -1604,6 +1621,7 @@ export class LiveView {
     const vehicles = snapshot.objects.filter((o) => o.kind === 'vehicle' && !o.nativeHidden);
     this.effectDriver.vehicleAt = (x, y, z) => smokeOnVehicle(vehicles, x, y, z);
     this.effectDriver.sceneEvent = snapshot.lighting?.event ?? null;
+    this.updateLightBase(snapshot);
     this.hd.setSceneLighting(this.scenePresentation(snapshot.lighting));
     if (effects || hadEffects)
       this.effectDriver.push(
