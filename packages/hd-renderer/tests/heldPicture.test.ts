@@ -86,8 +86,8 @@ describe('the last complete picture of a sprite object', () => {
       expect(sprite.opacity).toBe(was.opacity);
       expect(sprite.depthWrite).toBe(was.depthWrite);
       expect(sprite.nativeDepth).toEqual(was.nativeDepth);
-      // Upright cards belong to the object's painter entry, as when it queued them itself.
-      expect(sprite.painter).toBe(was.shadow || was.flat ? undefined : p.painter);
+      // Upright cards and shadows belong to the object's painter entry, as when it queued them itself.
+      expect(sprite.painter).toBe(was.flat && !was.shadow ? undefined : p.painter);
     });
   });
 

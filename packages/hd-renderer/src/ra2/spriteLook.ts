@@ -17,6 +17,7 @@ import {
   normalize,
   pow,
   reflect,
+  select,
   sin,
   smoothstep,
   sqrt,
@@ -538,6 +539,66 @@ export function contactShade(local: ShaderNode, w: ShaderNode, h: ShaderNode): S
 /** Screen row (engine px below the draw point) of the base line of a foundation w x h at screen column px. */
 export function foundationBase(px: ShaderNode, w: ShaderNode, h: ShaderNode): ShaderNode {
   return min(h.mul(30).add(px.mul(0.5)), w.mul(30).sub(px.mul(0.5)));
+}
+
+/** Ground direction (world x, z) the art's own shadows point to: away from ART_LIGHT. */
+export const ART_SHADOW_DIRECTION: readonly [number, number] = (() => {
+  const l = Math.hypot(ART_LIGHT.x, ART_LIGHT.z) || 1;
+  return [-ART_LIGHT.x / l, -ART_LIGHT.z / l] as const;
+})();
+
+/**
+ * Where the sun-following look moves one ground point of a building's SHP shadow (CPU reference of the shader in
+ * sprites.ts; points are world x/z relative to the draw point, `m` the uploaded shadow matrix, column-major m00, m10,
+ * m01, m11). The art's shadow leaves the foundation through its edge on the ART_SHADOW_DIRECTION side. A point t cells
+ * beyond that edge line is read as the shadow of something t / |L0| high standing on the edge, and moves to where
+ * that height casts under the current sun: p + t (M s0 - s0), a shear that keeps the whole edge line in place. Turning
+ * and stretching about one pivot cannot do that for a foundation several cells wide: about the centre the cast part
+ * moved (k - 1) x half a foundation off the wall (a 4-cell yard at stretch 1.6: over a cell of bare ground), and about
+ * any single edge point the turn swung the far corners off the edge. The part of the shadow under the foundation
+ * shears the other way and would stick out on the sunny side; `hidden` marks those points (source inside the
+ * foundation, destination outside it) so the shader drops them. Without a foundation the whole shadow turns and
+ * stretches about the draw point, as before.
+ */
+export function followedShadowPoint(
+  src: readonly [number, number],
+  m: Vector4,
+  foundation?: { origin: readonly [number, number]; size: readonly [number, number] },
+): { point: [number, number]; hidden: boolean } {
+  if (!foundation) return { point: [m.x * src[0] + m.z * src[1], m.y * src[0] + m.w * src[1]], hidden: false };
+  const [s0x, s0z] = ART_SHADOW_DIRECTION;
+  const halfW = foundation.size[0] / 2;
+  const halfH = foundation.size[1] / 2;
+  const cx = foundation.origin[0] + halfW;
+  const cz = foundation.origin[1] + halfH;
+  const reach = Math.min(halfW / Math.max(Math.abs(s0x), 1e-4), halfH / Math.max(Math.abs(s0z), 1e-4));
+  const t = (src[0] - cx) * s0x + (src[1] - cz) * s0z - reach;
+  const point: [number, number] = [
+    src[0] + t * (m.x * s0x + m.z * s0z - s0x),
+    src[1] + t * (m.y * s0x + m.w * s0z - s0z),
+  ];
+  const inside = (x: number, z: number) => Math.abs(x - cx) <= halfW && Math.abs(z - cz) <= halfH;
+  return { point, hidden: inside(src[0], src[1]) && !inside(point[0], point[1]) };
+}
+
+/**
+ * Shader form of followedShadowPoint for one ground point `p` (vec2, relative to the draw point). `centre` and `half`
+ * describe the foundation (both zero without one) and `hasFoundation` selects the shear over the plain transform.
+ */
+export function followedShadowNode(
+  p: ShaderNode,
+  centre: ShaderNode,
+  half: ShaderNode,
+  hasFoundation: ShaderNode,
+  m: ShaderNode,
+): ShaderNode {
+  const [s0x, s0z] = ART_SHADOW_DIRECTION;
+  const reach: ShaderNode = min(half.x.div(Math.max(Math.abs(s0x), 1e-4)), half.y.div(Math.max(Math.abs(s0z), 1e-4)));
+  const t: ShaderNode = p.x.sub(centre.x).mul(s0x).add(p.y.sub(centre.y).mul(s0z)).sub(reach);
+  const cast: ShaderNode = vec2(m.x.mul(s0x).add(m.z.mul(s0z)).sub(s0x), m.y.mul(s0x).add(m.w.mul(s0z)).sub(s0z));
+  const sheared: ShaderNode = p.add(cast.mul(t));
+  const turned: ShaderNode = vec2(m.x.mul(p.x).add(m.z.mul(p.y)), m.y.mul(p.x).add(m.w.mul(p.y)));
+  return select(hasFoundation, sheared, turned);
 }
 
 /** Degrees -> unit ground vector helper for CPU-side updates (see HdRenderer). */

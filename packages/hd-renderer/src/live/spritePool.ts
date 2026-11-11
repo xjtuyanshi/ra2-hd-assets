@@ -65,7 +65,11 @@ export class SpritePool {
     instance.tintLight = shadow ? 1 : this.tintLight;
     instance.tintColour = shadow ? 0 : this.tintColour;
     instance.lighting = lighting;
-    instance.painter = !flat && !shadow ? this.painter : undefined;
+    // Upright cards take their depth tie-break from the painter. SHP shadows keep it too, for its foundation only:
+    // the cinematic look turns and stretches a building's shadow about the foundation centre, and without it the
+    // pivot falls back to the draw point and the shadow lands under or behind the building (map buildings pass
+    // their painter for the same reason, world.ts). Flat decals stay ownerless.
+    instance.painter = !flat || shadow ? this.painter : undefined;
     instance.painterPart = painterPart;
     instance.deckHeight = !flat && !shadow ? this.deckHeight : undefined;
     instance.nativeDepth = undefined;

@@ -695,7 +695,8 @@ describe('LiveView physical occlusion scheduling', () => {
     expect(spritePainterBias(unit.painter)).toBeCloseTo((0.01 * 56) / 88, 12);
     for (const shadow of cards.filter((s) => s.shadow)) {
       expect(shadow.flat).toBe(true);
-      expect(shadow.painter).toBeUndefined();
+      // Shadows keep their owner's painter for its foundation (the sun-following look's pivot), not for depth.
+      expect([body.painter, unit.painter]).toContain(shadow.painter);
     }
     const uploaded = p.live.sprites as unknown as {
       orderedCards: SpriteInstance[];
