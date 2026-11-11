@@ -595,9 +595,13 @@ function createSurfaceMaterial(
     if (layer === 'reflection') return sourceMaterial ? WATER_REFLECTION_OPACITY : WATER_FLAT_REFLECTION_OPACITY;
     if (layer === 'foam') return shadowCopyOpacity(WATER_FOAM_OPACITY * (1 + 0.03 * (surface?.foamPulse ?? 0)));
     if (surface?.onWater) return shadowCopyOpacity(WATER_CONTACT_OPACITY * nodes.weatherSunShare.value);
+    // Contact footprints and the shadows of units in flight keep the engine's half shadow whatever the look does to
+    // other shadows. A flying unit's shadow is small and far from it; under the cinematic darkness (1.15) the Black
+    // Eagles' shadows showed at 0.29 of the water beside them against the original's 0.42-0.49 (live ALL05UMD,
+    // same strike). At the engine darkness the sandbox gives 0.44 on water and 0.47 on land under the same look.
     const target = surface?.contact
       ? CONTACT_SHADOW_OPACITY
-      : look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
+      : !surface?.airborne && look.enabled.value > 0.5 && look.shadowDarkness.value !== 1
         ? Math.min(SHADOW_OPACITY * look.shadowDarkness.value, 0.9)
         : SHADOW_OPACITY;
     return shadowCopyOpacity(
@@ -763,6 +767,8 @@ class VoxelSurfaceMesh extends Mesh {
   onWater = false;
   /** This twin currently draws the engine's contact footprint (see setShadowContact). */
   contact = false;
+  /** This twin currently draws the dropped, shrunk shadow of a unit in flight (aircraft, jumpjets). */
+  airborne = false;
   waterY = 0;
   foamPulse = 0;
   private readonly mode: VoxelShadowState;
@@ -832,6 +838,7 @@ class VoxelSurfaceMesh extends Mesh {
     const land = this.layer === 'shadow' && (this.copyIndex === 0 || this.mode.soft);
     this.onWater = false;
     this.contact = false;
+    this.airborne = false;
     const parent = this.parent;
     const ground = groundOf(this);
     if (!parent || !ground) {
@@ -939,6 +946,7 @@ class VoxelSurfaceMesh extends Mesh {
         projection.elements[14] -= (SHADOW_COPY_LIFT * this.mode.toCamera.z) / this.mode.toCamera.y;
       }
     } else if (!physicalOrigin && height > AIRBORNE_HEIGHT) {
+      this.airborne = true;
       point.x += AIRBORNE_SHADOW_DRIFT_X * height;
       point.z += AIRBORNE_SHADOW_DRIFT_Z * height;
       airborneShadowProjection(origin, point, airborneShadowScale(height), projection);

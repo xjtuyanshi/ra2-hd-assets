@@ -939,10 +939,23 @@ describe('voxel contact shadow of a grounded unit', () => {
       expect(composed(twin)).toBeCloseTo(CONTACT_SHADOW_OPACITY, 14);
       // Displayed brightness of the ground under it: half, as in the original's frozen frames.
       expect((1 - composed(twin)) ** (1 / 2.2)).toBeCloseTo(0.5, 12);
-      // The same twin off the ground (sheared projection, flight) follows the look again.
+      // The same twin without its contact footprint (sheared projection) follows the look again.
       setShadowContact(u.root, false);
       u.scene.updateMatrixWorld(true);
       expect(twin.contact).toBe(false);
+      expect(twin.airborne).toBe(false);
+      expect(composed(twin)).toBeCloseTo(Math.min(SHADOW_OPACITY * 1.15, 0.9), 14);
+      // In flight (a Black Eagle at the standard 1500 leptons) it keeps the engine's half shadow: the look's darkness
+      // put the original's 0.42-0.49 of the water beside the shadow at 0.29.
+      u.root.position.set(1, AIRBORNE_SHADOW_HALF, 2);
+      u.scene.updateMatrixWorld(true);
+      expect(twin.airborne).toBe(true);
+      expect(composed(twin)).toBeCloseTo(SHADOW_OPACITY, 14);
+      expect((1 - composed(twin)) ** (1 / 2.2)).toBeCloseTo(0.5, 12);
+      // Landing again restores the look.
+      u.root.position.set(1, 0, 2);
+      u.scene.updateMatrixWorld(true);
+      expect(twin.airborne).toBe(false);
       expect(composed(twin)).toBeCloseTo(Math.min(SHADOW_OPACITY * 1.15, 0.9), 14);
       // A turret twin never draws a contact footprint.
       setShadowContact(u.root, true);
