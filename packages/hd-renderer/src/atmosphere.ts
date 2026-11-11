@@ -204,6 +204,23 @@ export function objectLightAt(
   return mix(vec3(l, l, l), lf, float(OBJECT_TINT));
 }
 
+/**
+ * Fade of the light field (ground-level local light: fires, explosions, lamps) per world unit of height above the
+ * ground it is sampled on: sprite pixels take exp(-k h) of their height above their ground line, voxel units of
+ * their origin's height above the surface below it (localLightLift).
+ */
+export const LOCAL_LIGHT_HEIGHT_FALLOFF = 0.45;
+
+/**
+ * Share of the ground-level light field an object takes at `height` world units above the ground (1 on the ground).
+ * The engine lights no object with explosions; the HD field is ground light, so an aircraft at a flight level of 1500
+ * leptons (5.9 world units) keeps 7 % of it rather than all of it (B2 #18: a burning Kirov over explosions at night
+ * went near white).
+ */
+export function localLightLift(height: number): number {
+  return Number.isFinite(height) ? Math.exp(-LOCAL_LIGHT_HEIGHT_FALLOFF * Math.max(0, height)) : 1;
+}
+
 /** Scale only the summed local contribution into remaining display-white headroom, preserving its hue. */
 export function localLightHeadroom(base: ShaderNode, added: ShaderNode, enabled?: ShaderNode): ShaderNode {
   const brightest = (rgb: ShaderNode): ShaderNode => max(rgb.r, max(rgb.g, rgb.b));

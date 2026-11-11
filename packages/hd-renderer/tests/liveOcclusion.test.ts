@@ -156,6 +156,7 @@ function presentation() {
       setPainterBias: VoxelUnits.prototype.setPainterBias,
       setNativeDepth: VoxelUnits.prototype.setNativeDepth,
       setGroundContact: VoxelUnits.prototype.setGroundContact,
+      setLocalLightHeight: VoxelUnits.prototype.setLocalLightHeight,
       setOpacity: VoxelUnits.prototype.setOpacity,
       setTint: VoxelUnits.prototype.setTint,
     },
@@ -314,6 +315,7 @@ describe('LiveView ground motion', () => {
     });
     const contact = vi.spyOn(p.live.voxelUnits, 'setGroundContact');
     const depth = vi.spyOn(p.live.voxelUnits, 'setNativeDepth');
+    const lift = vi.spyOn(p.live.voxelUnits, 'setLocalLightHeight');
     // The map's tree cards go with every ground card, so a near-tie with a tree is resolved for the whole vehicle.
     const cards = new TerrainObjectCards();
     Object.assign(p.live.world, { terrainObjectCards: cards });
@@ -326,10 +328,13 @@ describe('LiveView ground motion', () => {
       return [contact.mock.lastCall![1], depth.mock.lastCall![3]];
     };
     for (const cell of [1.05, 1.2, 1.3, 1.45, 1.55, 1.7, 1.8, 1.95]) expect(at(cell, cell - 1)).toEqual([true, true]);
+    expect(lift.mock.lastCall![1]).toBe(0);
     // The game's own ramp heights differ a little from the mesh on corner ramps.
     expect(at(1.5, 0.5 + 0.25)).toEqual([true, true]);
     expect(at(1.5, 0.5 + 0.4)).toEqual([false, false]);
     expect(at(1.5, 3)).toEqual([false, false]);
+    // In the air the ground light fades with the height above the surface (B2 #18).
+    expect(lift.mock.lastCall![1]).toBeCloseTo((3 - 0.5) * LEVEL_HEIGHT, 6);
     expect(at(1.5, 0.5, 3)).toEqual([false, false]);
   });
 });

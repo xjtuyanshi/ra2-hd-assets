@@ -42,7 +42,13 @@ import {
   vec4,
 } from 'three/tsl';
 import type { VoxelLightingFile } from '../../../ra2-assets/src/vpl';
-import { DEFAULT_ATMOSPHERE_NODES, moonlit, objectLight, type AtmosphereNodes } from '../atmosphere';
+import {
+  DEFAULT_ATMOSPHERE_NODES,
+  localLightHeadroom,
+  moonlit,
+  objectLight,
+  type AtmosphereNodes,
+} from '../atmosphere';
 import type { ShaderNode } from '../tsl';
 import { finishSceneLighting, sceneLitColour } from '../lighting';
 import { objectLevelAt, paletteGrade, paletteNodes, srgbScale, type MapLightGrade } from './mapLighting';
@@ -123,6 +129,29 @@ export function vehicleLookWeight(object: Object3D | null | undefined): number {
 export const meshVehicleLook: ShaderNode = uniform(1)
   .setName('vehicleLook')
   .onObjectUpdate(({ object }: { object?: Object3D | null }) => vehicleLookWeight(object));
+
+/** Share of the ground-level light field a placed voxel model takes, shared by its part meshes (VoxelUnit). */
+export interface VoxelLocalLight {
+  /** localLightLift of the model's height above the ground: 1 on the ground, near 0 at flight level. */
+  share: number;
+}
+
+/** meshLocalLight's value for a drawn object: its own model's share, or its source mesh's for a twin; 1 without. */
+export function voxelLocalLightShare(object: Object3D | null | undefined): number {
+  const own = object?.userData.voxelLocalLight as VoxelLocalLight | undefined;
+  const source = (object as { source?: Object3D } | null | undefined)?.source?.userData.voxelLocalLight as
+    VoxelLocalLight | undefined;
+  const share = (own ?? source)?.share;
+  return share !== undefined && Number.isFinite(share) ? Math.min(1, Math.max(0, share)) : 1;
+}
+
+/**
+ * How much of the light field (fires, explosions, lamps: ground light) the voxel mesh being drawn takes
+ * (voxelLocalLightShare): one uniform of the shared graphs, written per drawn object like meshVehicleLook.
+ */
+export const meshLocalLight: ShaderNode = uniform(1)
+  .setName('voxelLocalLight')
+  .onObjectUpdate(({ object }: { object?: Object3D | null }) => voxelLocalLightShare(object));
 
 /** The light gains a voxel mesh is lit with (see meshVehicleLook): sun weight, highlight size and crease AO power. */
 export interface VoxelMeshGains extends VoxelLookGains {
@@ -513,14 +542,19 @@ function createGraph(
   const level: ShaderNode = objectLevelAt(grade, modelPosition.xz).add(voxelExtraLight);
   lit = srgbScale(lit, level);
   // Scene light on the night-desaturated colour (house paint keeps its colour), local lights (lamps, fires,
-  // explosions) on the full colour, strongest on faces turned up towards the lit ground's glow.
+  // explosions) on the full colour, strongest on faces turned up towards the lit ground's glow. The field is ground
+  // light: it fades with the model's height above the ground (meshLocalLight) and, like sprite and terrain art, only
+  // fills the display headroom left above the scene-lit colour (B2 #18: a burning Kirov over explosions went white).
   const paint: ShaderNode = step(15.5, pindex).mul(step(pindex, 31.5));
   const local: ShaderNode = objectLight(positionWorld.xz, nodes)
     .mul(1 / Math.PI)
-    .mul(float(0.55).add(max(n.y, 0).mul(0.45)));
-  let shaded: ShaderNode = sceneLitColour(mix(moonlit(lit, nodes), lit, paint).mul(voxelFill), nodes.sceneObjectMul)
-    .add(lit.mul(local))
-    .mul(ao);
+    .mul(float(0.55).add(max(n.y, 0).mul(0.45)))
+    .mul(meshLocalLight);
+  const sceneShade: ShaderNode = sceneLitColour(
+    mix(moonlit(lit, nodes), lit, paint).mul(voxelFill),
+    nodes.sceneObjectMul,
+  );
+  let shaded: ShaderNode = sceneShade.add(localLightHeadroom(sceneShade, lit.mul(local), nodes.localLightCap)).mul(ao);
   let uncovered: ShaderNode = float(1);
   if (projection) {
     const projected = projectedVoxelColour(
@@ -535,10 +569,13 @@ function createGraph(
     const projState = voxelProjectionFor(nodes);
     const formAo: ShaderNode = poweredOcclusion(float(1).sub(occlusion.mul(projState.formAO.clamp())), gains.aoPower);
     const colour: ShaderNode = srgbScale(projected.colour, level.div(projState.levelRef.max(0.01))).mul(formAo);
-    const projectedShade: ShaderNode = sceneLitColour(
+    const projectedScene: ShaderNode = sceneLitColour(
       mix(moonlit(colour, nodes), colour, projected.paint).mul(voxelFill),
       nodes.sceneObjectMul,
-    ).add(colour.mul(local));
+    );
+    const projectedShade: ShaderNode = projectedScene.add(
+      localLightHeadroom(projectedScene, colour.mul(local), nodes.localLightCap),
+    );
     // The redraw already contains AO and directional shading. Only uncovered engine art receives mesh AO/sheen.
     shaded = mix(shaded, projectedShade, projected.coverage);
     uncovered = float(1).sub(projected.coverage);
@@ -571,7 +608,8 @@ function createGraph(
     const sourceLit: ShaderNode = srgbScale(paletteLit(sourceNormal, sourceMatrix), sourceLevel);
     const sourceLocal: ShaderNode = objectLight(sourcePosition.xz, nodes)
       .mul(1 / Math.PI)
-      .mul(float(0.55).add(max(sourceNormal.y, 0).mul(0.45)));
+      .mul(float(0.55).add(max(sourceNormal.y, 0).mul(0.45)))
+      .mul(meshLocalLight);
     let ceiling: ShaderNode = mix(moonlit(sourceLit, nodes), sourceLit, paint)
       .mul(voxelFill)
       .add(sourceLit.mul(sourceLocal))

@@ -131,7 +131,12 @@ the same art (`gglite.shp`).
   to offset the Neutral tone mapper's toe, so the displayed ground keeps the intended fraction of noon. Moonlight is
   cool (`MOON_TINT`) on every map; a map's `[Lighting]` tint stays in its grade.
 - Objects take the light field's local lights (a forced night's sources, HD lamps, fires) at half saturation
-  (`OBJECT_TINT`), a compromise with the engine's untinted object lighting.
+  (`OBJECT_TINT`), a compromise with the engine's untinted object lighting. The field is ground light (the engine
+  lights no object with explosions): sprite pixels take `exp(-0.45 h)` of it at h world units above their ground
+  line, voxel units of their origin's height above the surface below (`localLightLift`; 0.07 at a flight level of
+  1500 leptons), and the added light only fills the display headroom above the scene-lit colour
+  (`localLightHeadroom`), for voxels as for sprites and terrain (B2 #18: a burning Kirov over night explosions had
+  gone near white).
 - The renderer applies the engine's cell light itself (`packages/hd-renderer/src/ra2/mapLighting.ts`): per
   cell `engineCellLight` with the map's `[Lighting]` and light sources, multiplied into the palette colours in their
   own sRGB scale: the shade row of I x M times the normalised tint for terrain-class art, the object level I (the

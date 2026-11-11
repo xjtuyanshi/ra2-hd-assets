@@ -57,6 +57,7 @@ import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/
 import {
   DEFAULT_ATMOSPHERE_NODES,
   moonlit,
+  LOCAL_LIGHT_HEIGHT_FALLOFF,
   localLightHeadroom,
   objectLightAt,
   pavedAt,
@@ -736,7 +737,7 @@ class SpriteGraph {
           .add(clamp(projected.sub(foundationOrigin), inset, max(aOcclusion.xy.sub(inset), inset)));
         const local: ShaderNode = objectLightAt(ground, own, building, nodes)
           .div(referenceLevel)
-          .mul(exp(height.mul(-0.45)));
+          .mul(exp(height.mul(-LOCAL_LIGHT_HEIGHT_FALLOFF)));
         // The map's light, then the scene light on the night-desaturated colour (house paint keeps its colour) and local
         // lights on the full colour.
         const shade = (c: ShaderNode, paint: ShaderNode): ShaderNode => {

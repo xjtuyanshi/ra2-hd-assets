@@ -17,7 +17,13 @@ import { silhouetteCode } from '../silhouette';
 import { decodeBase64 } from './cache';
 import { paletteNodes } from './mapLighting';
 import { SHADOW_COPIES, SILHOUETTE_FOOTPRINT, VoxelShadowMesh, VoxelWaterMesh, groundOf } from './voxelShadow';
-import { voxelFill, voxelMaterialFor, voxelProjectedMaterialFor, type VoxelLookClass } from './vpl';
+import {
+  voxelFill,
+  voxelMaterialFor,
+  voxelProjectedMaterialFor,
+  type VoxelLocalLight,
+  type VoxelLookClass,
+} from './vpl';
 import type { VoxelProjectionAsset } from './voxelProjection';
 import { CARD_CLEARANCE } from './cardDepth';
 import { VOXEL_TO_WORLD } from './voxelScale';
@@ -655,6 +661,8 @@ export class VoxelUnit extends Group {
   private readonly silhouetteSerial = nextSilhouetteSerial++;
   /** Whose look this unit takes (vpl.ts meshVehicleLook), shared by its part meshes and read by their water twins. */
   private readonly lookClass: VoxelLookClass = { building: false };
+  /** Share of the ground light field this unit takes (vpl.ts meshLocalLight), shared like the look class. */
+  private readonly localLight: VoxelLocalLight = { share: 1 };
   private readonly translucentMaterials = new Map<MeshStandardNodeMaterial, MeshStandardNodeMaterial>();
   bodyOpacity = 1;
   /** Up vector the game draws this body with (world axes), when its host reports one; null = follow the ground. */
@@ -671,6 +679,7 @@ export class VoxelUnit extends Group {
     mesh.userData.painterDepth = this.painterDepth;
     mesh.userData.voxelNativeDepth = this.nativeDepth;
     mesh.userData.voxelLookClass = this.lookClass;
+    mesh.userData.voxelLocalLight = this.localLight;
     // Each part has an outline of its own for the frame's outline pass (silhouette.ts): a turret over its hull too.
     mesh.userData.silhouette = silhouetteCode(this.silhouetteSerial, this.partMeshes.length);
     this.partMeshes.push(mesh);
@@ -718,6 +727,14 @@ export class VoxelUnit extends Group {
    */
   setBuildingPart(building: boolean): void {
     this.lookClass.building = building;
+  }
+
+  /**
+   * Share of the ground-level light field (fires, explosions, lamps) this model takes: atmosphere.ts localLightLift
+   * of its height above the ground; 1 (the default) on the ground.
+   */
+  setLocalLightShare(share: number): void {
+    this.localLight.share = Number.isFinite(share) ? Math.min(1, Math.max(0, share)) : 1;
   }
 
   /** Whether this model is a building's voxel turret (setBuildingPart). */

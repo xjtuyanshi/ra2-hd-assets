@@ -49,6 +49,7 @@ import { highlightRoughness, poweredOcclusion, spriteLookFor, type SpriteLookSta
 import { ra2VoxelClass, VOXEL_CLASS_ID } from './voxelClasses';
 import { VOXEL_TO_WORLD } from './voxelScale';
 import {
+  meshLocalLight,
   voxelLightingFor,
   voxelLookFinish,
   voxelMeshGains,
@@ -452,9 +453,11 @@ function createGraph(
   // Standard Lambert already divides irradiance by pi. HdRenderer's noon exposure is pi/E_noon; no emissive
   // daylight fill or second exposure factor belongs here. Metal energy conservation and GGX remain physical.
   material.colorNode = mix(moonlit(lit, nodes), lit, house);
+  // Ground light fades with the model's height above the ground (vpl.ts meshLocalLight).
   const local: ShaderNode = objectLight(positionWorld.xz, nodes)
     .mul(1 / Math.PI)
-    .mul(float(0.55).add(normalWorld.y.max(0).mul(0.45)));
+    .mul(float(0.55).add(normalWorld.y.max(0).mul(0.45)))
+    .mul(meshLocalLight);
   material.emissiveNode = lit
     .mul(local.add(params.a.mul(state.lightStrength)))
     .mul(ao)

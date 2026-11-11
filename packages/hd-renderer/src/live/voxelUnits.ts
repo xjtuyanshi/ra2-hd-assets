@@ -1,5 +1,6 @@
 import { Mesh, type BufferGeometry, type Group, type Vector3 } from 'three/webgpu';
 import type { VoxelModel } from '../../../ra2-assets/src/manifest';
+import { localLightLift } from '../atmosphere';
 import type { HdRenderer } from '../HdRenderer';
 import type { ObjectTint } from '../objectTint';
 import type { Ra2Cache } from '../ra2/cache';
@@ -346,6 +347,14 @@ export class VoxelUnits {
    */
   setBuildingPart(unit: VoxelUnit): void {
     if (unit.root instanceof VoxelRoot) unit.root.setBuildingPart(true);
+  }
+
+  /**
+   * The unit's origin is `height` world units above the ground below it (0 standing on terrain or a bridge deck): it
+   * then takes localLightLift(height) of the ground-level light field, as sprite pixels do above their ground line.
+   */
+  setLocalLightHeight(unit: VoxelUnit, height: number): void {
+    if (unit.root instanceof VoxelRoot) unit.root.setLocalLightShare(localLightLift(height));
   }
 
   /** Painter bias remains additive to either physical flight depth or the native ground card. */

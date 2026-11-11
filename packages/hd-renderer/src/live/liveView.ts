@@ -2549,6 +2549,8 @@ export class LiveView {
       }
       const grounded = this.groundCard(object);
       this.voxelUnits.pose(unit, pose, this.poseTurret, this.poseUp);
+      // Ground light (fires, explosions, lamps) fades with the height above the surface below (B2 #18).
+      this.voxelUnits.setLocalLightHeight(unit, grounded ? 0 : this.heightAboveSurface(unit.root.position));
       // On a ramp the native shadow lies in the plane the body is drawn in; a level body keeps the ground's own plane.
       // The engine's vehicle shadow is the footprint on the bottom face of the body section (UnitClass draw); landed
       // aircraft keep the plane through their origin.
@@ -2693,6 +2695,13 @@ export class LiveView {
   }
 
   /** Ground registrations on terrain or a stock bridge deck; rising/flying art keeps physical depth. */
+  /** World units from the terrain surface (or the nearest grid height without one) up to `at`; 0 at or below it. */
+  private heightAboveSurface(at: { x: number; y: number; z: number }): number {
+    const terrain = this.world.terrain;
+    const ground = terrain.surfaceHeightAt ? terrain.surfaceHeightAt(at.x, at.z) : terrain.heightAt(at.x, at.z);
+    return Number.isFinite(ground) ? Math.max(0, at.y - ground) : 0;
+  }
+
   private groundCard(object: LiveObject): boolean {
     if ((object.renderOrder?.layer ?? 2) !== 2) return false;
     const x = object.x / LEPTONS_PER_CELL;
