@@ -67,6 +67,9 @@ class NativeMirrorUnavailable extends Error {
     this.name = 'NativeMirrorUnavailable';
   }
 }
+/** Why a native capture episode is truncated (see NativeCore.incompleteCause). */
+export type NativeIncompleteCause = 'time-budget' | 'capacity' | 'other';
+
 export interface NativeCoreOptions extends NativeConnectionOptions {
   renderPassthrough?: boolean;
   pageCursor?: boolean;
@@ -354,6 +357,19 @@ export class NativeCore {
    * keep a frozen HD picture over the live game. Reported as is; the bridge decides how long is too long.
    */
   private incompleteSinceEpochMs: number | null = null;
+  /**
+   * Why the agent truncated its latest capture, from its fault report: 'time-budget' (the capture ran past its
+   * per-frame time budget, which a busy computer causes in a small match as well as a huge match on any computer),
+   * 'capacity' (the agent's page cap: the match really outgrew what it can copy) or 'other'; null while unknown
+   * (no truncation in this episode, or the report has not arrived). Cleared with incompleteSinceEpochMs.
+   */
+  private incompleteCause: NativeIncompleteCause | null = null;
+  /**
+   * Last truncated capture of this battle epoch. Unlike incompleteSinceEpochMs it survives completed render states,
+   * so the bridge can tell a capture that has been clean for a while from one that merely completed between
+   * truncations (2026-11-11 YR Allied 1 at load 13-19: about 40% of the captures truncated, the rest complete).
+   */
+  private lastTruncatedAtEpochMs: number | null = null;
   private previousLogicFrame: number | null = null;
   private menuSurface: boolean | null = null;
   private awaitingBattleMirror = false;
@@ -545,6 +561,7 @@ export class NativeCore {
     if (update.flags & 1) {
       this.cadence.truncatedMirrors++;
       this.incompleteSinceEpochMs ??= performance.timeOrigin + performance.now();
+      this.lastTruncatedAtEpochMs = performance.timeOrigin + performance.now();
     }
     if (update.flags & 4) {
       this.cadence.invalidMirrors++;
@@ -1041,8 +1058,9 @@ export class NativeCore {
     throw new NativeMemoryMiss(this.memory.missingRanges);
   }
   private async recoverCaptureCapacity(): Promise<void> {
-    if (this.checkingCaptureFault || this.recovering || this.closed || this.capacityRecoveryEpoch === this.readerEpoch)
-      return;
+    // After this epoch's capacity recovery the fault is still read (one request at a time) so that the truncation's
+    // cause stays current, but allocations are retired at most once per epoch.
+    if (this.checkingCaptureFault || this.recovering || this.closed) return;
     this.checkingCaptureFault = true;
     const epoch = this.readerEpoch;
     try {
@@ -1055,14 +1073,16 @@ export class NativeCore {
         lastMirrorFault?: { reason?: number; value?: number; limit?: number };
       };
       const fault = diagnostics?.lastMirrorFault;
-      // A time-budget miss is transient. Only the agent's actual page/seed capacity fault retires allocations.
-      if (
-        epoch === this.readerEpoch &&
-        fault &&
+      const capacity =
+        !!fault &&
         (fault.reason === 2 || fault.reason === 7) &&
         fault.limit === this.hello?.limits.pages &&
-        fault.value === fault.limit
-      ) {
+        fault.value === fault.limit;
+      // Only a fault of a still-open episode describes it (a completed render state may have ended it meanwhile).
+      if (epoch === this.readerEpoch && fault && this.incompleteSinceEpochMs !== null)
+        this.incompleteCause = capacity ? 'capacity' : fault.reason === 1 ? 'time-budget' : 'other';
+      // A time-budget miss is transient. Only the agent's actual page/seed capacity fault retires allocations.
+      if (epoch === this.readerEpoch && capacity && this.capacityRecoveryEpoch !== epoch) {
         this.capacityRecoveryEpoch = epoch;
         await this.recoverInvalidMirror('capture-capacity');
       }
@@ -1211,6 +1231,8 @@ export class NativeCore {
     this.completeRenderFrame = null;
     this.unreadableSinceEpochMs = null;
     this.incompleteSinceEpochMs = null;
+    this.incompleteCause = null;
+    this.lastTruncatedAtEpochMs = null;
     this.battleResumedAt = performance.now();
     // An incomplete reader never reaches working-set retirement. End its allocation scope at the actual video
     // mode/frame epoch instead, before the next map can inherit freed or over-capacity pages.
@@ -1305,6 +1327,7 @@ export class NativeCore {
             this.unreadableSinceEpochMs = null;
           // Any completed render state ends a truncation episode: the HD stream is moving, if slowly.
           this.incompleteSinceEpochMs = null;
+          this.incompleteCause = null;
           // Subscription waits may receive newer images: cache the publication actually consumed by the reader.
           this.renderPublication = readPublication;
           this.renderPublicationEpoch = epoch;
@@ -1678,6 +1701,8 @@ export class NativeCore {
         renderHealth: {
           unreadableSinceEpochMs: this.unreadableSinceEpochMs,
           incompleteSinceEpochMs: this.incompleteSinceEpochMs,
+          incompleteCause: this.incompleteCause,
+          lastTruncatedAtEpochMs: this.lastTruncatedAtEpochMs,
         },
         battlefieldRepaint: {
           state: this.battlefieldRepaint,
