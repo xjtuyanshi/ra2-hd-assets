@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VmShell } from '../../src/adapter/vmShell';
 import type { GameRenderState, GameRenderPreparation } from '../../src/games/renderState';
 import {
+  classifyStarvedCapture,
   parseHdPace,
   sidebarUpcomingTypes,
   startHdBridge,
+  starvedHoldMs,
   type HdBridgeCapture,
   type HdBridgeCombatState,
   type HdBridgeCounters,
@@ -2775,8 +2777,18 @@ describe('live original to HD transition', () => {
   });
 
   const capacity = 'This match is too large for the HD view to keep up; continuing with the original picture';
-  const health = (incompleteSinceEpochMs: number | null, unreadableSinceEpochMs: number | null = null) => ({
-    native: { renderHealth: { unreadableSinceEpochMs, incompleteSinceEpochMs } },
+  const busy = 'The computer is too busy for the HD view to keep up; showing the original picture until it catches up';
+  const behind = 'The HD view cannot keep up right now; continuing with the original picture';
+  /** Native health; the cause defaults to the agent's page-capacity fault (a match that really is too large). */
+  const health = (
+    incompleteSinceEpochMs: number | null,
+    unreadableSinceEpochMs: number | null = null,
+    incompleteCause: string | null = 'capacity',
+    lastTruncatedAtEpochMs: number | null = incompleteSinceEpochMs,
+  ) => ({
+    native: {
+      renderHealth: { unreadableSinceEpochMs, incompleteSinceEpochMs, incompleteCause, lastTruncatedAtEpochMs },
+    },
   });
 
   it('returns a battle whose capture stopped catching up to the live original after two seconds, with a notice', async () => {
@@ -2799,9 +2811,14 @@ describe('live original to HD transition', () => {
     expect(harness.hdCanvas.style.display).toBe('none');
     await advance(17, 3);
     expect(harness.status).toHaveBeenLastCalledWith(capacity);
-    // The capture catches up again: the next complete state fades HD back and clears the notice.
+    // The capture catches up again, but the original stays for the fallback's hold (no flicker on a capture that
+    // only completes between truncations); after it a calm health report fades HD back and clears the notice.
     harness.vm.getDiagnostics.mockImplementation(async () => health(null));
     harness.setState(battle(120));
+    await advance(17, 3);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(capacity);
+    await advance(1000, 10);
     await advance(17, 3);
     expect(harness.bridge()!.diagnostics.shown).toBe(true);
     expect(harness.bridge()!.diagnostics.state?.frame).toBe(120);
@@ -2888,6 +2905,150 @@ describe('live original to HD transition', () => {
     await advance(100, 15);
     expect(harness.status).toHaveBeenLastCalledWith(capacity);
     expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    harness.stop();
+  });
+
+  /** A battle with `count` objects (the small YR Allied 1 mission that starved had 271-354). */
+  const crowded = (frame: number, count: number): GameRenderState => {
+    const state = battle(frame);
+    const [object] = state.objects;
+    return { ...state, objects: Array.from({ length: count }, (_, i) => ({ ...object!, id: i + 1, uid: i + 1 })) };
+  };
+
+  it('tells a too-large match from a busy computer and holds the original longer after each fallback', () => {
+    expect(classifyStarvedCapture('capacity', 300)).toBe('too-large');
+    expect(classifyStarvedCapture('time-budget', 300)).toBe('busy');
+    expect(classifyStarvedCapture('time-budget', 16_741)).toBe('too-large');
+    expect(classifyStarvedCapture(null, 300)).toBe('behind');
+    expect(classifyStarvedCapture(undefined, 300)).toBe('behind');
+    expect(classifyStarvedCapture('other', 300)).toBe('behind');
+    expect(classifyStarvedCapture(null, 5_000)).toBe('too-large');
+    expect([1, 2, 3, 4, 5, 6].map(starvedHoldMs)).toEqual([10_000, 20_000, 40_000, 80_000, 120_000, 120_000]);
+  });
+
+  it('names a busy computer, not a too-large match, when a small match starves on time-budget misses', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    harness.setState(crowded(3, 300));
+    await advance(17, 3);
+    const starvedAt = performance.timeOrigin + performance.now();
+    harness.vm.getDiagnostics.mockImplementation(async () => health(starvedAt, null, 'time-budget'));
+    harness.setState(null);
+    await advance(100, 26);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(busy);
+    expect(harness.status).not.toHaveBeenCalledWith(capacity);
+    harness.stop();
+  });
+
+  it('names an unknown cause neutrally and still calls a huge match too large', async () => {
+    for (const [objects, cause, notice] of [
+      [300, null, behind],
+      [3_000, 'time-budget', capacity],
+    ] as const) {
+      const harness = setup('?hd=1', 'WebGL2', 'native');
+      harness.setFrameSize(1280, 720);
+      await goLive(harness);
+      harness.setState(crowded(3, objects));
+      await advance(17, 3);
+      const starvedAt = performance.timeOrigin + performance.now();
+      harness.vm.getDiagnostics.mockImplementation(async () => health(starvedAt, null, cause));
+      harness.setState(null);
+      await advance(100, 26);
+      expect(harness.status).toHaveBeenLastCalledWith(notice);
+      harness.stop();
+    }
+  });
+
+  it('replays YR Allied 1 on a busy computer without flickering between HD and the original', async () => {
+    // 2026-11-11 hdwatch-s1.log, all01umd 15:10:05-15:11:48: at load 13-19 about 40% of captures missed the agent's
+    // time budget (fault reason 1). Each time HD was shown its frames starved the reader for 2 s, the bridge fell back,
+    // the next complete state revealed HD again: 25 reveals in 100 s. Modelled here at 100 ms ticks.
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    const epochNow = () => performance.timeOrigin + performance.now();
+    let starvedSince: number | null = null;
+    let machineBusy = true;
+    let lastTruncated = epochNow();
+    harness.vm.getDiagnostics.mockImplementation(async () =>
+      health(starvedSince, null, starvedSince === null ? null : 'time-budget', lastTruncated),
+    );
+    let frame = 3;
+    const run = async (ticks: number) => {
+      for (let tick = 0; tick < ticks; tick++) {
+        if (machineBusy) lastTruncated = epochNow();
+        if (harness.bridge()!.diagnostics.shown && machineBusy) {
+          starvedSince ??= epochNow();
+          harness.setState(null);
+        } else {
+          starvedSince = null;
+          harness.setState(crowded((frame += 3), 300));
+        }
+        harness.nativeFrame(!!harness.bridge()!.diagnostics.shown);
+        await advance(100);
+      }
+    };
+    const reveals = () =>
+      harness.bridge()!.timeline.transitions.filter((entry) => entry.to === 'hd' && entry.reason === 'state-restored')
+        .length;
+    const fallbacks = () =>
+      harness.bridge()!.timeline.transitions.filter((entry) => entry.reason === 'capture-starved').length;
+    await run(1000);
+    // One fallback, then the original stays: the capture never runs five seconds without a truncation.
+    expect(fallbacks()).toBe(1);
+    expect(reveals()).toBe(0);
+    expect(harness.bridge()!.diagnostics.shown).toBe(false);
+    expect(harness.status).toHaveBeenLastCalledWith(busy);
+    expect(harness.status).not.toHaveBeenCalledWith(capacity);
+    // The load drops: after five clean seconds HD returns once and stays.
+    machineBusy = false;
+    await run(80);
+    expect(reveals()).toBe(1);
+    expect(harness.bridge()!.diagnostics.shown).toBe(true);
+    expect(harness.status).toHaveBeenLastCalledWith(null);
+    await run(100);
+    expect(reveals()).toBe(1);
+    expect(fallbacks()).toBe(1);
+    harness.stop();
+  });
+
+  it('backs off further when HD starves again soon after returning', async () => {
+    const harness = setup('?hd=1', 'WebGL2', 'native');
+    harness.setFrameSize(1280, 720);
+    await goLive(harness);
+    const epochNow = () => performance.timeOrigin + performance.now();
+    let starvedSince: number | null = null;
+    harness.vm.getDiagnostics.mockImplementation(async () =>
+      health(starvedSince, null, starvedSince === null ? null : 'time-budget', starvedSince),
+    );
+    let frame = 3;
+    const restoredAt: number[] = [];
+    const fallbackAt: number[] = [];
+    // A capture that is clean in the original picture but starves within two seconds of every HD reveal.
+    for (let tick = 0; tick < 1200; tick++) {
+      const shown = !!harness.bridge()!.diagnostics.shown;
+      if (shown) {
+        starvedSince ??= epochNow();
+        harness.setState(null);
+      } else {
+        starvedSince = null;
+        harness.setState(crowded((frame += 3), 300));
+      }
+      harness.nativeFrame(shown);
+      const before = harness.bridge()!.timeline.transitions.length;
+      await advance(100);
+      for (const entry of harness.bridge()!.timeline.transitions.slice(before)) {
+        if (entry.reason === 'capture-starved') fallbackAt.push(entry.atMs);
+        if (entry.to === 'hd' && entry.reason === 'state-restored') restoredAt.push(entry.atMs);
+      }
+    }
+    // 120 s: without a hold this was a reveal every few seconds; now the original is held 10, 20, 40, 80 s.
+    expect(fallbackAt.length).toBeGreaterThanOrEqual(3);
+    expect(restoredAt.length).toBeLessThanOrEqual(4);
+    for (let i = 0; i < restoredAt.length; i++)
+      expect(restoredAt[i]! - fallbackAt[i]!).toBeGreaterThanOrEqual(starvedHoldMs(i + 1));
     harness.stop();
   });
 

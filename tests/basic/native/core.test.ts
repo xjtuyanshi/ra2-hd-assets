@@ -502,6 +502,39 @@ describe('native core session and presenter lifecycle', () => {
     });
   });
 
+  it('reports why a capture is truncated and when it was last truncated, past completed render states', async () => {
+    vi.useFakeTimers();
+    const { core, agent } = await started({}, true);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    const health = async () =>
+      ((await core.getDiagnostics('sample')).native as { renderHealth: Record<string, unknown> }).renderHealth;
+    expect(await health()).toMatchObject({ incompleteCause: null, lastTruncatedAtEpochMs: null });
+    // A time-budget miss (reason 1): a busy computer or a huge match, never the page cap.
+    agent.mirrorFault = { reason: 1, stage: 2, rule: 0, value: 1000, limit: 12000 };
+    agent.mirror(2, [], 1);
+    await flush();
+    const truncatedAt = (await health()).lastTruncatedAtEpochMs;
+    expect(await health()).toMatchObject({
+      incompleteCause: 'time-budget',
+      incompleteSinceEpochMs: expect.any(Number),
+    });
+    expect(truncatedAt).toEqual(expect.any(Number));
+    await vi.advanceTimersByTimeAsync(600);
+    agent.mirror(3, [{ address: 0x1000, bytes: agent.initial }]);
+    expect((await core.getRenderState())?.frame).toBe(7);
+    // The episode ends with the completed state; the last truncation stays known for the bridge's calm check.
+    expect(await health()).toMatchObject({
+      incompleteSinceEpochMs: null,
+      incompleteCause: null,
+      lastTruncatedAtEpochMs: truncatedAt,
+    });
+    // The agent's page cap: the match really outgrew the capture.
+    agent.mirrorFault = { reason: 2, stage: 2, rule: 0, value: 4096, limit: 4096 };
+    agent.mirror(4, [], 1);
+    await flush();
+    expect((await health()).incompleteCause).toBe('capacity');
+  });
+
   it.each(['stop', 'disconnect'])(
     'settles publication waiting immediately during %s without another input request',
     async (ending) => {

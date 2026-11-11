@@ -97,6 +97,10 @@ export interface HdBridgeHost {
 interface NativeRenderHealth {
   unreadableSinceEpochMs?: number | null;
   incompleteSinceEpochMs?: number | null;
+  /** NativeCore's NativeIncompleteCause: 'time-budget', 'capacity' or 'other'; null while unknown. */
+  incompleteCause?: string | null;
+  /** Last truncated capture of this battle, kept across completed render states. */
+  lastTruncatedAtEpochMs?: number | null;
 }
 
 /**
@@ -116,6 +120,23 @@ const FRAME_BUDGET_MS = 1000 / 60;
 const PACE_RATES = [60, 40, 30] as const;
 /** How often the shown view asks how the game is doing: one diagnostics request on the emulator's thread. */
 const PACE_SAMPLE_MS = 1000;
+
+/**
+ * Why a starved capture returned the match to the original picture, for its notice: `too-large` (the agent's page cap,
+ * or a time-budget miss in a match of LARGE_MATCH_OBJECTS or more), `busy` (a time-budget miss in a smaller match: the
+ * computer is short of time, not the match too large) or `behind` (the cause is not known).
+ */
+export type HdStarvedKind = 'too-large' | 'busy' | 'behind';
+
+export function classifyStarvedCapture(cause: string | null | undefined, objects: number): HdStarvedKind {
+  if (cause === 'capacity' || objects >= LARGE_MATCH_OBJECTS) return 'too-large';
+  return cause === 'time-budget' ? 'busy' : 'behind';
+}
+
+/** How long the original picture is held after the `count`th starved fallback of a match (1-based). */
+export function starvedHoldMs(count: number): number {
+  return Math.min(STARVED_HOLD_MS * 2 ** Math.max(0, count - 1), STARVED_HOLD_MAX_MS);
+}
 
 /** `?hd-pace=`: what holds the shown view's frame rate (see parseHdPace). */
 export type HdPaceMode = { kind: 'auto' } | { kind: 'fixed'; rate: number } | { kind: 'off' };
@@ -159,6 +180,25 @@ const STATE_REQUEST_STALL_MS = 1000;
 const CAPTURE_STARVED_MS = 2000;
 /** While the preparation notice waits on such a capture, the health report is read this often. */
 const CAPTURE_PROBE_MS = 1000;
+/**
+ * A starved capture is not always a match that outgrew the agent. On 2026-11-11 YR Allied 1 (271-354 objects) at a
+ * machine load of 13-19 switched between HD and the original every 1.5-4 s for 100 s: every truncation was a
+ * time-budget miss (agent fault reason 1, about 40% of captures), none a page-capacity fault, and at load 7.7 the same
+ * mission never starved. The original picture therefore stays for at least STARVED_HOLD_MS after such a fallback,
+ * doubled on every further one in the same match up to STARVED_HOLD_MAX_MS, and HD returns only after the capture has
+ * run STARVED_CALM_MS without a truncated publication. The original picture stays fully playable meanwhile.
+ */
+const STARVED_HOLD_MS = 10_000;
+const STARVED_HOLD_MAX_MS = 120_000;
+const STARVED_CALM_MS = 5_000;
+/** HD shown this long without starving again starts the hold over at STARVED_HOLD_MS. */
+const STARVED_RESET_MS = 60_000;
+/**
+ * Objects from which a starved capture is called a too-large match even when the agent only reports a time-budget
+ * miss: the small mission that starved on a busy computer had 271-354 objects, the oversized match of round 9e #10
+ * 16 741 infantry; this is about their geometric mean. A page-capacity fault is too large at any object count.
+ */
+const LARGE_MATCH_OBJECTS = 2_500;
 /** A health report that never answers must not block every later check. */
 const HEALTH_TIMEOUT_MS = 2000;
 /** Blend two live pictures without fading the independent pointer or the sidebar. */
@@ -749,7 +789,31 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const preparationNotice = t('正在准备高清战场…');
   // The native launcher's recovery and terminal notices are deliberately in the owner's language.
   const recoveryNotice = '高清画面已暂停，正在恢复；您可以继续操作。';
-  const capacityNotice = t('本局战场过大，高清画面跟不上，继续显示原版画面');
+  const starvedNotices: Record<HdStarvedKind, string> = {
+    'too-large': t('本局战场过大，高清画面跟不上，继续显示原版画面'),
+    busy: t('电脑当前太忙，高清画面跟不上，先显示原版画面，空闲后自动恢复'),
+    behind: t('高清画面暂时跟不上，继续显示原版画面'),
+  };
+  const isStarvedNotice = (text: string | null) =>
+    text === starvedNotices['too-large'] || text === starvedNotices.busy || text === starvedNotices.behind;
+  /** Objects of the battle's latest complete state: a starved capture of a small match is not a too-large match. */
+  let matchObjects = 0;
+  const starvedNoticeFor = (health: NativeRenderHealth | undefined) =>
+    starvedNotices[classifyStarvedCapture(health?.incompleteCause, matchObjects)];
+  /** The notice of a starved capture found while the battle is prepared (see probeCaptureWhilePreparing). */
+  let starvedPreparationNotice = starvedNotices.behind;
+  /** Starved fallbacks of this match, and until when (performance.now()) the latest one keeps the original. */
+  let starvedFallbacks = 0;
+  let starvedHoldUntil = 0;
+  /** After the hold, a health report found the capture without truncations for STARVED_CALM_MS. */
+  let starvedCalm = false;
+  /** When the view was last revealed (performance.now()); null while it is not shown. */
+  let revealedSince: number | null = null;
+  const resetStarved = () => {
+    starvedFallbacks = 0;
+    starvedHoldUntil = 0;
+    starvedCalm = false;
+  };
   /** The notice of the current recovery: a read fault recovers, a starved capture says why it may not. */
   let recoveryText = recoveryNotice;
   /** The capture of this battle is starved (see CAPTURE_STARVED_MS) while the view has not been revealed yet. */
@@ -761,7 +825,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
    * an oversized one showed the stale notice for about a second).
    */
   let capacityUnconfirmed = false;
-  const isRecoveryNotice = (text: string | null) => text === recoveryNotice || text === capacityNotice;
+  const isRecoveryNotice = (text: string | null) => text === recoveryNotice || isStarvedNotice(text);
   const clearFallback = () => {
     fallback = null;
     // A missing snapshot can clear a fallback while the actual battlefield still prepares.
@@ -772,7 +836,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const syncPreparationNotice = () => {
     if (recoveringState) {
       const onBattle = enabled && nativeBattleSurface && !nativeDialogSurface && !fallback;
-      if (onBattle && recoveryText === capacityNotice && capacityUnconfirmed) {
+      if (onBattle && isStarvedNotice(recoveryText) && capacityUnconfirmed) {
         if (isRecoveryNotice(published)) publish(null);
         confirmCapacity();
       } else if (onBattle) publish(recoveryText);
@@ -782,10 +846,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     // An actual native battlefield, not an early map hint, owns this notice. It never covers play or replaces
     // a missing-cache/incomplete-art explanation, and a completed reveal does not reannounce on state gaps.
     const waiting = awaitingReveal();
-    const notice = captureStarved ? capacityNotice : preparationNotice;
-    if (waiting && (published === null || published === preparationNotice || published === capacityNotice))
+    const notice = captureStarved ? starvedPreparationNotice : preparationNotice;
+    if (waiting && (published === null || published === preparationNotice || isStarvedNotice(published)))
       publish(notice);
-    else if (!waiting && (published === preparationNotice || published === capacityNotice)) publish(null);
+    else if (!waiting && (published === preparationNotice || isStarvedNotice(published))) publish(null);
   };
   // The production graph walker follows page.ts -> hdBridge.ts, so the import itself must be under DEV.
   if (import.meta.env.DEV && params.get('hd-ui') === '1') {
@@ -980,8 +1044,44 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       // may replace it with the original.
       if (typeof unreadableSince === 'number' && sinceEpoch(unreadableSince) >= STATE_HIDE_HOLD_MS)
         recoverOriginal(reason);
-      else if (captureStarvedNow(health)) recoverOriginal('capture-starved', capacityNotice);
+      else if (captureStarvedNow(health)) recoverStarved(health);
     });
+  };
+  /** A starved capture: back to the live original, held there (see STARVED_HOLD_MS) with a notice naming its cause. */
+  const recoverStarved = (health: NativeRenderHealth | undefined) => {
+    const now = performance.now();
+    if (revealedSince !== null && now - revealedSince >= STARVED_RESET_MS) starvedFallbacks = 0;
+    starvedFallbacks++;
+    starvedHoldUntil = now + starvedHoldMs(starvedFallbacks);
+    starvedCalm = false;
+    recoverOriginal('capture-starved', starvedNoticeFor(health));
+  };
+  const captureCalm = (health: NativeRenderHealth | undefined) =>
+    typeof health?.incompleteSinceEpochMs !== 'number' &&
+    !(
+      typeof health?.lastTruncatedAtEpochMs === 'number' && sinceEpoch(health.lastTruncatedAtEpochMs) < STARVED_CALM_MS
+    );
+  /**
+   * Whether a starved fallback still keeps the original picture: during its hold, and after it until a health report
+   * finds the capture calm (asked once a second). Without a health report the hold alone decides.
+   */
+  const starvedHolding = (now: number) => {
+    if (!isStarvedNotice(recoveryText) || starvedCalm) return false;
+    if (now < starvedHoldUntil) return true;
+    if (typeof host.vm.getDiagnostics !== 'function') return false;
+    if (!healthPending && now - healthCheckedAt >= CAPTURE_PROBE_MS)
+      readHealth(
+        now,
+        (health) => {
+          if (captureCalm(health)) starvedCalm = true;
+          else if (health?.incompleteCause && starvedNoticeFor(health) !== recoveryText) {
+            recoveryText = starvedNoticeFor(health);
+            syncPreparationNotice();
+          }
+        },
+        false,
+      );
+    return true;
   };
   const sinceEpoch = (epochMs: number) => performance.timeOrigin + performance.now() - epochMs;
   const captureStarvedNow = (health: NativeRenderHealth | undefined) => {
@@ -992,7 +1092,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
    * Read the native render health once (one at a time, at most HEALTH_TIMEOUT_MS) and hand it to `use` while the
    * same battle, without a newer complete state, is still on the native battlefield.
    */
-  const readHealth = (now: number, use: (health: NativeRenderHealth | undefined) => void) => {
+  const readHealth = (now: number, use: (health: NativeRenderHealth | undefined) => void, sameState = true) => {
     if (typeof host.vm.getDiagnostics !== 'function') return;
     healthPending = true;
     healthCheckedAt = now;
@@ -1007,7 +1107,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         if (
           stopped ||
           epoch !== battleEpoch ||
-          serial !== completeStateSerial ||
+          (sameState && serial !== completeStateSerial) ||
           !enabled ||
           !nativeBattleSurface ||
           nativeDialogSurface
@@ -1044,8 +1144,10 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       return;
     readHealth(now, (health) => {
       const starved = captureStarvedNow(health);
-      if (starved === captureStarved) return;
+      const notice = starved ? starvedNoticeFor(health) : starvedPreparationNotice;
+      if (starved === captureStarved && notice === starvedPreparationNotice) return;
       captureStarved = starved;
+      starvedPreparationNotice = notice;
       syncPreparationNotice();
     });
   };
@@ -1058,7 +1160,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         // of announcing the previous one's capacity notice over it (round 9e #10).
         captureStarved = false;
         awaitingRevealSince = null;
-        if (recoveringState && recoveryText === capacityNotice) capacityUnconfirmed = true;
+        if (recoveringState && isStarvedNotice(recoveryText)) capacityUnconfirmed = true;
         // Dialogs keep the battle's video mode. Their native background and
         // question text must be opaque immediately, without the missing-state
         // grace period or the keyed battlefield's trailing frame.
@@ -1087,6 +1189,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
         recoveringState = false;
         recoveryOriginalFrameSeen = false;
         captureStarved = false;
+        resetStarved();
+        revealedSince = null;
         if (isRecoveryNotice(published)) publish(null);
         setHole(null, 'menu-video-mode');
         requestPassthrough(0);
@@ -1304,6 +1408,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (nativeMenuSurface || nativeDialogSurface) state = null;
     if (state?.map && state.view) {
       completeStateSerial++;
+      matchObjects = state.objects.length;
       // A complete state: the capture is keeping up again (the preparation notice says so on the next frame).
       captureStarved = false;
     }
@@ -1341,6 +1446,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
       revealed = false;
       recoveringState = false;
       recoveryOriginalFrameSeen = false;
+      resetStarved();
+      revealedSince = null;
       if (isRecoveryNotice(published)) publish(null);
       warmed = false;
       matchTypes.clear();
@@ -1468,6 +1575,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   const reveal = (now: number) => {
     if (!live || !preparing() || prematch || stateFrame < 1 || !pushed) return;
     if (recoveringState && !recoveryOriginalFrameSeen) return;
+    if (recoveringState && starvedHolding(now)) return;
     if (live.settledFrames < REVEAL_SETTLED_FRAMES) return;
     if (!live.localArtComplete) {
       if (latestState?.localHouse !== undefined && latestState.localHouse >= 0 && live.loadingArt() === 0)
@@ -1477,6 +1585,7 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
     if (!showHd(recoveringState ? 'state-restored' : 'view-settled', true)) return;
     revealed = true;
     recoveringState = false;
+    revealedSince = now;
     publish(null);
     live.outOfSight = false;
     timeline.revealedAt = now;

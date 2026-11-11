@@ -70,8 +70,14 @@ reachable (and checks what it imports); only a build shows that the bridge itsel
    Chinese recovery notice over the live original picture. A rendering exception also retains its recovery path;
    a short time-budget truncation never changes the picture style. A capture that stays truncated for 2 s without one
    completed render state (`native.renderHealth.incompleteSinceEpochMs`; a match that outgrew the agent's per-frame
-   copy) also returns to the live original, with a notice that the match is too large for HD, until a complete state
-   arrives; before the first HD frame the same condition replaces the preparation notice (probed once a second after
+   copy) also returns to the live original. Its notice names the cause from `renderHealth.incompleteCause`: the agent's
+   page-capacity fault, or a time-budget miss in a match of 2 500 objects or more, is a match too large for HD; a
+   time-budget miss in a smaller match is a busy computer (YR Allied 1, 271-354 objects, starved only at a machine
+   load of 10 or more); an unknown cause says only that HD cannot keep up. The original then stays for a hold of
+   10 s, doubled on each further fallback in the match up to 120 s (reset after 60 s of HD without one), and HD
+   returns only once a health report finds no truncated capture for 5 s (`renderHealth.lastTruncatedAtEpochMs`,
+   which outlives completed render states), so a capture that completes between truncations cannot switch the
+   picture every few seconds. The original picture stays playable throughout; before the first HD frame the same condition replaces the preparation notice (probed once a second after
    2 s of preparation). A native dialog (save, load, options) may lead to another, lighter battle, so it clears that
    finding: the preparation probe starts over, and a capacity recovery shows its notice again only after a health
    report still says starved (no stale notice while a small save loads). Health reports time out after 2 s, so one that never answers cannot block later checks. A complete
