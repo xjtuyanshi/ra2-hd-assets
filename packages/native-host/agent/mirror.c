@@ -9,6 +9,8 @@
 #include "mirror-flight.h"
 #include "mirror-profile.h"
 #include "mirror-budget.h"
+#include "mirror-backoff.h"
+#include "mirror-cadence.h"
 #include "x86-relative.h"
 #include <tlhelp32.h>
 #include <stdio.h>
@@ -64,7 +66,10 @@ static uint64_t mirror_bytes, hook_us_total, hook_us_max, budget_overruns;
 static volatile LONG hook_lock_skips;
 static uint64_t capture_attempts, captures_produced, mirrors_published, incomplete_published;
 static uint64_t in_flight_skips, publish_rejections, empty_subscription_skips, mirror_acks;
-static uint64_t mailbox_skips, ack_notifications;
+static uint64_t mailbox_skips, ack_notifications, backoff_skips;
+static struct nh_capture_backoff capture_backoff;
+static struct nh_capture_cadence capture_cadence;
+static uint64_t cadence_skips;
 #define NH_TIMING_SAMPLES 32768u
 static uint32_t ack_times[NH_TIMING_SAMPLES], ack_time_count, ack_time_cursor;
 /* Keep the first actual fault for each incomplete publication. Stage and rule
@@ -523,7 +528,7 @@ static void publish_incomplete(uint32_t frame, uint32_t flags, LARGE_INTEGER sta
 void nh_logic_tick(void) {
     LARGE_INTEGER start, finish;
     uint32_t frame, flags, i, dirty_count = 0, sample_count = 0, length = 16, removed_count;
-    int membership_changed;
+    int membership_changed, attempted = 0, published = 0;
     uint64_t next_generation;
     QueryPerformanceCounter(&start);
     if (!game_thread_id) {
@@ -557,7 +562,12 @@ void nh_logic_tick(void) {
         if (!subscription.page_removals) { shadow_count = 0; reset_pending = 1; }
         applied_revision = subscription_revision;
     }
+    /* A recent deadline miss defers the next full capture (mirror-backoff.h). */
+    if (nh_capture_backoff_skip(&capture_backoff)) { ++backoff_skips; InterlockedIncrement(&dropped_updates); goto done; }
+    if (!nh_capture_cadence_due(&capture_cadence, start.QuadPart, frequency.QuadPart,
+            frame, applied_revision, reset_pending)) { ++cadence_skips; goto done; }
     memset(&current_fault, 0, sizeof(current_fault));
+    attempted = 1;
     ++capture_attempts;
     nh_profile_begin((uint32_t)game_thread_id);
     flags = resolve_union(start);
@@ -667,9 +677,14 @@ void nh_logic_tick(void) {
           shadow_bytes = capture_bytes; capture_bytes = bytes;
           shadow_pages = capture_pages; capture_pages = pages; }
         shadow_count = capture_count; generation = next_generation;
-        reset_pending = 0; mirror_bytes += length;
+        nh_capture_cadence_published(&capture_cadence, start.QuadPart, frame, applied_revision);
+        reset_pending = 0; mirror_bytes += length; published = 1;
     } else { ++publish_rejections; InterlockedIncrement(&dropped_updates); }
 done:
+    if (attempted) {
+        if (published) nh_capture_backoff_clear(&capture_backoff);
+        else if (current_fault.reason == 1) nh_capture_backoff_missed(&capture_backoff);
+    }
     nh_profile_end(!current_fault.reason);
     QueryPerformanceCounter(&finish);
     { uint64_t us = (uint64_t)(finish.QuadPart - start.QuadPart) * 1000000u / (uint64_t)frequency.QuadPart;
@@ -933,6 +948,8 @@ void nh_mirror_disconnect(void) {
     EnterCriticalSection(&state_lock);
     memset(&subscription, 0, sizeof(subscription)); nh_page_seed_init(&fixed_seed);
     ++subscription_revision; shadow_count = 0; flights.count = 0; reset_pending = 1; pending_flags = 0; fixed_sample_count = 0;
+    nh_capture_backoff_clear(&capture_backoff);
+    nh_capture_cadence_clear(&capture_cadence);
     LeaveCriticalSection(&state_lock);
 }
 static int compare_times(const void *a, const void *b) {
@@ -1002,7 +1019,7 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
         (unsigned long)NH_HOOK_ADDRESS, detour[0],detour[1],detour[2],detour[3],detour[4],detour[5]);
     else strcpy(hook, "null");
     nh_profile_json(profile, sizeof(profile));
-    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP50Us\":%lu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s,\"mirrorCaptureAttempts\":%llu,\"mirrorProduced\":%llu,\"mirrorsPublished\":%llu,\"mirrorIncompletePublished\":%llu,\"mirrorInFlightSkips\":%llu,\"mirrorPublishRejections\":%llu,\"mirrorEmptySubscriptionSkips\":%llu,\"hookLockSkips\":%lu,\"mirrorAcks\":%llu,\"mirrorAckP50Us\":%lu,\"mirrorAckP99Us\":%lu,\"mirrorAckSamples\":%lu,\"mirrorInFlightCount\":%lu,\"mirrorWindow\":%lu,\"mirrorMailboxSkips\":%llu,\"mirrorAckNotifications\":%llu",
+    snprintf(out, capacity, "\"logicFrames\":%lu,\"mirrorBytes\":%llu,\"hookUs\":%llu,\"hookMaxUs\":%llu,\"budgetOverruns\":%llu,\"droppedUpdates\":%lu,\"truncatedUpdates\":%lu,\"invalidUpdates\":%lu,\"hookInstalled\":%s,\"mirrorPages\":%lu,\"inFlight\":%s,\"gameThreadId\":%lu,\"frameHook\":%s,\"teardownFailures\":%lu,\"ownedExternalPatches\":%lu,\"hookCalls\":%llu,\"hookP50Us\":%lu,\"hookP99Us\":%lu,\"hookPercentileSamples\":%lu,\"mirrorFaultCount\":%llu,\"mirrorFaultEvents\":%llu,\"recentMirrorFaultsOmitted\":%llu,\"lastMirrorFault\":%s,\"recentMirrorFaults\":%s,\"mirrorCaptureAttempts\":%llu,\"mirrorProduced\":%llu,\"mirrorsPublished\":%llu,\"mirrorIncompletePublished\":%llu,\"mirrorInFlightSkips\":%llu,\"mirrorPublishRejections\":%llu,\"mirrorEmptySubscriptionSkips\":%llu,\"hookLockSkips\":%lu,\"mirrorAcks\":%llu,\"mirrorAckP50Us\":%lu,\"mirrorAckP99Us\":%lu,\"mirrorAckSamples\":%lu,\"mirrorInFlightCount\":%lu,\"mirrorWindow\":%lu,\"mirrorMailboxSkips\":%llu,\"mirrorAckNotifications\":%llu,\"captureBackoffSkips\":%llu",
         (unsigned long)logic_frames, (unsigned long long)mirror_bytes, (unsigned long long)hook_us_total,
         (unsigned long long)hook_us_max, (unsigned long long)budget_overruns, (unsigned long)dropped_updates,
         (unsigned long)truncated_updates, (unsigned long)invalid_updates, installed ? "true" : "false",
@@ -1016,8 +1033,10 @@ void nh_mirror_diagnostics(char *out, uint32_t capacity) {
         (unsigned long long)empty_subscription_skips, (unsigned long)hook_lock_skips,
         (unsigned long long)mirror_acks, (unsigned long)ack_p50, (unsigned long)ack_p99, (unsigned long)ack_count,
         (unsigned long)flights.count, (unsigned long)(subscription.mirror_window ? subscription.mirror_window : 1),
-        (unsigned long long)mailbox_skips, (unsigned long long)ack_notifications);
+        (unsigned long long)mailbox_skips, (unsigned long long)ack_notifications, (unsigned long long)backoff_skips);
     used = (uint32_t)strlen(out);
-    if (used < capacity) snprintf(out + used, capacity - used, ",\"captureProfile\":%s", profile);
+    if (used < capacity) snprintf(out + used, capacity - used,
+        ",\"captureCadenceSkips\":%llu,\"captureIntervalUs\":%u,\"captureProfile\":%s",
+        (unsigned long long)cadence_skips, NH_CAPTURE_INTERVAL_US, profile);
     LeaveCriticalSection(&state_lock);
 }
