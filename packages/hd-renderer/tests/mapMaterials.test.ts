@@ -305,6 +305,28 @@ describe('map material cache loading', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('splits its pixel passes into slices that give the thread back, with the same atlas and fields', async () => {
+    const { images, water, width, height } = fixture({ version: 1, shoreIgnore: 'cliffs.png' });
+    // Left half opaque red, right half transparent: the dilation bleeds the red across the whole right half.
+    const rgba = new Uint8Array(width * height * 4);
+    for (let i = 0; i < width * height; i++) if (i % width < 8) rgba.set([255, 0, 0, 255], i * 4);
+    images.set('atlas.png', { width, height, bytes: new Uint8Array(width * height), rgba });
+    let now = 0;
+    let pauses = 0;
+    const cache = await loadRa2Cache('/map', {
+      // Every reading of the clock is 5 ms later: a slice ends after two units of work.
+      sliceClock: { now: () => (now += 5), pause: async () => void pauses++ },
+    });
+    // A match can be on screen while a map loads: its picture must keep being presented between the passes.
+    expect(pauses).toBeGreaterThan(height);
+    const atlas = cache.terrainAtlas.image.data as Uint8Array;
+    for (let i = 0; i < width * height; i++)
+      expect([...atlas.slice(i * 4, i * 4 + 4)]).toEqual(i % width < 8 ? [255, 0, 0, 255] : [255, 0, 0, 0]);
+    const baseline = buildShoreField(water, width, height, ref.scale, 4, false, new Uint8Array(water.length).fill(255));
+    expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+    baseline.texture.dispose();
+  });
+
   it.each(['width', 'height', 'same-area', 'load failure'])(
     'warns once and preserves the field on %s',
     async (problem) => {

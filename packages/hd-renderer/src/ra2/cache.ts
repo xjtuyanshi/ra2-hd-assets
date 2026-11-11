@@ -20,7 +20,8 @@ import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/m
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
 import { withDecodedPage, type PageUpload } from '../pageUpload';
-import { buildCliffField, buildShoreField } from './shoreField';
+import { cliffFieldSteps, shoreFieldSteps } from './shoreField';
+import { defaultSliceClock, runStepsSliced, type SliceClock, type Steps } from '../timeSlice';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
 export interface WindowsIndex {
@@ -51,7 +52,7 @@ export interface Ra2Cache {
   height: Uint8Array;
   tile: Uint16Array;
   terrainAtlas: Texture;
-  /** R8 mask over the terrain atlas: 1 where the original art shows open water (see buildWaterMask). */
+  /** R8 mask over the terrain atlas: 1 where the original art shows open water (see waterMaskSteps). */
   waterMask: DataTexture;
   /** Whole-map terrain composite (possibly AI-upscaled) and its water mask, when the cache provides one. */
   terrainMap?: {
@@ -207,6 +208,11 @@ export interface Ra2CacheOptions {
    * when there is one; default true.
    */
   colourMatched?: boolean;
+  /**
+   * How the load's long pixel passes (dilation, water masks, distance fields) give the thread back between slices
+   * (timeSlice.ts); default: the page's own clock and next task. A map can be loaded while a match is on screen.
+   */
+  sliceClock?: SliceClock;
 }
 
 /** Where an HD sprite atlas is recorded (manifest.spriteAtlasHd / library spriteAtlasesHd entries). */
@@ -348,6 +354,8 @@ export class MapCacheMissingError extends Error {
 
 export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}): Promise<Ra2Cache> {
   const nodes = options.nodes ?? new AtmosphereNodes();
+  const clock = options.sliceClock ?? defaultSliceClock;
+  const sliced = <T>(steps: Steps<T>) => runStepsSliced(steps, clock);
   const url = (file: string) => `${base.replace(/\/$/, '')}/${file}`;
   const manifestResponse = await fetch(url('manifest.json'));
   if (
@@ -368,8 +376,12 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.flipY = false;
     return texture;
   };
-  const { texture: terrainAtlas, original } = await loadDilated(url(manifest.terrainAtlas.file));
-  const waterMask = buildWaterMask(original, manifest.terrainAtlas.width, manifest.terrainAtlas.height, manifest.tiles);
+  const { texture: terrainAtlas, original } = await loadDilated(url(manifest.terrainAtlas.file), sliced, 10, true);
+  const waterMask = waterMaskTexture(
+    await sliced(waterMaskSteps(original!, manifest.terrainAtlas.width, manifest.terrainAtlas.height, manifest.tiles)),
+    manifest.terrainAtlas.width,
+    manifest.terrainAtlas.height,
+  );
   terrainAtlas.colorSpace = SRGBColorSpace;
   terrainAtlas.magFilter = LinearFilter;
   terrainAtlas.minFilter = LinearFilter;
@@ -428,7 +440,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     // Upscaled composites already carry bled colours under their transparent border; only the raw scale-1 image
     // needs the dilation pass.
     // The colour-matched image has the same size and layout as ref.file.
-    const { texture, original } = await loadDilated(url(material.file), ref.scale > 1 ? 0 : 10);
+    const { texture } = await loadDilated(url(material.file), sliced, ref.scale > 1 ? 0 : 10, false);
     texture.colorSpace = SRGBColorSpace;
     texture.magFilter = LinearFilter;
     // A whole map is far larger than the screen when zoomed out: mipmaps keep it from shimmering.
@@ -436,7 +448,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     texture.generateMipmaps = true;
     texture.anisotropy = 8;
     // The composite's own water mask when present; otherwise treat nothing as water rather than guessing.
-    const mask = material.waterMask ? await loadMask(url(material.waterMask)) : null;
+    const mask = material.waterMask ? await loadMask(url(material.waterMask), sliced) : null;
     let waterDetail: Texture | null = null;
     if (material.waterDetail) {
       try {
@@ -474,7 +486,7 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     if (mask && material.shoreIgnore) {
       const ignoreUrl = url(material.shoreIgnore);
       try {
-        const ignore = await loadMask(ignoreUrl);
+        const ignore = await loadMask(ignoreUrl, sliced);
         if (ignore.width === mask.width && ignore.height === mask.height) shoreIgnore = ignore.bytes;
         else console.warn(`${ignoreUrl}: shore-ignore size differs from the water mask; ignoring it`);
         // Only the CPU bytes feed the distance fields; this mask is never sampled by a material.
@@ -483,8 +495,19 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
         console.warn(`${ignoreUrl}: failed to load shore-ignore mask; ignoring it`, error);
       }
     }
-    void original;
     const downsample = material.waterBed ? 2 : 4;
+    const shore = mask
+      ? (
+          await sliced(
+            shoreFieldSteps(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore),
+          )
+        ).texture
+      : emptyMask();
+    const cliff =
+      mask && shoreIgnore
+        ? (await sliced(cliffFieldSteps(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample)))
+            .texture
+        : null;
     terrainMap = {
       texture,
       waterMask: mask?.texture ?? emptyMask(),
@@ -492,14 +515,8 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
       waterDetail,
       waterSurface,
       // The lake-bed shoreline needs a finer, higher-precision distance field (see buildShoreField).
-      shore: mask
-        ? buildShoreField(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore)
-            .texture
-        : emptyMask(),
-      cliff:
-        mask && shoreIgnore
-          ? buildCliffField(mask.bytes, shoreIgnore, mask.width, mask.height, ref.scale, downsample).texture
-          : null,
+      shore,
+      cliff,
       // Without its mask there is no waterline to follow, whatever the sidecar says.
       paintedWaterline: !!mask && material.paintedWaterline,
       ref,
@@ -740,7 +757,12 @@ export function screenToCell(sx: number, sy: number, level: number): [x: number,
  * their cell edges, so bilinear filtering there would otherwise mix in the transparent (black) surroundings and draw a
  * dark grid. Alpha is kept so wall geometry can still tell art from empty raster.
  */
-async function loadDilated(url: string, passes = 10): Promise<{ texture: DataTexture; original: Uint8Array }> {
+async function loadDilated(
+  url: string,
+  sliced: <T>(steps: Steps<T>) => Promise<T>,
+  passes: number,
+  keepOriginal: boolean,
+): Promise<{ texture: DataTexture; original: Uint8Array | null }> {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob(), {
     colorSpaceConversion: 'none',
     premultiplyAlpha: 'none',
@@ -750,14 +772,24 @@ async function loadDilated(url: string, passes = 10): Promise<{ texture: DataTex
   context.drawImage(bitmap, 0, 0);
   const { width, height } = bitmap;
   const data = context.getImageData(0, 0, width, height).data;
-  const pixels = new Uint8Array(data.buffer.slice(0));
-  const original = pixels.slice();
+  // The ImageData is this function's own: view its bytes instead of copying a whole-map image once more.
+  const pixels = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const original = keepOriginal ? pixels.slice() : null;
+  await sliced(dilateSteps(pixels, width, height, passes));
+  const texture = new DataTexture(pixels, width, height, RGBAFormat, UnsignedByteType);
+  texture.needsUpdate = true;
+  return { texture, original };
+}
+
+/** Bleed opaque colours `passes` texels into transparent RGBA texels, in place (see loadDilated). */
+function* dilateSteps(pixels: Uint8Array, width: number, height: number, passes: number): Steps<void> {
+  if (passes <= 0) return;
   let filled = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) filled[i] = pixels[i * 4 + 3]! >= 128 ? 1 : 0;
   // Wide enough to cover ramp cells whose geometry samples a few pixels past the painted diamond.
   for (let pass = 0; pass < passes; pass++) {
     const next = filled.slice();
-    for (let y = 0; y < height; y++) {
+    for (let y = 0; y < height; y++, yield) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
         if (filled[i]) continue;
@@ -791,9 +823,6 @@ async function loadDilated(url: string, passes = 10): Promise<{ texture: DataTex
     }
     filled = next;
   }
-  const texture = new DataTexture(pixels, width, height, RGBAFormat, UnsignedByteType);
-  texture.needsUpdate = true;
-  return { texture, original };
 }
 
 /** Template families that can contain open water: open sea, shores, water cliffs and bridges over water. */
@@ -805,12 +834,18 @@ const WATER_FAMILIES = /^(water|shore|w-a-|w-b-|wbrdge|wtr|bank)/i;
  * into water); pure water templates (land type 9) are water wherever they are opaque. The mask is softened a little
  * so the shoreline band can carry foam.
  */
-function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: readonly TileEntry[]): DataTexture {
+function* waterMaskSteps(
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+  tiles: readonly TileEntry[],
+): Steps<Uint8Array> {
   const mask = new Float32Array(width * height);
   for (const tile of tiles) {
     const family = tile.file.replace(/\d+\..*$/, '');
     if (!WATER_FAMILIES.test(family) && tile.terrainType !== 9) continue;
     const [rx, ry, rw, rh] = tile.rect;
+    yield;
     for (let y = ry; y < ry + rh; y++) {
       for (let x = rx; x < rx + rw; x++) {
         const i = y * width + x;
@@ -843,7 +878,7 @@ function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: 
   let current = mask;
   for (let pass = 0; pass < 2; pass++) {
     const next = current.slice();
-    for (let y = 0; y < height; y++) {
+    for (let y = 0; y < height; y++, yield) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
         if (!opaque[i]) continue;
@@ -866,7 +901,7 @@ function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: 
   let filled = opaque.slice();
   for (let pass = 0; pass < 3; pass++) {
     const next = filled.slice();
-    for (let y = 0; y < height; y++) {
+    for (let y = 0; y < height; y++, yield) {
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
         if (filled[i]) continue;
@@ -894,6 +929,10 @@ function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: 
   }
   const bytes = new Uint8Array(width * height);
   for (let i = 0; i < bytes.length; i++) bytes[i] = Math.round(current[i]! * 255);
+  return bytes;
+}
+
+function waterMaskTexture(bytes: Uint8Array, width: number, height: number): DataTexture {
   const texture = new DataTexture(bytes, width, height, RedFormat, UnsignedByteType);
   texture.magFilter = LinearFilter;
   texture.minFilter = LinearFilter;
@@ -903,6 +942,7 @@ function buildWaterMask(rgba: Uint8Array, width: number, height: number, tiles: 
 
 async function loadMask(
   url: string,
+  sliced: <T>(steps: Steps<T>) => Promise<T>,
 ): Promise<{ texture: DataTexture; bytes: Uint8Array; width: number; height: number }> {
   const bitmap = await createImageBitmap(await (await fetch(url)).blob(), {
     colorSpaceConversion: 'none',
@@ -912,13 +952,19 @@ async function loadMask(
   const context = canvas.getContext('2d', { willReadFrequently: true })!;
   context.drawImage(bitmap, 0, 0);
   const rgba = context.getImageData(0, 0, bitmap.width, bitmap.height).data;
-  const bytes = new Uint8Array(bitmap.width * bitmap.height);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = rgba[i * 4]!;
+  const bytes = await sliced(redChannelSteps(rgba, bitmap.width, bitmap.height));
   const texture = new DataTexture(bytes, bitmap.width, bitmap.height, RedFormat, UnsignedByteType);
   texture.magFilter = LinearFilter;
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;
   return { texture, bytes, width: bitmap.width, height: bitmap.height };
+}
+
+function* redChannelSteps(rgba: Uint8ClampedArray, width: number, height: number): Steps<Uint8Array> {
+  const bytes = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++, yield)
+    for (let x = y * width, end = x + width; x < end; x++) bytes[x] = rgba[x * 4]!;
+  return bytes;
 }
 
 function emptyMask(): DataTexture {

@@ -1186,6 +1186,11 @@ documentation/naming of those generated assets, not shader restrictions. `ra2-as
 
 ## Original maps (`src/ra2`)
 
+- Cache load (`cache.ts`): its whole-map pixel passes (atlas dilation, the atlas water mask, mask channel extraction,
+  the shore and cliff distance fields) run as generator passes (`src/timeSlice.ts`) that give the thread back every
+  8 ms (`Ra2CacheOptions.sliceClock` injects the clock), because a live match can load a map while its original
+  picture is on screen. Image decoding (`getImageData`), terrain geometry and the first frame's shader builds are
+  not sliced. The same pass functions run unsliced for the synchronous `buildShoreField` / `buildCliffField`.
 - Map lighting (`mapLighting.ts`): the map's `[Lighting]` and light sources as the engine applies them by day, per cell
   (`MapLightGrade`, one texel per cell from `engineCellLight` in `ra2-assets` `lights.ts`: Ambient - Ground + Level x z
   plus lamp posts such as `INGALITE`, normalised tint). Terrain-class art (tiles, overlays, smudges, trees) takes the

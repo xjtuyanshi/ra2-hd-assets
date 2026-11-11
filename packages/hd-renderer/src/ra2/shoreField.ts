@@ -1,4 +1,5 @@
 import { DataTexture, DataUtils, HalfFloatType, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
+import { runSteps, type Steps } from '../timeSlice';
 
 /** Encoded range of the signed shore distance, in cells: texel value 0..1 maps to SHORE_MIN..SHORE_MAX. */
 export const SHORE_MIN = -3;
@@ -44,11 +45,24 @@ export function buildShoreField(
   precise = false,
   ignore?: Uint8Array,
 ): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
-  const { water, ignored, width: w, height: h } = downsampleMasks(mask, width, height, step, ignore);
-  fillSpecks(water, w, h, SPECK_TEXELS);
+  return runSteps(shoreFieldSteps(mask, width, height, scale, step, precise, ignore));
+}
+
+/** buildShoreField as a pass that yields after every row or line of work (see timeSlice.ts). */
+export function* shoreFieldSteps(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  scale: number,
+  step = 4,
+  precise = false,
+  ignore?: Uint8Array,
+): Steps<{ texture: DataTexture; data: Uint8Array; width: number; height: number }> {
+  const { water, ignored, width: w, height: h } = yield* downsampleMasks(mask, width, height, step, ignore);
+  yield* fillSpecksSteps(water, w, h, SPECK_TEXELS);
   const texel = step / scale;
-  const toWater = distanceField(water, w, h, 1, texel, texel * 2);
-  const toLand = distanceField(
+  const toWater = yield* distanceFieldSteps(water, w, h, 1, texel, texel * 2);
+  const toLand = yield* distanceFieldSteps(
     ignored ? water.map((value, i) => value || ignored[i]!) : water,
     w,
     h,
@@ -60,6 +74,7 @@ export function buildShoreField(
   const half = precise ? new Uint16Array(w * h) : null;
   const inset = precise ? texel / 2 : 0;
   for (let i = 0; i < data.length; i++) {
+    if (i % w === 0) yield;
     const cells = water[i]
       ? (Math.sqrt(toLand[i]!) - inset) / ISO_PIXELS_PER_CELL
       : ignored?.[i]
@@ -94,11 +109,24 @@ export function buildCliffField(
   scale: number,
   downsample = 4,
 ): { texture: DataTexture; data: Uint16Array } {
-  const { ignored, width: w, height: h } = downsampleMasks(maskBytes, width, height, downsample, ignoreBytes);
+  return runSteps(cliffFieldSteps(maskBytes, ignoreBytes, width, height, scale, downsample));
+}
+
+/** buildCliffField as a pass that yields after every row or line of work (see timeSlice.ts). */
+export function* cliffFieldSteps(
+  maskBytes: Uint8Array,
+  ignoreBytes: Uint8Array,
+  width: number,
+  height: number,
+  scale: number,
+  downsample = 4,
+): Steps<{ texture: DataTexture; data: Uint16Array }> {
+  const { ignored, width: w, height: h } = yield* downsampleMasks(maskBytes, width, height, downsample, ignoreBytes);
   const texel = downsample / scale;
-  const toCliff = distanceField(ignored!, w, h, 1, texel, texel * 2);
+  const toCliff = yield* distanceFieldSteps(ignored!, w, h, 1, texel, texel * 2);
   const data = new Uint16Array(w * h);
   for (let i = 0; i < data.length; i++) {
+    if (i % w === 0) yield;
     const cells = Math.sqrt(toCliff[i]!) / ISO_PIXELS_PER_CELL;
     data[i] = DataUtils.toHalfFloat(Math.min(1, cells / CLIFF_FIELD_MAX));
   }
@@ -111,12 +139,18 @@ export function buildCliffField(
 }
 
 /** Sample both fields on the same texel grid, including partial blocks at the composite's edges. */
-function downsampleMasks(mask: Uint8Array, width: number, height: number, step: number, ignore?: Uint8Array) {
+function* downsampleMasks(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  step: number,
+  ignore?: Uint8Array,
+): Steps<{ water: Uint8Array; ignored: Uint8Array | null; width: number; height: number }> {
   const w = Math.ceil(width / step);
   const h = Math.ceil(height / step);
   const water = new Uint8Array(w * h);
   const ignored = ignore ? new Uint8Array(w * h) : null;
-  for (let y = 0; y < h; y++)
+  for (let y = 0; y < h; y++, yield)
     for (let x = 0; x < w; x++) {
       let sum = 0;
       let n = 0;
@@ -141,11 +175,16 @@ function downsampleMasks(mask: Uint8Array, width: number, height: number, step: 
  * (in place). Returns the number of texels changed.
  */
 export function fillSpecks(water: Uint8Array, width: number, height: number, maxTexels: number): number {
+  return runSteps(fillSpecksSteps(water, width, height, maxTexels));
+}
+
+function* fillSpecksSteps(water: Uint8Array, width: number, height: number, maxTexels: number): Steps<number> {
   const seen = new Uint8Array(water.length);
   const stack: number[] = [];
   const component: number[] = [];
   let changed = 0;
   for (let start = 0; start < water.length; start++) {
+    if (start % width === 0) yield;
     if (water[start] || seen[start]) continue;
     seen[start] = 1;
     stack.push(start);
@@ -187,6 +226,17 @@ export function distanceField(
   spacingX: number,
   spacingY: number,
 ): Float64Array {
+  return runSteps(distanceFieldSteps(values, width, height, target, spacingX, spacingY));
+}
+
+function* distanceFieldSteps(
+  values: Uint8Array,
+  width: number,
+  height: number,
+  target: number,
+  spacingX: number,
+  spacingY: number,
+): Steps<Float64Array> {
   const out = new Float64Array(width * height);
   for (let i = 0; i < out.length; i++) out[i] = values[i] === target ? 0 : FAR;
   const n = Math.max(width, height);
@@ -196,12 +246,12 @@ export function distanceField(
   const z = new Float64Array(n + 1);
   const s2x = spacingX * spacingX;
   const s2y = spacingY * spacingY;
-  for (let x = 0; x < width; x++) {
+  for (let x = 0; x < width; x++, yield) {
     for (let y = 0; y < height; y++) f[y] = out[y * width + x]! / s2y;
     transform1d(f, height, d, v, z);
     for (let y = 0; y < height; y++) out[y * width + x] = d[y]! * s2y;
   }
-  for (let y = 0; y < height; y++) {
+  for (let y = 0; y < height; y++, yield) {
     for (let x = 0; x < width; x++) f[x] = out[y * width + x]! / s2x;
     transform1d(f, width, d, v, z);
     for (let x = 0; x < width; x++) out[y * width + x] = d[x]! * s2x;
