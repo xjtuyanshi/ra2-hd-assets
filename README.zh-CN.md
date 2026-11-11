@@ -5,7 +5,7 @@
 > **朋友在 Windows 上适配第 12 版高清：[START_HERE.md](START_HERE.md)。**
 > 把这个入口交给 AI，即可找到源码、已经做好的高清素材包、桥接程序，以及 Windows 适配与验收步骤。
 
-> **机主第 12 版高清分支的私人备份。** 在另一台 Mac 上安装请按 [AI_SETUP.md](AI_SETUP.md)
+> **机主第 12 版高清分支的个人备份。** 在另一台 Mac 上安装请按 [AI_SETUP.md](AI_SETUP.md)
 > （供 AI 编程助手逐步执行）或较简短的 [RESTORE.md](RESTORE.md)。
 
 ![开发阶段：Alpha](https://img.shields.io/badge/status-Alpha-orange)

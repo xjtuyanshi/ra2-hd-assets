@@ -21,8 +21,8 @@ to Windows paths and commands; do not follow its Mac/Wine/model-environment setu
 
 ## Where everything comes from
 
-All release names below belong to the source repository **`xjtuyanshi/ra2-hd-assets`**,
-including when working in a fork. Cloning/forking the Git repository does not download
+The source repository and published release attachments are publicly readable. All
+release names below belong to **`xjtuyanshi/ra2-hd-assets`**, including when working in a fork. Cloning/forking the Git repository does not download
 or copy its release attachments.
 
 | Required item                                                  | Location                                                                                                                      | Action                                                                                                                                                                |
@@ -45,9 +45,10 @@ A Windows entry and native process startup still need to be implemented.
 
 ## Execution order
 
-1. Check repository/release access before installing or downloading large files. A public
-   HTTPS clone needs no GitHub login; private contents and attachments require access
-   using the PC owner's account. Never request the original author's credentials.
+1. Check repository/release access before installing or downloading large files. Public
+   HTTPS source and release downloads need no GitHub login. If GitHub CLI requests
+   authentication, use the PC owner's own account or anonymous HTTPS downloads instead.
+   Never request the original author's credentials.
    If access is missing, report exactly which source or asset is unavailable and continue
    only work that does not depend on it.
 2. Read the Windows guide, check the actual toolchain requirements and available disk,
@@ -78,7 +79,7 @@ A Windows entry and native process startup still need to be implemented.
    recordings and personal data out of Git;
    retain the EA non-endorsement disclaimer and third-party notices.
 
-To locate the attachments with GitHub CLI (read-only; requires access if private):
+To locate the attachments with GitHub CLI (read-only; CLI login may be required):
 
 ```powershell
 gh release view farm-build12-20261102 --repo xjtuyanshi/ra2-hd-assets --json assets --jq '.assets[].name'

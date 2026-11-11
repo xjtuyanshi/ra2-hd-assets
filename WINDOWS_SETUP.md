@@ -20,9 +20,11 @@ owner has played a full match on the PC.
   Revenge folder to the PC. A `gamemd.exe` that differs from the supported digest
   (YR 1.001, sha256 `7b8a068535d6af06845edf95ae829b113d00c02909330e16f197426cd7db94b6`)
   is reported, not patched and not treated as fatal.
-- The repository `xjtuyanshi/ra2-hd-assets` is private. Push only there, never anywhere
-  else. Commit after each finished step (Chinese commit description, English comments and
-  docs, the agent's `Co-Authored-By` trailer) and push to `main` of that repository.
+- The repository `xjtuyanshi/ra2-hd-assets` and its published release attachments are
+  public. Remote writes require an explicit request. For the original author's authorized
+  work, use Chinese commit descriptions, English comments/docs and the agent's
+  `Co-Authored-By` trailer; push only to the explicitly authorized repository and branch.
+  For a friend's port, follow [START_HERE.md](START_HERE.md): local changes only.
   Never commit game files, executables from the game, screenshots, recordings, model
   weights or caches; run `git config core.hooksPath scripts/git-hooks` first so the
   pre-commit guard is active.
@@ -61,8 +63,7 @@ Suggested command for the owner:
 winget install Git.Git GitHub.cli OpenJS.NodeJS Python.Python.3.12 astral-sh.uv Meta.Zstandard Google.Chrome
 ```
 
-Then `gh auth login` (owner), clone the private repository to a path **without non-ASCII
-characters or spaces** (for example `C:\ra2-hd\code`), `pnpm install --frozen-lockfile`,
+Clone the public repository to a path **without non-ASCII characters or spaces** (for example `C:\ra2-hd\code`), `pnpm install --frozen-lockfile`,
 and `pnpm run check`, which must pass before any porting work.
 
 ## 3. The port: what the agent has to build
@@ -117,5 +118,5 @@ Report each item as passed, failed or unverified, with its evidence.
 - 要新做的：启动器的 Windows 分支（不用 Wine，直接运行游戏，`ddraw.dll` 放进游戏文件夹，Blowfish 注册由机主手动执行）、Windows 双击启动器、文档。
 - 规矩：
   - 游戏文件只由机主从自己的安装复制，绝不下载。
-  - 每完成一步就提交，并推送到私人仓库 `xjtuyanshi/ra2-hd-assets`，不推到别处。
+  - 源码与已发布附件现为公开；远程写入须有明确授权。朋友独立适配按 `START_HERE.md`，只改自己的本地副本。
   - 安装软件、管理员权限、登录都由机主操作。

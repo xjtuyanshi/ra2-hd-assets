@@ -6,7 +6,7 @@
 > Give this entry to a coding assistant for source, finished HD resource pack and bridge
 > download locations, Windows porting steps and independent verification.
 
-> **Private backup of the owner's Build 12 HD fork.** To set it up on another Mac, follow
+> **Personal backup of the owner's Build 12 HD fork.** To set it up on another Mac, follow
 > [AI_SETUP.md](AI_SETUP.md) (step-by-step, for an AI coding agent) or the shorter
 > [RESTORE.md](RESTORE.md).
 
