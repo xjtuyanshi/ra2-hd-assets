@@ -8,6 +8,8 @@ anything from it, anywhere else.
 A Chinese summary is at the end. [RESTORE.md](RESTORE.md) is the shorter human guide to
 the same backup; this runbook supersedes it where they differ.
 
+For the owner's Windows PC, see [WINDOWS_SETUP.md](WINDOWS_SETUP.md) (port plan, not yet verified).
+
 ## 0. Ground rules for the agent
 
 - Never download game files. The owner supplies their own Yuri's Revenge copy (step 9).
