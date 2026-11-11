@@ -19,7 +19,7 @@ import { buildRa2Terrain, waterLevelBounds } from '../src/ra2/terrain';
 import { waterPreset } from '../src/ra2/waterLook';
 import * as waterLook from '../src/ra2/waterLook';
 import type { ShaderNode } from '../src/tsl';
-import { LEVEL_HEIGHT } from '../src/world';
+import { IsoCamera, LEVEL_HEIGHT, MIRROR_SKIP_LAYER } from '../src/world';
 
 const cleanups: (() => void)[] = [];
 const originalStyle = waterPreset.style;
@@ -186,6 +186,19 @@ describe('terrain water mirrors', () => {
     expect(build.reflectionTarget!.position.y).toBe(0); // Only one water cell: legacy does not apply the new threshold.
     expect(build.mirrorAtlas).toBeNull();
     expect(detailSamples).toHaveLength(0);
+  });
+
+  it('keeps flat shadows on the water out of the single-plane mirror, as the mirror atlas does', () => {
+    waterPreset.style = 'classic';
+    const { instances } = terrain(true);
+    const sceneCamera = new IsoCamera().camera;
+    expect(sceneCamera.layers.isEnabled(MIRROR_SKIP_LAYER)).toBe(true);
+    const virtual = (instances[0] as unknown as { getVirtualCamera(c: Camera): Camera }).getVirtualCamera(sceneCamera);
+    expect(virtual).not.toBe(sceneCamera);
+    // Without this the mirror drew the shadow lying on its own plane and the water darkened it a second time.
+    expect(virtual.layers.isEnabled(MIRROR_SKIP_LAYER)).toBe(false);
+    expect(virtual.layers.isEnabled(0)).toBe(true);
+    expect(sceneCamera.layers.isEnabled(MIRROR_SKIP_LAYER)).toBe(true);
   });
 
   it('leaves small enhanced-bed pools without a mirror target', () => {

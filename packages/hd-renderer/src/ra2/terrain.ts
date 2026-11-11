@@ -60,7 +60,7 @@ import { setMaterialFallback } from '../materialFallback';
 import { MirrorAtlas, type MirrorSource } from '../mirrorAtlas';
 import type { TerrainBuild } from '../terrain';
 import type { ShaderNode } from '../tsl';
-import { LEVEL_HEIGHT } from '../world';
+import { LEVEL_HEIGHT, skipMirrorLayer } from '../world';
 import { NO_TILE, ra2Screen, type Ra2Cache, tileAtlasPixel } from './cache';
 import { srgbScale, terrainGradeAt } from './mapLighting';
 import { SHORE_MAX, SHORE_MIN } from './shoreField';
@@ -948,6 +948,8 @@ function createMaterials(
       // Classic and legacy enhanced water retain the single lowest mirror, including levels with fewer than 12 cells.
       const waterY = waterLevels.reduce((lowest, { level }) => Math.min(lowest, level), Infinity) * LEVEL_HEIGHT;
       const mirror = reflector({ resolutionScale: 0.5, depth: true });
+      // Like the mirror atlas, leave out flat shadows and decals on the water itself (see MIRROR_SKIP_LAYER).
+      skipMirrorLayer((mirror as unknown as { reflector: Parameters<typeof skipMirrorLayer>[0] }).reflector);
       mirror.target.rotateX(-Math.PI / 2);
       mirror.target.position.y = waterY;
       const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);

@@ -1,4 +1,4 @@
-import { OrthographicCamera, Vector3 } from 'three/webgpu';
+import { type Camera, OrthographicCamera, Vector3 } from 'three/webgpu';
 
 /**
  * World units: one map cell = 1 unit on the ground plane (x = cell x, z = cell y), +y up.
@@ -20,6 +20,22 @@ export const PIXELS_PER_CELL_EDGE = 60 / Math.SQRT2;
  * must enable the layer (IsoCamera below does); the cameras of the mirror tiles (mirrorAtlas.ts) have it disabled.
  */
 export const MIRROR_SKIP_LAYER = 30;
+
+/**
+ * Make a reflector's virtual cameras leave out MIRROR_SKIP_LAYER. Three's ReflectorNode clones the scene camera,
+ * layers included, and the scene camera enables that layer, so without this a plain `reflector()` mirror draws the
+ * flat shadows lying on its own water plane: the water then reflects a shadowed copy of itself, and the shadow drawn
+ * over it darkens it a second time (Black Eagle shadows on classic water at about 0.26 of the water beside them,
+ * against the engine's half shadow).
+ */
+export function skipMirrorLayer(reflector: { getVirtualCamera(camera: Camera): Camera }): void {
+  const virtualCamera = reflector.getVirtualCamera.bind(reflector);
+  reflector.getVirtualCamera = (camera: Camera) => {
+    const virtual = virtualCamera(camera);
+    virtual.layers.disable(MIRROR_SKIP_LAYER);
+    return virtual;
+  };
+}
 
 export function cellToWorld(x: number, y: number, z: number, out = new Vector3()): Vector3 {
   return out.set(x, z * LEVEL_HEIGHT, y);
