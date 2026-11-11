@@ -2,13 +2,17 @@
 
 This file is written for a coding agent (and for the owner reading along). Follow the
 steps in order. Every step ends with a check; do not continue past a failed check. The
-repository is private and belongs to the owner; keep it private and never push it, or
-anything from it, anywhere else.
+source repository and its published release attachments are public. Do not push changes
+or upload assets anywhere without an explicit request.
 
 A Chinese summary is at the end. [RESTORE.md](RESTORE.md) is the shorter human guide to
 the same backup; this runbook supersedes it where they differ.
 
 For the owner's Windows PC, see [WINDOWS_SETUP.md](WINDOWS_SETUP.md) (port plan, not yet verified).
+
+For a friend's independent Windows port, use [START_HERE.md](START_HERE.md) first.
+Its account and local-only work scope replaces this file's original-author login/push
+instructions for that use; only the resource restoration sections carry over to Windows.
 
 ## 0. Ground rules for the agent
 
@@ -126,11 +130,13 @@ brew --version | head -1; gh --version | head -1; node --version; zstd --version
 ```
 
 Checks: `uname -m` prints `arm64`, `rosetta-ok` is printed, `node --version` starts with
-`v26.`. Then the owner signs in to GitHub (browser flow; the agent never handles tokens):
+`v26.`. Public source and release downloads do not require the original author's account. If
+GitHub CLI requests login, the current computer owner signs in with their own account
+(browser flow; the agent never handles tokens):
 
 ```sh
-gh auth login            # owner, account xjtuyanshi
-gh auth status           # check: logged in to github.com
+gh auth login            # current computer owner's own account, only if CLI login is needed
+gh auth status           # check: the current computer owner's account
 ```
 
 ## 4. Clone and install code dependencies
@@ -140,7 +146,7 @@ mkdir -p ~/ra2-hd && cd ~/ra2-hd
 gh repo clone xjtuyanshi/ra2-hd-assets code
 cd code
 git config core.hooksPath scripts/git-hooks
-git log -1 --oneline          # main of the private repo
+git log -1 --oneline          # main of the source repo
 pnpm --version                # check: 11.24.0
 pnpm install --frozen-lockfile
 test -x node_modules/.bin/vite && echo deps-ok
@@ -435,4 +441,4 @@ from `gameres/s2x/backup/` (logs in `work/upload.log` and `env/work/upload.log`)
 11. 首次启动会创建独立 Wine 环境（约 1 分钟），在 Chrome 中点「全屏开始」；记录在 `packages/native-host/build/play-*/`。
 12. 确认高清：画面明显更清晰、无洋红/粉色块；按 `\` 能在高清与原版之间切换；没有「高清画面未启用/加载失败」提示；控制台 `__hdBridge.presentation.mode` 为 `'hd'`。最终以机主真实对局为准。
 13. 常见问题：缺 Rosetta；Wine 环境标记与目录不符（换一个新的空文件夹，不要改标记）；Chrome 未打开（看 `play-url.txt`）；15450–15459 端口被占用；残留 `run/session.pid`、`run/_slots/PAUSE` 可删除，单用户机器不需要任何 PAUSE/LIVE 槽文件；磁盘不足。
-14. 许可证：Wine 为 LGPL-2.1+，SDXL 为 CreativeML Open RAIL++-M（须随附许可证与使用限制），VAE 修复版为 MIT，ControlNet Tile 为 Apache-2.0，Real-ESRGAN 为 BSD-3/MIT；均允许私人保存与再分发，许可证全文在 `backup/LICENSES/`。本仓库保持私有。
+14. 许可证：Wine 为 LGPL-2.1+，SDXL 为 CreativeML Open RAIL++-M（须随附许可证与使用限制），VAE 修复版为 MIT，ControlNet Tile 为 Apache-2.0，Real-ESRGAN 为 BSD-3/MIT；均允许私人保存与再分发，许可证全文在 `backup/LICENSES/`。源码仓库及已发布附件现为公开；未经明确授权，不执行远程写入。

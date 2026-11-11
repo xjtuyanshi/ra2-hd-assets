@@ -1,20 +1,20 @@
 # 第 12 版高清在另一台 Mac 上恢复 / Restoring Build 12 on another Mac
 
-This private repository is the owner's personal backup. `main` is the Build 12 code
+This public repository is the owner's personal backup. `main` is the Build 12 code
 (`2c0ff27`) plus this file. The HD farm and the native-host build outputs are assets of
 the release `farm-build12-20261102`. The free Wine, Real-ESRGAN and the diffusion model
 weights are assets of the release `env-build12-20261102`. Nothing here is an original game
-file: no MIX, EXE or DLL from the game, no INI, no maps, no Wine prefix. Keep the
-repository private.
+file: no MIX, EXE or DLL from the game, no INI, no maps, no Wine prefix. Source code
+and published release attachments are publicly readable.
 
 **For a complete, step-by-step setup with checks (written for an AI coding agent), use
 [AI_SETUP.md](AI_SETUP.md).** It also covers Wine, models, Python environments,
 confirming HD and troubleshooting.
 
-本仓库是机主的私人备份。`main` 是第 12 版代码（`2c0ff27`）加上本文件。高清缓存与本机组件构建结果放在
+本仓库是机主的个人备份，现已公开。`main` 是第 12 版代码（`2c0ff27`）加上本文件。高清缓存与本机组件构建结果放在
 发布 `farm-build12-20261102` 的附件中；免费 Wine、Real-ESRGAN 与扩散模型权重在发布
 `env-build12-20261102` 中。这里没有任何原版游戏文件（无游戏 MIX/EXE/DLL、INI、地图）和 Wine 环境（prefix）。
-请保持仓库为私有。完整的分步安装与检查见 [AI_SETUP.md](AI_SETUP.md)。
+源码与已发布附件可公开读取。完整的分步安装与检查见 [AI_SETUP.md](AI_SETUP.md)。
 
 ## 发布附件 / Release assets
 
@@ -65,7 +65,8 @@ folders under `gameres/s2x/build12/redraw/`, and the `.realise.lock` work files'
   `env-build12-20261102` 中（见 AI_SETUP.md 第 7 步），核对 sha256 后解压到 `~/ra2-hd/wine/`。
 - Google Chrome; Node (v26 used here); pnpm 11.24.0 (`brew install pnpm`; pnpm switches to
   the version in `package.json`, Node 26 no longer ships corepack); `zstd`, `python3` and `gh` (e.g. `brew install zstd python gh`);
-  `gh auth login` with the account that owns this repository.
+  Public downloads do not require the original author's account; if GitHub CLI requests
+  authentication, use the current computer owner's own account.
 - Disk: about 60 GiB for the farm, plus 2 GiB per chunk being restored (streaming) or
   another 60 GiB if you download every chunk first.
   磁盘：农场约 60 GiB；逐块恢复时另需约 2 GiB，先下载全部分块则另需约 60 GiB。
