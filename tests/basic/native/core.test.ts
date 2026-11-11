@@ -1107,6 +1107,51 @@ describe('native core session and presenter lifecycle', () => {
       expect(u32(subscription.payload, 12)).toBe(4000);
     }
   });
+  it('withholds mirror credits until a reader consumes an image, keeping one capture ahead', async () => {
+    const { core, agent } = setup();
+    agent.mirrorWindow = 2;
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    const acks = () =>
+      agent.requests.filter((request) => request.type === NativeMessageType.Ack).map((request) => u32(request.payload));
+    // The startup image was read; its credit stays withheld until a newer image is consumed.
+    expect(acks()).toEqual([]);
+    // Publications nobody has read keep their credits, so the agent cannot capture on every logic frame.
+    agent.mirror(20, []);
+    agent.mirror(21, []);
+    await flush();
+    expect(acks()).toEqual([]);
+    const page = agent.initial.slice();
+    page[0] = 9;
+    agent.mirror(22, [{ address: 0x1000, bytes: page }]);
+    expect((await core.getRenderState())?.frame).toBe(9);
+    // Reading the newest image returns every older credit in order; the consumed one waits for the next capture.
+    expect(acks()).toEqual([1, 20, 21]);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({
+      mirrorPacing: { window: 2, holding: 1 },
+    });
+  });
+  it('returns withheld mirror credits when a reader rebuild needs a replacement subscription', async () => {
+    const { core, agent } = setup();
+    agent.mirrorWindow = 2;
+    const start = core.start();
+    agent.hello(true, true);
+    await start;
+    expect((await core.getRenderState())?.frame).toBe(7);
+    agent.mirror(30, []);
+    await flush();
+    const acks = () =>
+      agent.requests.filter((request) => request.type === NativeMessageType.Ack).map((request) => u32(request.payload));
+    expect(acks()).toEqual([]);
+    // An invalid capture starts recovery on the same connection. The agent publishes the replacement revision only
+    // after its window drains, so every withheld credit must be acknowledged rather than forgotten.
+    agent.mirror(31, [], 4);
+    await flush();
+    expect(acks()).toEqual([1, 30, 31]);
+    expect((await core.getDiagnostics('sample')).native).toMatchObject({ mirrorPacing: { holding: 0 } });
+  });
   it('uses the larger bootstrap budget only when advertised by the agent', async () => {
     for (const [advertised, expected] of [
       [8000, 8000],

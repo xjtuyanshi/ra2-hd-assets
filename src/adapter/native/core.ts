@@ -41,6 +41,7 @@ import {
   runNativeTransaction,
 } from './memory';
 import type { NativeRange, NativeTransactionHost, NativeWrite } from './memory';
+import { NativeMirrorPacer } from './mirrorPacer';
 
 /**
  * Longest time battle pictures are withheld after attaching to a running battle while the guest has not yet run the
@@ -54,6 +55,12 @@ export const STALE_BATTLEFIELD_HOLD_MS = 1500;
  * capture was lost leaves the native picture frozen until some other path invalidates it.
  */
 export const PICTURE_CREDIT_REISSUE_MS = 1000;
+/**
+ * Longest time mirror credits stay withheld while no reader consumes an image (see NativeMirrorPacer). Well below the
+ * one-second mirror waiter and staleness limits; in the original picture it leaves a few captures per second instead
+ * of one per logic frame.
+ */
+export const NATIVE_MIRROR_HOLD_MS = 200;
 
 export class NativeUnsupportedError extends Error {
   constructor(operation: string) {
@@ -257,6 +264,22 @@ export class NativeCore {
   private readonly waiters = new Set<MirrorWaiter>();
   private renderPublicationWaiter: RenderPublicationWaiter | null = null;
   private renderTargetFps: number | null = null;
+  private mirrorWindow = 1;
+  private completeAppliedAt = -Infinity;
+  private frameReadImageAt = -Infinity;
+  private performanceImageAt = -Infinity;
+  private readonly pacer = new NativeMirrorPacer({
+    acknowledge: (frame) => {
+      try {
+        this.connection.notify(NativeMessageType.Ack, encodeU32(frame));
+      } catch (error) {
+        // A hold timer can outlive the socket; that connection's credits died with it.
+        if (!(error instanceof NativeConnectionLostError)) throw error;
+      }
+    },
+    window: () => this.mirrorWindow,
+    holdMs: NATIVE_MIRROR_HOLD_MS,
+  });
   private subscribed: NativeRange[] = [];
   private subscribedRules: NativeHostFollowRule[] = [];
   private readonly workingSet = new NativeReaderWorkingSet();
@@ -400,6 +423,8 @@ export class NativeCore {
     if (this.failure) return this.failure;
     if (this.closed) return Promise.resolve(null);
     this.running = false;
+    // A failed session cannot return credits; they belong to the connection that is going away.
+    this.pacer.reset();
     this.rejectWaiters(error);
     if (error instanceof NativeConnectionLostError && this.sessionTerminal) {
       const notice = '游戏连接已中断，正在确认游戏是否已关闭。';
@@ -448,6 +473,9 @@ export class NativeCore {
       .catch(() => false);
   }
   private rejectWaiters(error: Error): void {
+    // Recovery keeps the same connection: withheld credits must return, or the agent's drained-window barrier for
+    // the replacement subscription could never be met. Teardown forgets them separately.
+    this.pacer.releaseForBarrier();
     this.finishRenderPublicationWait('interrupt');
     for (const waiter of this.waiters) {
       clearTimeout(waiter.timer);
@@ -527,6 +555,8 @@ export class NativeCore {
         }, timeoutMs),
       };
       this.waiters.add(waiter);
+      // A waiter needs a newer image now; withheld credits would delay or block the capture it waits for.
+      this.pacer.releaseForBarrier();
     });
   }
   private mirrorArrived(update: NativeMirrorUpdate): void {
@@ -555,14 +585,17 @@ export class NativeCore {
     const applyMs = performance.now() - appliedAt;
     this.cadence.mirrorApplyMs += applyMs;
     this.cadence.mirrorApplyMaxMs = Math.max(this.cadence.mirrorApplyMaxMs, applyMs);
-    this.connection.notify(NativeMessageType.Ack, encodeU32(update.frame));
     if (!complete) {
+      this.pacer.arrived(update.frame, this.mirrorPublication, false);
       this.finishRenderPublicationWait('interrupt');
       if (update.flags & 4 && this.running) void this.recoverInvalidMirror();
       else if (update.flags & 1 && this.running) void this.recoverCaptureCapacity();
       return;
     }
     this.mirrorPublication++;
+    this.completeAppliedAt = appliedAt;
+    // Credits follow consumption: the agent captures again once a reader has used an image (NativeMirrorPacer).
+    this.pacer.arrived(update.frame, this.mirrorPublication, true);
     this.cadence.completeMirrors++;
     if (this.cadenceMirrorFrame !== update.frame) {
       this.cadence.distinctMirrors++;
@@ -945,7 +978,7 @@ export class NativeCore {
           budgetUs: Math.min(12000, this.hello.limits.maxBudgetUs ?? 4000),
           sampleCount: 0,
           pageRemovals: revisionSupported,
-          mirrorWindow: revisionSupported && this.hello.limits.mirrorWindow === 2 ? 2 : 1,
+          mirrorWindow: (this.mirrorWindow = revisionSupported && this.hello.limits.mirrorWindow === 2 ? 2 : 1),
         }),
       );
       if (epoch !== this.readerEpoch) return;
@@ -1256,6 +1289,8 @@ export class NativeCore {
         () => {
           if (epoch !== this.readerEpoch) return null;
           const started = performance.now();
+          this.pacer.consume(this.mirrorPublication);
+          if (slot === this.frame) this.frameReadImageAt = this.completeAppliedAt;
           if (slot === this.render) {
             this.cadence.renderReaderCalls++;
             readPublication = this.mirrorPublication;
@@ -1408,7 +1443,15 @@ export class NativeCore {
     const counters = await this.read(this.frame, () => this.policy!.createFrameReader());
     this.renderTargetFps =
       Number.isFinite(counters?.targetFps) && counters!.targetFps! > 0 ? counters!.targetFps! : null;
-    return counters ? this.meter.sample(counters, performance.now(), this.running) : null;
+    // Paced credits can leave the read image older than this call. Time the sample at that image's arrival, so the
+    // logic rate stays measured between the actual frame counters rather than between telemetry calls.
+    // An image read again (no publication since) has no newer arrival time; time it at the call as before.
+    const imageAt =
+      Number.isFinite(this.frameReadImageAt) && this.frameReadImageAt !== this.performanceImageAt
+        ? this.frameReadImageAt
+        : performance.now();
+    this.performanceImageAt = this.frameReadImageAt;
+    return counters ? this.meter.sample(counters, imageAt, this.running) : null;
   }
 
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -1693,6 +1736,7 @@ export class NativeCore {
         stateReadCpuMaxMs: this.stateReadCpuMaxMs,
         readerOperations: this.readerOperations.slice(),
         cadence: { ...this.cadence, recent: this.cadenceEvents.slice() },
+        mirrorPacing: { ...this.pacer.counters, holding: this.pacer.holding, window: this.mirrorWindow },
         mirrorRecovery: {
           count: this.recoveryCount,
           omitted: this.recoveryCount - this.recoveries.length,
@@ -1865,6 +1909,7 @@ export class NativeCore {
     } finally {
       this.closed = true;
       this.connection.close();
+      this.pacer.reset();
       for (const remove of this.unsubscribe) remove();
       this.unsubscribe.length = 0;
       this.rejectWaiters(new Error('Native session stopped'));
