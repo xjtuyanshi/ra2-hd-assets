@@ -1,0 +1,5 @@
+# Packages the plain `python3` asset tools in packages/ra2-assets/python/ import (numpy, PIL, cv2),
+# pinned to the versions installed in Homebrew Python 3.14.5 on the Build 12 machine (2026-11-02).
+numpy==2.5.2
+pillow==12.3.0
+opencv-python-headless==5.0.0.93

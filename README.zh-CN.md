@@ -2,6 +2,9 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+> **机主第 12 版高清分支的私人备份。** 在另一台 Mac 上安装请按 [AI_SETUP.md](AI_SETUP.md)
+> （供 AI 编程助手逐步执行）或较简短的 [RESTORE.md](RESTORE.md)。
+
 ![开发阶段：Alpha](https://img.shields.io/badge/status-Alpha-orange)
 [![运行时：v86](https://img.shields.io/badge/runtime-v86-5c4ee5)](docs/ARCHITECTURE.md)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](package.json)

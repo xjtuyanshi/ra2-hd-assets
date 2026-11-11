@@ -2,6 +2,10 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+> **Private backup of the owner's Build 12 HD fork.** To set it up on another Mac, follow
+> [AI_SETUP.md](AI_SETUP.md) (step-by-step, for an AI coding agent) or the shorter
+> [RESTORE.md](RESTORE.md).
+
 ![Status: Alpha](https://img.shields.io/badge/status-Alpha-orange)
 [![Runtime: v86](https://img.shields.io/badge/runtime-v86-5c4ee5)](docs/ARCHITECTURE.md)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](package.json)
