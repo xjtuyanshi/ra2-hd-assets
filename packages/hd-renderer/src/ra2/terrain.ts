@@ -1180,16 +1180,13 @@ function createMaterials(
       // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
       // contact shading is dropped near that water (artToneContactRelief).
       // Nor at a hard shore: the rock at the water's edge is the map's own art, not a beach to dress.
-      const ownShore: ShaderNode = clear
-        ? float(0)
-        : waterline
-          ? float(1).sub(tone).mul(waterline.beach)
-          : float(1).sub(tone);
+      // Clear shares this beach band (its painted grey-blue outline read as a dark ring) with lighter wet sand.
+      const ownShore: ShaderNode = waterline ? float(1).sub(tone).mul(waterline.beach) : float(1).sub(tone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
-      const land = clear
-        ? albedo
-        : mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(mix(float(1), float(0.8), sand));
+      const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
+        mix(float(1), float(clear ? 0.88 : 0.8), sand),
+      );
       albedo = mix(
         land,
         tonedWaterBody(

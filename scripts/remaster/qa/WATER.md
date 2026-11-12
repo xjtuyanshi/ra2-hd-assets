@@ -15,10 +15,13 @@ than treating the sand composite as water. Terrain artwork is never rewritten by
 
 Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
 `hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its depth proxy reaches deep
-water at five cells, with steep rocky shores; per-theatre absorption, refracted bed art where available and a neutral
-fallback bed replace cobalt. It keeps a capped sky/object reflection, an eight-second foam cycle, low-energy normal
-layers and shallow-only caustics. Painted pools remain protected. The scene-wide cinematic grade is unchanged:
-clear reserves chroma headroom with a water-local linear-channel floor and slight warm compensation.
+water at about 2.4 cells, with steep rocky shores; per-theatre absorption over a theatre sand bed (refracted bed art
+where the cache has one) gives turquoise shallows that deepen to dark teal-blue. Ripples are five normal-map layers spread
+over many directions and stretched for the isometric view, shown mainly as light and shade from their height, so
+they stay round on screen instead of forming stripe trains. It keeps a capped sky/object reflection with a Fresnel
+sky tint toward the top of the screen, sparse sun sparkle inside slowly drifting patches, a seven-second breathing foam
+line on beaches, a little white water at rocky shores and shallow-only caustics. Painted pools remain protected. The
+scene-wide cinematic grade is unchanged.
 
 ## Prepare one session
 
