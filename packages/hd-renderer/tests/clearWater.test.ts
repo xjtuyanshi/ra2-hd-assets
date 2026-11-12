@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Color } from 'three/webgpu';
 import { LOOK_PRESETS } from '../src/HdRenderer';
 import { cinematicGradeRgb } from '../src/post';
-import { CLEAR_LAYERS, CLEAR_WATER, clearDepth, clearPalette, clearTransmission } from '../src/ra2/clearWater';
+import { CLEAR_WATER, CLEAR_WAVES, clearDepth, clearPalette, clearTransmission } from '../src/ra2/clearWater';
 
 describe('clear water optical policy', () => {
   it('deepens monotonically within the shallow band and drops steeply beside rocks', () => {
@@ -63,15 +63,22 @@ describe('clear water optical policy', () => {
     expect(clearPalette('snow')).not.toEqual(clearPalette('desert'));
     expect(clearPalette('urban')).toEqual(clearPalette('newurban'));
   });
-  it('spreads the ripple layers over many directions and keeps the finest octave weak', () => {
-    const angles = CLEAR_LAYERS.map(([angle]) => ((angle % Math.PI) + Math.PI) % Math.PI).sort((a, b) => a - b);
+  it('spreads the wave trains over many directions at RTS-readable wavelengths', () => {
+    const angles = CLEAR_WAVES.map(([degrees]) => (((degrees % 180) + 180) % 180) * (Math.PI / 180)).sort(
+      (a, b) => a - b,
+    );
     // Directions (mod 180 degrees) leave no gap wider than 60 degrees: no preferred axis, no parallel stripe trains.
     const gaps = angles.map((angle, i) => (i ? angle - angles[i - 1]! : angle + Math.PI - angles.at(-1)!));
     expect(Math.max(...gaps)).toBeLessThan(Math.PI / 3);
-    // Drift directions alternate, so the pattern evolves instead of sliding as one sheet.
-    expect(CLEAR_LAYERS.some(([, , speed]) => speed < 0)).toBe(true);
-    expect(CLEAR_LAYERS.some(([, , speed]) => speed > 0)).toBe(true);
-    const fine = CLEAR_LAYERS.at(-1)!;
-    expect(fine[3] ** 2 / CLEAR_LAYERS.reduce((sum, layer) => sum + layer[3] ** 2, 0)).toBeLessThan(0.05);
+    expect(CLEAR_WAVES.length).toBeGreaterThanOrEqual(3);
+    // Wavelengths of roughly half a cell to a cell on screen: crests, not blotches or noise.
+    for (const [, wavelength] of CLEAR_WAVES) {
+      expect(wavelength).toBeGreaterThanOrEqual(0.5);
+      expect(wavelength).toBeLessThanOrEqual(1.2);
+    }
+    // Alternate trains run the other way, so the sea evolves instead of sliding as one sheet; all of them slowly.
+    expect(CLEAR_WAVES.some(([, , speed]) => speed < 0)).toBe(true);
+    expect(CLEAR_WAVES.some(([, , speed]) => speed > 0)).toBe(true);
+    for (const [, , speed] of CLEAR_WAVES) expect(Math.abs(speed)).toBeLessThan(0.1);
   });
 });

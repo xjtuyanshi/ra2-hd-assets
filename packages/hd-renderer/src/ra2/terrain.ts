@@ -40,6 +40,7 @@ import {
   floor,
   fract,
   max,
+  min,
   mix,
   normalView,
   positionWorld,
@@ -426,6 +427,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   };
   let materials = makeMaterials(waterPreset.style);
   let activeStyle = waterPreset.style;
+  (cache.nodes ?? DEFAULT_ATMOSPHERE_NODES).clearWater.value = activeStyle === 'clear' ? 1 : 0;
   const familyKey = (style: WaterStyle) => (style === 'classic' || style === 'clear' ? style : 'enhanced');
   const families = new Map([[familyKey(activeStyle), materials]]);
   const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
@@ -515,6 +517,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
       }
       activeStyle = style;
       writeWaterTuning(tuning, style);
+      (cache.nodes ?? DEFAULT_ATMOSPHERE_NODES).clearWater.value = style === 'clear' ? 1 : 0;
       return style;
     },
   };
@@ -1067,6 +1070,22 @@ function createMaterials(
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;
     const clear = waterPreset.style === 'clear';
+    // Clear look: water beside paved cells (quays, seawalls, embankment roads) is no beach. The surface texture is
+    // per cell and bilinear, so the largest of a few taps about two thirds of a cell away finds the wall.
+    const quay: ShaderNode | undefined = clear
+      ? smoothstep(
+          0.25,
+          0.6,
+          [
+            [0.65, 0],
+            [-0.65, 0],
+            [0, 0.65],
+            [0, -0.65],
+          ]
+            .map(([dx, dz]) => pavedAt(positionWorld.xz.add(vec2(dx!, dz!)), nodes))
+            .reduce((a: ShaderNode, b: ShaderNode) => max(a, b)),
+        )
+      : undefined;
     const poolTone = smoothstep(0.1, 0.8, attribute('hardShore', 'vec2').y);
     const tone: ShaderNode = clear
       ? poolTone
@@ -1122,6 +1141,7 @@ function createMaterials(
           uniforms: { ...water, artTone: tone },
           reflection,
           calm,
+          quay,
           bedAt,
           detail: map.waterDetail ? texture(map.waterDetail, uv) : undefined,
           surface: map.waterSurface ?? undefined,
@@ -1146,6 +1166,44 @@ function createMaterials(
       sheen = sheen.mul(float(1).sub(look.openWater));
       ground.emissiveNode = tonedReflection(look.emission, look.body, albedo, tone, max(painted, 0));
     } else {
+      // Clear look: what kind of land the water meets, from the art at the shoreline (a blurred tap stepped back to
+      // the water's edge along the distance field): sand is warm and saturated; quays, seawalls and bare rock are
+      // grey or pale. Beaches keep the shallows and foam; the others take deep water up to the edge (the turquoise
+      // beach band read as pasted onto city seawalls).
+      let shoreQuay = quay;
+      if (clear && quay) {
+        const texelU = 1 / map.shore.image.width;
+        const texelV = 1 / map.shore.image.height;
+        const gradient = vec2(
+          texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r),
+          texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r),
+        ).normalize();
+        const back = max(painted, 0).add(1.0);
+        const cellUv = vec2((42 * map.ref.scale) / map.ref.width, (21 * map.ref.scale) / map.ref.height);
+        // Three taps fanned about 40 degrees either side of the gradient: a beach is a beach if any of them finds
+        // sand, so the distance field's medial lines do not draw quay streaks across a beach.
+        const sandAt = (turn: number): ShaderNode => {
+          const c = Math.cos(turn),
+            si = Math.sin(turn);
+          const dir = vec2(gradient.x.mul(c).sub(gradient.y.mul(si)), gradient.x.mul(si).add(gradient.y.mul(c)));
+          const land = texture(colourMap, uv.sub(dir.mul(cellUv).mul(back))).level(float(3)).rgb;
+          const hi = max(land.r, max(land.g, land.b));
+          const lo = min(land.r, min(land.g, land.b));
+          const sand = smoothstep(0.38, 0.55, hi.sub(lo).div(max(hi, 0.02))).mul(
+            smoothstep(0.0, 0.08, land.r.sub(land.b)),
+          );
+          // Dark ground (rocks, reefs, scree) is not masonry either: small rocks keep the beach dressing, whose
+          // shallows the critique found free of streaks, instead of flipping class along the medial lines.
+          return max(sand, smoothstep(0.45, 0.3, hi));
+        };
+        const sandy = max(sandAt(0), max(sandAt(0.7), sandAt(-0.7)));
+        shoreQuay = max(
+          quay,
+          float(1)
+            .sub(sandy)
+            .mul(smoothstep(1.4, 0.8, painted)),
+        );
+      }
       const look = waterLook(
         {
           position: positionWorld,
@@ -1157,6 +1215,7 @@ function createMaterials(
           uniforms: { ...water, artTone: tone },
           reflection,
           calm,
+          quay: shoreQuay,
         },
         nodes,
       );
@@ -1198,6 +1257,16 @@ function createMaterials(
       );
       contactRelief = artToneContactRelief(painted, tone);
       if (waterline) contactRelief = max(contactRelief, waterline.relief);
+      // Clear look: the rock at a cliff's foot keeps its painted light (no extra contact shading within about half a
+      // cell of the water), so the step from rock down to the dark water at its base reads clearly.
+      if (clear)
+        contactRelief = max(
+          contactRelief,
+          calm
+            .mul(smoothstep(-0.6, -0.05, painted))
+            .mul(float(1).sub(waterness))
+            .mul(0.85),
+        );
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
       ground.emissiveNode = (

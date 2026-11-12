@@ -210,6 +210,8 @@ export interface WaterLookInputs {
    * cliff feet. Light added to water in the map's painted tone fades in from this edge. Defaults to `shore`.
    */
   maskShore?: ShaderNode;
+  /** 0..1 water against a quay, seawall or pavement rather than a beach (clear look: no shallows or foam there). */
+  quay?: ShaderNode;
 }
 
 export interface WaterLook {
