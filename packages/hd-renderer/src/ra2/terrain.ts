@@ -6,6 +6,7 @@ import {
   type WaterStyle,
   type WaterTuning,
 } from './waterLook';
+import { clearBedWaterLook } from './clearWater';
 import { paintedWaterMask } from './paintedWater';
 import {
   Box3,
@@ -100,6 +101,7 @@ import { groupWaterCells, selectWaterMirrorLevels, type WaterCell, type WaterLev
  * (the approved concept); at night the display is Neutral again (HdRenderer) and the compensation fades out with it.
  * The legacy water takes no map grade of its own: waterLook mixes the (graded) tile art's hue into the water column.
  * With a painted lake bed, only the in-scattered column receives this compensation; transmitted sand keeps its grade.
+ * Clear uses unit level/saturation and its own water-local grade compensation instead of this legacy boost.
  */
 
 function waterForDisplay(body: ShaderNode, nodes: AtmosphereNodes, tuning: WaterTuning): ShaderNode {
@@ -424,7 +426,8 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   };
   let materials = makeMaterials(waterPreset.style);
   let activeStyle = waterPreset.style;
-  const families = new Map([[activeStyle === 'classic', materials]]);
+  const familyKey = (style: WaterStyle) => (style === 'classic' || style === 'clear' ? style : 'enhanced');
+  const families = new Map([[familyKey(activeStyle), materials]]);
   const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
   mesh.name = 'ra2-terrain';
   mesh.receiveShadow = true;
@@ -497,12 +500,12 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     },
     setWaterLook(value: string) {
       const style = parseWaterStyle(value);
-      const classic = style === 'classic';
-      if (classic !== (activeStyle === 'classic')) {
-        let next = families.get(classic);
+      const key = familyKey(style);
+      if (key !== familyKey(activeStyle)) {
+        let next = families.get(key);
         if (!next) {
           next = makeMaterials(style);
-          families.set(classic, next);
+          families.set(key, next);
         }
         const parent = materials.reflectionTarget?.parent ?? mesh.parent;
         materials.reflectionTarget?.removeFromParent();
@@ -1063,10 +1066,14 @@ function createMaterials(
       reflectionTarget = mirror.target;
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;
-    const tone: ShaderNode = max(
-      lakeBed ? water.artTone.mul(tuning.newShore) : water.artTone,
-      max(tuning.artToneForce, smoothstep(0.1, 0.8, attribute('hardShore', 'vec2').y).mul(tuning.newShore)),
-    );
+    const clear = waterPreset.style === 'clear';
+    const poolTone = smoothstep(0.1, 0.8, attribute('hardShore', 'vec2').y);
+    const tone: ShaderNode = clear
+      ? poolTone
+      : max(
+          lakeBed ? water.artTone.mul(tuning.newShore) : water.artTone,
+          max(tuning.artToneForce, smoothstep(0.1, 0.8, attribute('hardShore', 'vec2').y).mul(tuning.newShore)),
+        );
     if (lakeBed) {
       // No inland band replacement: the mask includes the old shallows and the composite already paints real sand.
       const bedAt = (offsetXZ: ShaderNode): ShaderNode => {
@@ -1104,9 +1111,11 @@ function createMaterials(
               nodes,
             ).albedo
           : albedo;
-      const look = bedWaterLook(
+      const look = (clear ? clearBedWaterLook : bedWaterLook)(
         {
           position: positionWorld,
+          theater: cache.manifest.theater,
+          maskShore: painted,
           shore,
           waterness,
           art: originalWater,
@@ -1140,13 +1149,14 @@ function createMaterials(
       const look = waterLook(
         {
           position: positionWorld,
+          theater: cache.manifest.theater,
+          maskShore: painted,
           shore,
           waterness,
           art: art.rgb,
           uniforms: { ...water, artTone: tone },
           reflection,
           calm,
-          maskShore: painted,
         },
         nodes,
       );
@@ -1170,12 +1180,16 @@ function createMaterials(
       // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
       // contact shading is dropped near that water (artToneContactRelief).
       // Nor at a hard shore: the rock at the water's edge is the map's own art, not a beach to dress.
-      const ownShore: ShaderNode = waterline ? float(1).sub(tone).mul(waterline.beach) : float(1).sub(tone);
+      const ownShore: ShaderNode = clear
+        ? float(0)
+        : waterline
+          ? float(1).sub(tone).mul(waterline.beach)
+          : float(1).sub(tone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
-      const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
-        mix(float(1), float(0.8), sand),
-      );
+      const land = clear
+        ? albedo
+        : mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(mix(float(1), float(0.8), sand));
       albedo = mix(
         land,
         tonedWaterBody(
@@ -1189,7 +1203,9 @@ function createMaterials(
       if (waterline) contactRelief = max(contactRelief, waterline.relief);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
-      ground.emissiveNode = look.emission.mul(mix(float(1), tuning.level, nodes.faithfulDisplay));
+      ground.emissiveNode = (
+        clear ? tonedReflection(look.emission, look.body, albedo, tone, max(painted, 0)) : look.emission
+      ).mul(mix(float(1), tuning.level, nodes.faithfulDisplay));
     }
   } else {
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.

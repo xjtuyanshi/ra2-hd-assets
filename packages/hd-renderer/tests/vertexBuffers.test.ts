@@ -906,7 +906,7 @@ describe('r186 vertex and uniform binding budget', () => {
     },
   );
 
-  it.each(['classic', 'enhanced', 'faithful', 'muted', 'calm'] as const)(
+  it.each(['classic', 'enhanced', 'clear', 'faithful', 'muted', 'calm'] as const)(
     'audits %s shoreline water with and without scene reflections',
     (style) => {
       const source = cache();
@@ -925,15 +925,18 @@ describe('r186 vertex and uniform binding budget', () => {
       try {
         waterPreset.style = style;
         for (const reflections of [false, true]) {
-          source.manifest.tiles[0]!.terrainType = reflections ? 9 : 0;
-          const terrain = buildRa2Terrain(source);
-          expect(terrain.reflectionTarget !== null).toBe(reflections);
-          for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
-            const mesh = new Mesh(terrain.mesh.geometry, material);
-            assertLimits(mesh);
-            assertLimits(mesh, 16384);
+          for (const bed of style === 'clear' ? [false, true] : [true]) {
+            source.terrainMap!.waterBed = bed;
+            source.manifest.tiles[0]!.terrainType = reflections ? 9 : 0;
+            const terrain = buildRa2Terrain(source);
+            expect(terrain.reflectionTarget !== null).toBe(reflections);
+            for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
+              const mesh = new Mesh(terrain.mesh.geometry, material);
+              assertLimits(mesh);
+              assertLimits(mesh, 16384);
+            }
+            dispose(terrain.mesh);
           }
-          dispose(terrain.mesh);
         }
       } finally {
         waterPreset.style = previous;

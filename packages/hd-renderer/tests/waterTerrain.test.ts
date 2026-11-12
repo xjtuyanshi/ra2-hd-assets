@@ -293,16 +293,25 @@ describe('runtime water look switching', () => {
     expect(build.water.artToneForce?.value).toBe(1);
     expect(build.waterTuning.artToneReflection.value).toBe(0.06);
   });
-  it('parks each structural family once when crossing classic and restores the same material', () => {
+  it.each([false, true])('parks classic, enhanced and clear once and restores each material (bed=%s)', (bed) => {
     waterPreset.style = 'classic';
-    const { build } = terrain(false);
+    const { build } = terrain(bed);
     const classic = build.mesh.material;
     build.setWaterLook('enhanced');
     const enhanced = build.mesh.material;
     expect(enhanced).not.toBe(classic);
+    build.setWaterLook('clear');
+    const clear = build.mesh.material;
+    expect(clear).not.toBe(enhanced);
+    expect(clear).not.toBe(classic);
     build.setWaterLook('classic');
     expect((build.mesh.material as unknown[])[0]).toBe((classic as unknown[])[0]);
     build.setWaterLook('muted');
     expect((build.mesh.material as unknown[])[0]).toBe((enhanced as unknown[])[0]);
+    build.setWaterLook('clear');
+    expect((build.mesh.material as unknown[])[0]).toBe((clear as unknown[])[0]);
+    expect(build.waterTuning.level.value).toBe(1);
+    expect(build.water.artToneForce?.value).toBe(0);
+    build.disposeWaterLooks();
   });
 });

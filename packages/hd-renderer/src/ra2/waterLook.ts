@@ -34,11 +34,15 @@ import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 import { RIPPLE_SLOPE_RANGE, WATER_TEXTURE_SIZE, waterTextures } from '../proceduralTextures';
 import { CLIFF_FIELD_MAX } from './shoreField';
+import { clearNormal, clearReflectionOffset, clearWaterLook } from './clearWater';
 import { LEVEL_HEIGHT } from '../world';
 
 /**
- * Open water for original maps, built to read as real water rather than a glossy sheet. Two looks share one interface
- * (waterPreset.style selects the initial structural family; live tuning uniforms drive the enhanced family):
+ * Open water for original maps, built to read as real water rather than a glossy sheet. Three shader families share
+ * one interface (waterPreset.style selects the family; live tuning uniforms drive enhanced and its variants):
+ *
+ * 'clear' is the opt-in modern candidate in clearWater.ts: low-chroma absorption, shallow bed transmission and calm
+ * normal-map motion on the existing terrain/mirror passes. The launcher default remains enhanced until owner review.
  *
  * 'enhanced' (opt-in, like every modern effect: sandbox ?water=enhanced or ?look=golden, in game hd-water=enhanced),
  * the remaster's modern water, tuned against the approved river concept (concept A, RiverRam):
@@ -91,6 +95,13 @@ const LEGACY_TUNING = {
 export const WATER_TUNING: Record<WaterStyle, Readonly<typeof LEGACY_TUNING>> = {
   classic: { ...LEGACY_TUNING },
   enhanced: { ...LEGACY_TUNING },
+  clear: {
+    ...LEGACY_TUNING,
+    saturation: 1,
+    level: 1,
+    newShore: 1,
+    artToneReflection: 0.06,
+  },
   faithful: {
     ...LEGACY_TUNING,
     artToneForce: 1,
@@ -181,6 +192,8 @@ const WAVES: readonly [number, number, number, number][] = [
 export interface WaterLookInputs {
   /** World-space position of the fragment. */
   position: ShaderNode;
+  /** Game theatre selects clear water's subdued optical palette. */
+  theater?: string;
   /** Signed distance to the shoreline in cells (positive over water). */
   shore: ShaderNode;
   /** 0..1 open-water weight from the mask (soft at the painted shoreline). */
@@ -348,11 +361,13 @@ function classicWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_NO
 
 /** The water look of the current preset (see waterPreset). */
 export function waterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_NODES): WaterLook {
+  if (waterPreset.style === 'clear') return clearWaterLook(inputs, nodes);
   return waterPreset.style === 'classic' ? classicWaterLook(inputs, nodes) : enhancedWaterLook(inputs, nodes);
 }
 
 /** Wave normal at a ground position (xz) of the current preset. */
 export function waveNormal(p: ShaderNode, wind: ShaderNode, rain: ShaderNode): ShaderNode {
+  if (waterPreset.style === 'clear') return clearNormal(p);
   if (waterPreset.style === 'classic') return classicWaveNormal(p, wind, rain);
   const slope = enhancedSlope(p, wind, rain, gustAt(p));
   return normalize(vec3(slope.x.negate(), 1, slope.y.negate()));
@@ -363,6 +378,7 @@ export function waveNormal(p: ShaderNode, wind: ShaderNode, rain: ShaderNode): S
  * swells and the broadest ripple layer only, so cliff and tree reflections break up at their edges without smearing.
  */
 export function reflectionOffset(p: ShaderNode, wind: ShaderNode, rain: ShaderNode): ShaderNode {
+  if (waterPreset.style === 'clear') return clearReflectionOffset(p);
   if (waterPreset.style === 'classic') return classicWaveNormal(p, wind, rain).xz.mul(0.015);
   const slope = rippleSlope(p, wind, float(0.5), RIPPLE_LAYERS.slice(0, 1)).add(swellSlope(p, wind));
   return normalize(vec3(slope.x.negate(), 1, slope.y.negate())).xz.mul(REFLECTION_RIPPLE);

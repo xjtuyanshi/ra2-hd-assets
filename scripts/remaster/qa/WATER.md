@@ -1,10 +1,10 @@
 # Water look review
 
-The renderer accepts `hd-water=classic|enhanced|faithful|muted|calm`. Unknown values select classic. Code defaults to
+The renderer accepts `hd-water=classic|enhanced|clear|faithful|muted|calm`. Unknown values select classic. Code defaults to
 classic; the play launcher still selects enhanced. In the development console, use
-`__hdBridge.water.set('faithful')` or `__hdBridge.water.cycle()`. Neither moves the camera. Enhanced, faithful, muted
-and calm share the same material and mirror graph. Crossing classic builds the other structural family once and
-parks both until view disposal; first-crossing compilation is expected.
+`__hdBridge.water.set('clear')` or `__hdBridge.water.cycle()`. Neither moves the camera. Enhanced, faithful, muted
+and calm share the same material and mirror graph. Clear uses a third, cheaper shader family with the same existing
+mirror/light passes. Each family is built once and parked until view disposal; first-crossing compilation is expected.
 
 No browser acceptance is implied by the asset-free tests. Legacy coefficients are regression tested, but exact GPU
 pixel equivalence, small-water boundaries, cliff seams and look quality require the operator's same-camera review.
@@ -12,6 +12,13 @@ A small disconnected water component (at most eight cell diamonds, excluding mas
 looks; this geometric heuristic also protects small ponds. The classifier works at four mask pixels per sample.
 Inspect pools at 1:1, including lane markings. Bed maps recover painted water from the original tile atlas rather
 than treating the sand composite as water. Terrain artwork is never rewritten by these scripts.
+
+Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
+`hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its depth proxy reaches deep
+water at five cells, with steep rocky shores; per-theatre absorption, refracted bed art where available and a neutral
+fallback bed replace cobalt. It keeps a capped sky/object reflection, an eight-second foam cycle, low-energy normal
+layers and shallow-only caustics. Painted pools remain protected. The scene-wide cinematic grade is unchanged:
+clear reserves chroma headroom with a water-local linear-channel floor and slight warm compensation.
 
 ## Prepare one session
 
@@ -65,7 +72,7 @@ The script does not invent map IDs or save coordinates from historical film tags
 
 ## Fleet performance
 
-Use the existing `RA2_PERF_LOG` telemetry. For enhanced, faithful and muted separately, restore the same busy naval
+Use the existing `RA2_PERF_LOG` telemetry. For enhanced, clear and muted separately, restore the same busy naval
 save, set **native slider 5** through the game UI, allow shader warm-up, and collect at least 60 seconds while running.
 Do not use presentation/rAF FPS. Save `<out>/fleet/<look>-fps.json` with this schema (values below are illustrative,
 not measurements):
@@ -87,7 +94,7 @@ Prefer extracting the existing speed records with the bounded-window helper:
   --out "$WATER_OUT/fleet/enhanced-fps.json"
 ```
 
-Repeat for faithful and muted with their own restored runs and time bounds. Select a window longer than 60 seconds
+Repeat for clear and muted with their own restored runs and time bounds. Select a window longer than 60 seconds
 so at least 60 seconds of complete five-second records fit inside it. The helper requires native game-counter
 records, target FPS 60, HD shown, and continuous windows; it rejects host fallback and gaps.
 
@@ -97,11 +104,11 @@ Do not copy the illustrative values. Normal-speed four-second clips and slider-5
 
 ## Outputs and limits
 
-`capture.json` records missing scenes and failures. Each scene has five PNGs and FFV1 MKVs, `board.png` (Chinese row
+`capture.json` records missing scenes and failures. Board order is original | current enhanced | clear | muted. Each scene has four PNGs and FFV1 MKVs, `board.png` (Chinese row
 labels beside unscaled pixels), `shore-2x.png` (nearest neighbour), `comparison.mkv`, `comparison-1080p.mp4`, and
 individual `<look>-1080p.mp4`. H.264 uses libx264, 4 Mb/s, maxrate 4 Mb/s and bufsize 8 Mb; no sharpening.
-The five-way 1080p preview is for display review. Numeric H.264 scores use each look's separate 1080p encode so the
-water is not measured at one-fifth preview resolution. Letterbox masks track the encode's scale and offset.
+The four-way 1080p preview is for display review. Numeric H.264 scores use each look's separate 1080p encode so the
+water is not measured at one-quarter preview resolution. Letterbox masks track the encode's scale and offset.
 
 `metrics.json` and `SUMMARY.md` report luminance, saturation, contrast, highlights, spatial spectrum, motion at 1/6s
 and 1s, shore steps and per-gate PASS/FAIL/UNVERIFIED. They call functions loaded from the supplied `wmeasure.py` by
@@ -112,3 +119,11 @@ full match require visual review. No capture script changes or denoises private 
 
 The analyzer exits nonzero for missing/error evidence or a FAIL/UNVERIFIED numeric gate. Written boards and measured
 rows remain available for review even when acceptance is incomplete.
+
+Clear's numeric gates use the owner's modern-water brief: core HSV saturation <= 0.55, one-second mean absolute
+L* change <= 1.5, anisotropy <= 0.35 and highlight share <= 2%. They do not require matching the original mean L*.
+Other existing calmness and coastline gates remain. These are capture gates, not guarantees from parameter values.
+Enhanced is retained as a comparison baseline and may fail the calmness gates. Board labels are Chinese, at native
+pixel size; comparison video is side by side. Each look and the comparison produce four-second FFV1 lossless masters
+and 4 Mb/s H.264 previews during capture plus analysis. Actual images/clips require the operator's browser and saves;
+none are generated from synthetic or substituted game footage.

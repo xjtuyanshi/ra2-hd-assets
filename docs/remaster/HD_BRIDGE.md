@@ -758,8 +758,9 @@ Snow stays dry and ground weather excludes building foundations and steep cells.
 `hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and its suggested hour unless `hd-time` is given (authored dusk maps keep their own hour; night
 maps are day maps with night dressing and take it; `cinematic` is the approved look with medium cooling, whose
-vehicles take their own exposure, top gain and grade balance share, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=classic|enhanced|faithful|muted|calm` the water surface preset
-(on maps staged as dusk or night, water keeps the tone the map paints it in under either setting; see the water notes
+vehicles take their own exposure, top gain and grade balance share, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=classic|enhanced|clear|faithful|muted|calm` the water surface preset
+(clear is an opt-in modern candidate with its own darker night variant and protected painted pools; other looks
+retain their existing dusk/night art tone; see the capture workflow in `scripts/remaster/qa/WATER.md` and water notes
 in `packages/hd-renderer/README.md`); `hd-glints=off` leaves out the engine's ore/gem glints and `hd-sparkle=0..1`
 sets the HD star twinkle on crystals (0 by default while the glints are drawn);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under

@@ -13,8 +13,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 SCENES = ['g2', 'alca', 'isle', 'beach', 'bay', 'gold', 'pac2', 'fleet', 'night']
-LOOKS = ['original', 'enhanced', 'faithful', 'muted', 'calm']
-LABELS = ['原版', '当前', '忠实版', '柔和增强', '平静海面']
+LOOKS = ['original', 'enhanced', 'clear', 'muted']
+LABELS = ['原版', '当前增强', '通透候选', '柔和增强']
 
 def run(args):
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
@@ -27,7 +27,7 @@ def mask_morph(mask, radius, operation):
     count=integral[size:,size:]-integral[:-size,size:]-integral[size:,:-size]+integral[:-size,:-size]
     return count==size*size if operation=='e' else count>0
 
-def gates(s, o):
+def gates(s, o, look=None):
     checks = {'sat': s['hsvS'] <= o['hsvS'] + .15, 'mean_L': abs(s['L']-o['L']) <= 4,
               'std_L': s['Lstd'] <= 4, 'p99_med': s['p99_med'] <= 10,
               'highlights': s['highlight_frac'] <= .01,
@@ -35,6 +35,12 @@ def gates(s, o):
               'wavelength': None if s['spectrum'] is None else s['spectrum']['wavelength_gpx'] <= 6,
               'motion_1_6': s['motion_1_6'] <= .8, 'motion_1s': s['motion_1s'] <= 2,
               'shore': None if s['shore_step'] is None or o['shore_step'] is None else s['shore_step'] >= .8*o['shore_step'] and (o['shore_step'] <= 0 or s['shore_step'] > 0)}
+    if look == 'clear':
+        # The owner's modern-water brief supersedes original hue/luminance matching for this candidate.
+        checks.update(sat=s['hsvS'] <= .55, highlights=s['highlight_frac'] <= .02,
+                      anisotropy=None if s['spectrum'] is None else s['spectrum']['anisotropy'] <= .35,
+                      motion_1s=s['motion_1s'] <= 1.5)
+        del checks['mean_L']
     return {k: 'UNVERIFIED' if v is None else 'PASS' if v else 'FAIL' for k,v in checks.items()}
 
 def main():
@@ -59,8 +65,8 @@ def main():
             pictures = [Image.open(d/f'{look}.png').convert('RGB') for look in LOOKS]
             width, height = pictures[0].size
             if any(im.size != (width,height) for im in pictures): raise ValueError('Board dimensions differ')
-            board = Image.new('RGB', (width+160, height*5), '#161616')
-            crop = scene['shoreCrop']; crops = Image.new('RGB', (crop['width']*2+160, crop['height']*2*5), '#161616')
+            board = Image.new('RGB', (width+160, height*len(LOOKS)), '#161616')
+            crop = scene['shoreCrop']; crops = Image.new('RGB', (crop['width']*2+160, crop['height']*2*len(LOOKS)), '#161616')
             for i, im in enumerate(pictures):
                 board.paste(im, (160,i*height)); ImageDraw.Draw(board).text((8,i*height+8), LABELS[i], font=font)
                 box=(crop['x'],crop['y'],crop['x']+crop['width'],crop['y']+crop['height'])
@@ -70,7 +76,7 @@ def main():
             inputs=[]
             for look in LOOKS: inputs += ['-i',str(d/f'{look}.mkv')]
             # Scale the whole side-by-side comparison to fit 1080p; no sharpening.
-            run(['ffmpeg','-nostdin','-y',*inputs,'-filter_complex','hstack=inputs=5[v]','-map','[v]','-an','-c:v','ffv1',str(d/'comparison.mkv')])
+            run(['ffmpeg','-nostdin','-y',*inputs,'-filter_complex',f'hstack=inputs={len(LOOKS)}[v]','-map','[v]','-an','-c:v','ffv1',str(d/'comparison.mkv')])
             run(['ffmpeg','-nostdin','-y','-i',str(d/'comparison.mkv'),'-vf','scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2','-c:v','libx264','-pix_fmt','yuv420p','-b:v','4M','-maxrate','4M','-bufsize','8M',str(d/'comparison-1080p.mp4')])
             # Measure each look at full 1080p separately; tiled preview is for the owner's display only.
             for look in LOOKS:
@@ -123,7 +129,7 @@ def main():
                         st['pool_hue']=w['stats'](image,pool)['hue']
                     scores[look]=st
                 for look,st in scores.items():
-                    st['gates']=gates(st,scores['original']); sp=st['spectrum'] or {}
+                    st['gates']=gates(st,scores['original'],look); sp=st['spectrum'] or {}
                     original_pool=scores['original']['pool_hue']
                     if isinstance(st['pool_hue'],(int,float)) and isinstance(original_pool,(int,float)):
                         st['pool_hue_delta']=abs((st['pool_hue']-original_pool+180)%360-180)
@@ -133,7 +139,7 @@ def main():
                     rows.append('| '+ ' | '.join([name,encode,look,*['UNVERIFIED' if v is None else f'{v:.4f}' for v in values],', '.join(f'{k}:{v}' for k,v in st['gates'].items())])+' |')
                 result[name][encode]=scores
         except Exception as e: result[name]['error']=str(e)
-    for look in ['enhanced','faithful','muted']:
+    for look in ['enhanced','clear','muted']:
         f=out/'fleet'/f'{look}-fps.json'
         try:
             perf=json.loads(f.read_text()); samples=perf['samples']

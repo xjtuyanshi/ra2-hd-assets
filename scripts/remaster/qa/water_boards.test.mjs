@@ -9,9 +9,9 @@ const valid = () => ({
   videoInput: [],
   scenes: { g2: { state: 'save-hash', zoom: 2.5, crop, screenCrop: crop, shoreCrop: crop } },
 });
-test('all requested comparison scenes and five rows are inventoried', () => {
+test('all requested comparison scenes and four rows are inventoried', () => {
   assert.equal(scenes.length, 9);
-  assert.deepEqual(looks, ['original', 'enhanced', 'faithful', 'muted', 'calm']);
+  assert.deepEqual(looks, ['original', 'enhanced', 'clear', 'muted']);
 });
 test('accepts explicit missing scenes and rejects ambiguous capture geometry', () => {
   const m = valid();

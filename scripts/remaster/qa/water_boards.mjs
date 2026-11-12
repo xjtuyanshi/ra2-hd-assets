@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 
 export const scenes = ['g2', 'alca', 'isle', 'beach', 'bay', 'gold', 'pac2', 'fleet', 'night'];
-export const looks = ['original', 'enhanced', 'faithful', 'muted', 'calm'];
+export const looks = ['original', 'enhanced', 'clear', 'muted'];
 export function validateManifest(m) {
   if (!m.cdp || !m.pageUrl || !m.out || !Array.isArray(m.videoInput))
     throw Error('cdp, pageUrl, out, videoInput required');
@@ -115,7 +115,7 @@ async function main() {
         await save();
       }
       if (name === 'fleet') {
-        for (const look of ['enhanced', 'faithful', 'muted']) {
+        for (const look of ['enhanced', 'clear', 'muted']) {
           await rl.question(
             `Fleet FPS ${look}: restore SAME save, select native slider 5, set __hdBridge.water.set('${look}'), resume, record 60 seconds in existing RA2_PERF_LOG. Press Enter after saving ${dir}/${look}-fps.json (see WATER.md): `,
           );
