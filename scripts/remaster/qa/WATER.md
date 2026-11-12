@@ -16,16 +16,17 @@ than treating the sand composite as water. Terrain artwork is never rewritten by
 Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
 `hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its depth proxy reaches deep
 water at about 2.4 cells, with steep rocky shores; per-theatre absorption over a theatre sand bed (refracted bed art
-where the cache has one) gives turquoise shallows that deepen to dark teal-blue. The surface is drawn by four
-sharp-crested wave trains about 45 degrees apart (wavelengths about half a cell to a cell on screen, a light domain
-warp and short-crested wave groups) plus a fine ripple layer, lit mainly through the wave normal, so it reads as
-crests and troughs without stripe trains. It keeps a capped sky/object reflection with a Fresnel sky tint toward the
-top of the screen, sun glints on crests inside a broad soft screen zone, a thin noise-broken foam line on beaches
+where the cache has one) gives turquoise shallows that deepen to dark teal-blue. The surface uses four equal samples of one procedurally generated 256-square FFT normal tile, with the
+three.js WaterMesh scales and scroll rates, a 26 m primary tile (3.25 cells), roughly 0.36-cell dominant waves and a
+0.8-speed clock. It uses normal-based sun relief, a capped sky/object reflection with a Fresnel sky tint toward the
+top of the screen, sharp glints following the scene sun, faint small compression-mask whitecaps, a thin noise-broken foam line on beaches
 that breathes over seven seconds, faint caustics about half a cell to a cell and a half from a beach, and at cliffs a
-darker foot, a cliff mirror that fades within about 0.4 cells and a broken line of white water. Water beside paved
+darker foot, a feathered cliff mirror that fades within about 0.4 cells and a broken line of white water. Water beside paved
 cells or pale, unsaturated shoreline art (quays, seawalls) keeps its deep colour up to the wall with a dark wet line.
 Shadows on open water are softened and capped at about x0.8 brightness. Painted pools remain protected. The
-scene-wide cinematic grade is unchanged.
+scene-wide cinematic grade is unchanged. Bridge and wall mirror silhouettes use a five-tap premultiplied feather
+on clear only; legacy looks retain their existing sampling. Cliff contact contrast, night L* and the new surface
+metrics require fresh rendered measurement; coefficient changes alone do not establish acceptance.
 
 ## Prepare one session
 

@@ -1057,15 +1057,20 @@ function createMaterials(
       skipMirrorLayer((mirror as unknown as { reflector: Parameters<typeof skipMirrorLayer>[0] }).reflector);
       mirror.target.rotateX(-Math.PI / 2);
       mirror.target.position.y = waterY;
-      const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
-      mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
-      // Where the water mirrors a cliff the mirror is read through a box of taps (cliffSoftMirror); elsewhere, and
-      // with the zone at 0, this is the single tap it always was.
-      reflection = cliffSoftMirror(
-        mirror as unknown as MirrorSource,
-        mirror.uvNode as ShaderNode,
-        attribute('contact', 'vec2').y.mul(water.cliffSoft),
-      );
+      if (waterPreset.style === 'clear') {
+        // Feather bridge decks and wall silhouettes in both terrain paths, using clear's own moving normal.
+        reflection = rippledReflection(mirror as unknown as MirrorSource, positionWorld, water);
+      } else {
+        const offset: ShaderNode = reflectionOffset(positionWorld.xz, water.wind, water.rain);
+        mirror.uvNode = (mirror.uvNode as ShaderNode).add(offset);
+        // Where the water mirrors a cliff the mirror is read through a box of taps (cliffSoftMirror); elsewhere, and
+        // with the zone at 0, this is the single tap it always was.
+        reflection = cliffSoftMirror(
+          mirror as unknown as MirrorSource,
+          mirror.uvNode as ShaderNode,
+          attribute('contact', 'vec2').y.mul(water.cliffSoft),
+        );
+      }
       reflectionTarget = mirror.target;
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;

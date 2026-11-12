@@ -34,7 +34,7 @@ import type { ShaderNode } from '../tsl';
 import type { WaterUniforms } from '../waterShading';
 import { RIPPLE_SLOPE_RANGE, WATER_TEXTURE_SIZE, waterTextures } from '../proceduralTextures';
 import { CLIFF_FIELD_MAX } from './shoreField';
-import { clearNormal, clearReflectionOffset, clearWaterLook } from './clearWater';
+import { clearNormal, clearSlope, clearReflectionOffset, clearWaterLook } from './clearWater';
 import { LEVEL_HEIGHT } from '../world';
 
 /**
@@ -1027,7 +1027,7 @@ const RIPPLED_REFLECTION = {
   keepTop: 0.6,
 } as const;
 
-/** Height-dependent distortion and three-tap vertical blur, using the bed normal's full ripple/swell/rain slope. */
+/** Height-dependent distortion: legacy three-tap blur, or clear's five-tap feather using its own surface normal. */
 export function rippledReflection(
   mirror: MirrorSource,
   position: ShaderNode,
@@ -1039,9 +1039,10 @@ export function rippledReflection(
     return reflectionWorldPerDepth(mirror.reflector.getVirtualCamera(camera).projectionMatrix.elements, self.value);
   });
   const p: ShaderNode = position.xz;
-  const slope = enhancedSlope(p, uniforms.wind, uniforms.rain, gustAt(p));
+  const clear = waterPreset.style === 'clear';
+  const slope = clear ? clearSlope(p) : enhancedSlope(p, uniforms.wind, uniforms.rain, gustAt(p));
   const baseUv: ShaderNode = mirror.uvNode;
-  const offset: ShaderNode = reflectionOffset(p, uniforms.wind, uniforms.rain);
+  const offset: ShaderNode = clear ? slope.mul(0.1) : reflectionOffset(p, uniforms.wind, uniforms.rain);
   const uv0: ShaderNode = baseUv.add(offset);
   const depth = mirror.getDepthNode();
   const coverageAt = (uv: ShaderNode): ShaderNode => smoothstep(0.9999, 0.999, depth.sample(uv).x);
@@ -1067,8 +1068,23 @@ export function rippledReflection(
     .add(vec2(across.mul(RIPPLED_REFLECTION.across), along.mul(RIPPLED_REFLECTION.along)).mul(h).mul(uvPerWorld));
   let colour: ShaderNode = vec3(0);
   let coverage: ShaderNode = float(0);
-  for (const k of [-1, 0, 1]) {
-    const uv: ShaderNode = uv1.add(vec2(0, h.mul(k * RIPPLED_REFLECTION.spread).mul(uvPerWorld.y)));
+  const taps = clear
+    ? [
+        [-1, -1],
+        [-1, 1],
+        [0, 0],
+        [1, -1],
+        [1, 1],
+      ]
+    : [
+        [0, -1],
+        [0, 0],
+        [0, 1],
+      ];
+  for (const [x, y] of taps) {
+    const uv: ShaderNode = clear
+      ? uv1.add(vec2(x!, y!).mul(h.mul(0.16).add(0.018)).mul(uvPerWorld))
+      : uv1.add(vec2(0, h.mul(y! * RIPPLED_REFLECTION.spread).mul(uvPerWorld.y)));
     const covered = coverageAt(uv);
     // Average premultiplied taps so cleared/sky texels cannot darken the silhouette before coverage is applied.
     colour = colour.add(mirror.sample(uv).rgb.mul(covered));
@@ -1077,7 +1093,7 @@ export function rippledReflection(
   const keep: ShaderNode = mix(float(1), float(RIPPLED_REFLECTION.keepTop), heightFade);
   // Folding keep into average coverage is exactly mix(waterSky, mix(waterSky, reflected, keep), coverage).
   // bedWaterLook supplies its own sky AFTER the existing moonlight grade, avoiding a second grade on that sky.
-  return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(3).mul(keep) };
+  return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(taps.length).mul(keep) };
 }
 
 /**

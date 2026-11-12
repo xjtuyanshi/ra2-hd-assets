@@ -2,7 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { Color } from 'three/webgpu';
 import { LOOK_PRESETS } from '../src/HdRenderer';
 import { cinematicGradeRgb } from '../src/post';
-import { CLEAR_WATER, CLEAR_WAVES, clearDepth, clearPalette, clearTransmission } from '../src/ra2/clearWater';
+import {
+  CLEAR_WATER,
+  CLEAR_LAYERS,
+  CLEAR_SURFACE,
+  clearDepth,
+  clearPalette,
+  clearTransmission,
+} from '../src/ra2/clearWater';
 
 describe('clear water optical policy', () => {
   it('deepens monotonically within the shallow band and drops steeply beside rocks', () => {
@@ -63,22 +70,19 @@ describe('clear water optical policy', () => {
     expect(clearPalette('snow')).not.toEqual(clearPalette('desert'));
     expect(clearPalette('urban')).toEqual(clearPalette('newurban'));
   });
-  it('spreads the wave trains over many directions at RTS-readable wavelengths', () => {
-    const angles = CLEAR_WAVES.map(([degrees]) => (((degrees % 180) + 180) % 180) * (Math.PI / 180)).sort(
-      (a, b) => a - b,
-    );
-    // Directions (mod 180 degrees) leave no gap wider than 60 degrees: no preferred axis, no parallel stripe trains.
-    const gaps = angles.map((angle, i) => (i ? angle - angles[i - 1]! : angle + Math.PI - angles.at(-1)!));
-    expect(Math.max(...gaps)).toBeLessThan(Math.PI / 3);
-    expect(CLEAR_WAVES.length).toBeGreaterThanOrEqual(3);
-    // Wavelengths of roughly half a cell to a cell on screen: crests, not blotches or noise.
-    for (const [, wavelength] of CLEAR_WAVES) {
-      expect(wavelength).toBeGreaterThanOrEqual(0.5);
-      expect(wavelength).toBeLessThanOrEqual(1.2);
-    }
-    // Alternate trains run the other way, so the sea evolves instead of sliding as one sheet; all of them slowly.
-    expect(CLEAR_WAVES.some(([, , speed]) => speed < 0)).toBe(true);
-    expect(CLEAR_WAVES.some(([, , speed]) => speed > 0)).toBe(true);
-    for (const [, , speed] of CLEAR_WAVES) expect(Math.abs(speed)).toBeLessThan(0.1);
+  it('keeps A at its approved physical scale, scroll directions and comfort clock', () => {
+    expect(CLEAR_SURFACE.timeScale).toBe(0.8);
+    expect(CLEAR_SURFACE.normalGain).toBe(1.5);
+    expect(CLEAR_SURFACE.tileMetres / CLEAR_SURFACE.metresPerCell).toBe(3.25);
+    expect(CLEAR_SURFACE.tileMetres / 9 / CLEAR_SURFACE.metresPerCell).toBeCloseTo(0.3611, 4);
+    expect(CLEAR_LAYERS).toEqual([
+      [103, 103, 1 / 17, 1 / 29],
+      [107, 107, 1 / 19, -1 / 31],
+      [8907, 9803, 1 / 101, 1 / 97],
+      [1091, 1027, -1 / 109, 1 / 113],
+    ]);
+    expect(CLEAR_WATER.shininess).toBe(900);
+    expect(CLEAR_WATER.sparkle).toBe(5);
+    expect(CLEAR_WATER.whitecap).toBeLessThanOrEqual(0.15);
   });
 });
