@@ -1002,6 +1002,11 @@ export class HdRenderer {
   }
 
   /** Build the scene from the procedural state, or from an original map when `world` is given. */
+  /** Delegate preset policy to the terrain owner; the renderer does not interpret game preset names. */
+  setWaterLook(style: string): string | undefined {
+    return this.terrain?.setWaterLook?.(style);
+  }
+
   async init(world?: HdWorld): Promise<void> {
     await this.renderer.init();
     // Static map previews use the same analytic cards as live matches; atmosphere must retain geometry depth there too.
@@ -1672,7 +1677,7 @@ export class HdRenderer {
       w.rain.value = rainAmount;
       w.wind.value = env.windStrength + rainAmount * 0.3;
       // Maps staged as dusk or night keep their painted water's tone (see WaterUniforms.artTone).
-      w.artTone.value = profile && profile.kind !== 'day' ? 1 : 0;
+      w.artTone.value = Math.max(w.artToneForce?.value ?? 0, profile && profile.kind !== 'day' ? 1 : 0);
     }
     this.objects.night.value = light.night;
 
@@ -2284,6 +2289,7 @@ export class HdRenderer {
     this.emissiveOverlay.dispose();
     this.beforeDepthCapture = undefined;
     this.terrainDepth.dispose();
+    this.terrain?.disposeWaterLooks?.();
     if (this.nodes !== DEFAULT_ATMOSPHERE_NODES) this.nodes.dispose();
     if (this.layerNodes !== this.nodes && this.layerNodes !== DEFAULT_ATMOSPHERE_NODES) this.layerNodes.dispose();
     this.renderer.dispose();

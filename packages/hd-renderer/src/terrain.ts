@@ -35,6 +35,10 @@ const SUBDIVISIONS = 4;
 const CHANNEL: Partial<Record<TerrainClass, number>> = { road: 0, pavement: 1, beach: 2, water: 2, rough: 3 };
 
 export interface TerrainBuild {
+  /** Optional game-owned live surface preset controller. */
+  setWaterLook?(style: string): string;
+  /** Release parked surface materials and their mirror targets with the view. */
+  disposeWaterLooks?(): void;
   mesh: Mesh;
   /** World-space height (y) sampled on the vertex grid; shared with water and weather. */
   heightTexture: DataTexture;

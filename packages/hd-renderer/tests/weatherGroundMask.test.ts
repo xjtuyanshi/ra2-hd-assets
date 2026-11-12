@@ -112,7 +112,13 @@ describe('static weather terrain exclusions', () => {
       tile: new Uint16Array([0, ramp ? 1 : 0, 0, 0]),
       manifest: {
         grid: { width: 4, height: 1 },
-        tiles: [0, 1].map((rampType) => ({ terrainType: 0, rampType, rect: [0, 0, 1, 1], anchor: [0, 0] })),
+        tiles: [0, 1].map((rampType) => ({
+          terrainType: 0,
+          file: 'ground.tem',
+          rampType,
+          rect: [0, 0, 1, 1],
+          anchor: [0, 0],
+        })),
       },
       terrainMap: {
         texture,

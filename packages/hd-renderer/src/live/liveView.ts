@@ -76,7 +76,7 @@ import type { WeatherFoundation } from '../weatherGroundMask';
 import { HIGH_BRIDGE_HEIGHT, isHighBridge } from '../ra2/bridgeDepth';
 import { setShadowOrigin } from '../ra2/voxelShadow';
 import { loadRa2World, type HdWorld } from '../ra2/world';
-import { waterPreset, type WaterStyle } from '../ra2/waterLook';
+import { waterPreset, parseWaterStyle, type WaterStyle } from '../ra2/waterLook';
 import { LEVEL_HEIGHT, PIXELS_PER_CELL_EDGE } from '../world';
 import { VolumetricBlastLayer, type VolumetricBlast } from '../volumetricBlasts';
 import { spriteLookFor } from '../ra2/spriteLook';
@@ -316,7 +316,7 @@ export interface LiveViewOptions extends VoxelUnitsOptions {
   effectsHdBase?: string;
   /** ActiveAnim glow: ignore native detail skips (default), or mirror them for native/HD reviews. */
   nativeDetail?: 'ignore' | 'mirror';
-  /** Water look (ra2/waterLook.ts): 'classic' (default) or the modern 'enhanced' water. */
+  /** Water surface preset; classic remains the default. Enhanced-family looks support live uniform switching. */
   water?: WaterStyle;
   /**
    * The engine's own field-wide ore/gem glints (ra2/cellGlints.ts, the pass HD mode skips on the native surface):
@@ -1359,6 +1359,11 @@ export class LiveView {
   private preloadCellPages(): void {
     const library = this.library;
     if (library) for (const page of cellArtPages(library.library)) library.preloadPage(page);
+  }
+
+  /** Switch surface uniforms without moving the camera or reloading the match. */
+  setWaterLook(style: WaterStyle): WaterStyle {
+    return parseWaterStyle(this.hd.setWaterLook(style) ?? null);
   }
 
   static async create(canvas: HTMLCanvasElement, options: LiveViewOptions): Promise<LiveView> {

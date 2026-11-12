@@ -273,3 +273,36 @@ describe('terrain water mirrors', () => {
     },
   );
 });
+
+describe('runtime water look switching', () => {
+  it.each([false, true])('reuses enhanced material and mirror graph across looks (bed=%s)', (bed) => {
+    waterPreset.style = 'enhanced';
+    const { build } = terrain(bed);
+    const materials = build.mesh.material,
+      mirror = build.reflectionTarget,
+      atlas = build.mirrorAtlas;
+    const ground = (materials as { version: number }[])[0]!;
+    const version = ground.version;
+    for (const style of ['faithful', 'muted', 'calm', 'enhanced', 'faithful'] as const) {
+      expect(build.setWaterLook(style)).toBe(style);
+      expect(build.mesh.material).toBe(materials);
+      expect(build.reflectionTarget).toBe(mirror);
+      expect(build.mirrorAtlas).toBe(atlas);
+      expect(ground.version).toBe(version);
+    }
+    expect(build.water.artToneForce?.value).toBe(1);
+    expect(build.waterTuning.artToneReflection.value).toBe(0.06);
+  });
+  it('parks each structural family once when crossing classic and restores the same material', () => {
+    waterPreset.style = 'classic';
+    const { build } = terrain(false);
+    const classic = build.mesh.material;
+    build.setWaterLook('enhanced');
+    const enhanced = build.mesh.material;
+    expect(enhanced).not.toBe(classic);
+    build.setWaterLook('classic');
+    expect((build.mesh.material as unknown[])[0]).toBe((classic as unknown[])[0]);
+    build.setWaterLook('muted');
+    expect((build.mesh.material as unknown[])[0]).toBe((enhanced as unknown[])[0]);
+  });
+});

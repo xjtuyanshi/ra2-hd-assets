@@ -27,13 +27,14 @@ afterEach(() => {
 describe('which maps keep their painted water tone', () => {
   // [Lighting] of the stock maps the classes were tuned on: a sunny day map, the warm dusk of "El Dorado"
   // (Ambient 0.73, tint 1 / 0.92 / 0.8) and a blue night map.
-  const maps: [string, AtmosphereProfile, number][] = [
+  const maps: [string, AtmosphereProfile, number, number?][] = [
     ['day', mapAtmosphere({ ambient: 0.9, red: 1, green: 0.9, blue: 0.9, ground: 0.05, level: 0.008 }, 2), 0],
+    ['day', mapAtmosphere({ ambient: 0.9, red: 1, green: 0.9, blue: 0.9, ground: 0.05, level: 0.008 }, 2), 1, 1],
     ['dusk', mapAtmosphere({ ambient: 0.73, red: 1, green: 0.92, blue: 0.8, ground: 0, level: 0.035 }, 4), 1],
     ['night', mapAtmosphere({ ambient: 0.6, red: 0.8, green: 0.85, blue: 1.1, ground: 0, level: 0.03 }, 4), 1],
   ];
 
-  it.each(maps)('a %s map', (kind, profile, expected) => {
+  it.each(maps)('a %s map', (kind, profile, expected, force = 0) => {
     expect(profile.kind).toBe(kind);
     vi.stubGlobal('window', { devicePixelRatio: 1 });
     const canvas = { width: 1, height: 1, style: {}, addEventListener() {}, removeEventListener() {} };
@@ -41,6 +42,7 @@ describe('which maps keep their painted water tone', () => {
     state.map.atmosphere = profile;
     const hd = new HdRenderer(canvas as unknown as HTMLCanvasElement, state);
     const water = createWaterUniforms();
+    water.artToneForce = { value: force };
     expect(water.artTone.value).toBe(0); // A look draws its own water unless the renderer says otherwise.
     water.artTone.value = 1 - expected; // Start from the opposite, so the frame has to set it.
     const height = new DataTexture();
@@ -127,7 +129,8 @@ describe('painted water tone in the terrain material', () => {
       const body = vi.spyOn(waterLook, 'tonedWaterBody');
       const relief = vi.spyOn(waterLook, 'artToneContactRelief');
       const { build, reached } = terrain(style, false);
-      const tone = build.water.artTone;
+      const tone = relief.mock.calls[0]![1];
+      expect(reached.has(build.water.artTone)).toBe(true);
       // Cliff-foot contact shading is relieved by the same tone, measured from the painted mask's own edge.
       expect(relief).toHaveBeenCalledTimes(1);
       expect(relief.mock.calls[0]![1]).toBe(tone);
@@ -141,13 +144,15 @@ describe('painted water tone in the terrain material', () => {
     },
   );
 
-  it('leaves the painted lake bed alone: its composite has no painted water to fall back to', () => {
+  it('keeps the bed tone override disabled for the legacy enhanced preset', () => {
     const body = vi.spyOn(waterLook, 'tonedWaterBody');
     const relief = vi.spyOn(waterLook, 'artToneContactRelief');
     const { build, reached } = terrain('enhanced', true);
     expect(body).not.toHaveBeenCalled();
-    expect(relief).not.toHaveBeenCalled();
-    expect(reached.has(build.water.artTone)).toBe(false);
+    expect(relief).toHaveBeenCalledTimes(1);
+    expect(reached.has(build.water.artTone)).toBe(true);
+    expect(build.waterTuning.newShore.value).toBe(0);
+    expect(build.waterTuning.artToneForce.value).toBe(0);
   });
 
   it('builds both mixes from the tone, the look and the painted colour only', () => {

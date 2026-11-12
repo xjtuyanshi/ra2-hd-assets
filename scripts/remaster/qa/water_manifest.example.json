@@ -1,0 +1,59 @@
+{
+  "cdp": "http://127.0.0.1:9222",
+  "pageUrl": "REPLACE_WITH_COMPLETE_PLAY_URL",
+  "out": "REPLACE_WITH_ABSOLUTE_PRIVATE_water_boards_DIRECTORY",
+  "videoInput": ["-f", "avfoundation", "-framerate", "30", "-i", "1:none"],
+  "scenes": {
+    "g2": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "alca": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "isle": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "beach": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "bay": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "gold": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "pac2": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "fleet": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    },
+    "night": {
+      "missing": "Operator must supply the existing native save, fixed camera and reviewed masks"
+    }
+  },
+  "sceneSchema": {
+    "state": "save-sha256-and-camera-id",
+    "zoom": 2.5,
+    "crop": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    },
+    "screenCrop": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    },
+    "shoreCrop": {
+      "x": 0,
+      "y": 0,
+      "width": 256,
+      "height": 128
+    },
+    "waterMask": "absolute water mask path",
+    "coreMask": "absolute core mask path"
+  }
+}

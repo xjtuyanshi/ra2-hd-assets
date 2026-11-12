@@ -36,6 +36,8 @@ export interface WaterUniforms {
    * dusk or night: their painted water is near-black, and a look tuned for daylight read as glowing blue on them).
    */
   artTone: ShaderNode;
+  /** Optional surface preset override, owned by the game view. */
+  artToneForce?: ShaderNode;
   /**
    * Share of the softening of mirrored cliff edges (waterLook.ts cliffSoftMirror): 1 as drawn, 0 reads the mirror
    * with its single plain tap everywhere (for same-frame look reviews).

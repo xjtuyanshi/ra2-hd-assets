@@ -1,4 +1,13 @@
 import {
+  createWaterTuning,
+  writeWaterTuning,
+  withWaterTuning,
+  parseWaterStyle,
+  type WaterStyle,
+  type WaterTuning,
+} from './waterLook';
+import { paintedWaterMask } from './paintedWater';
+import {
   Box3,
   BufferAttribute,
   BufferGeometry,
@@ -9,6 +18,7 @@ import {
   Mesh,
   MeshStandardNodeMaterial,
   PhysicalLightingModel,
+  ReflectorNode,
   RedFormat,
   Vector3,
   type Object3D,
@@ -75,6 +85,7 @@ import {
   cliffSoftMirror,
   rippledReflection,
   tonedWaterBody,
+  tonedReflection,
   waterLook,
   waterPreset,
   wetShore,
@@ -90,13 +101,11 @@ import { groupWaterCells, selectWaterMirrorLevels, type WaterCell, type WaterLev
  * The legacy water takes no map grade of its own: waterLook mixes the (graded) tile art's hue into the water column.
  * With a painted lake bed, only the in-scattered column receives this compensation; transmitted sand keeps its grade.
  */
-const WATER_LEVEL = 0.67;
-const WATER_SATURATION = 1.8;
 
-function waterForDisplay(body: ShaderNode, nodes: AtmosphereNodes): ShaderNode {
-  const level: ShaderNode = body.mul(WATER_LEVEL);
+function waterForDisplay(body: ShaderNode, nodes: AtmosphereNodes, tuning: WaterTuning): ShaderNode {
+  const level: ShaderNode = body.mul(tuning.level);
   const luma: ShaderNode = dot(level, vec3(0.2126, 0.7152, 0.0722));
-  return mix(body, mix(vec3(luma), level, WATER_SATURATION).max(0), nodes.faithfulDisplay);
+  return mix(body, mix(vec3(luma), level, tuning.saturation).max(0), nodes.faithfulDisplay);
 }
 
 /** Vertices per cell edge; ramps are planar per triangle in the engine, so 2 keeps slopes smooth enough. */
@@ -112,10 +121,12 @@ export interface Ra2TerrainBuild extends TerrainBuild {
   waterY: number | null;
   /** Inputs of the per-pixel water shading, driven by the renderer's lighting and weather each frame. */
   water: WaterUniforms;
+  waterTuning: WaterTuning;
   /** Water mirror target (of the single mirror, or of the per-level atlas); must be in the scene graph. Null without a mirror. */
   reflectionTarget: Object3D | null;
   /** The enhanced lake bed's per-level mirrors, all in one colour and one depth texture; null on every other path. */
   mirrorAtlas: MirrorAtlas | null;
+  setWaterLook(value: string): WaterStyle;
 }
 
 /**
@@ -228,6 +239,22 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
           const level = levelAt(u, v);
           if (map) pushVertex(x + u, y + v, level, mapPixel(x + u, y + v, drawnLevel), FULL);
           else pushVertex(x + u, y + v, level, tileAtlasPixel(t, x, y, h, x + u, y + v, drawnLevel), t.rect);
+          // Ground's second UV pair is free (only wall materials use lower-face art). On bed maps it retains
+          // the original tile raster, so faithful water never mistakes the repainted sand bed for painted water.
+          if (map && cache.terrainMap?.waterBed && manifest.terrainAtlas) {
+            const [px, py] = tileAtlasPixel(t, x, y, h, x + u, y + v, drawnLevel);
+            const aw = manifest.terrainAtlas.width,
+              ah = manifest.terrainAtlas.height;
+            uvs2.splice(uvs2.length - 2, 2, px / aw, py / ah);
+            rects2.splice(
+              rects2.length - 4,
+              4,
+              t.rect[0] / aw,
+              t.rect[1] / ah,
+              (t.rect[0] + t.rect[2]) / aw,
+              (t.rect[1] + t.rect[3]) / ah,
+            );
+          }
           hGrid[(y * SUB + j) * (W * SUB + 1) + (x * SUB + i)] = level * LEVEL_HEIGHT;
         }
       }
@@ -319,7 +346,7 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
   geometry.setAttribute('atlasUv', new BufferAttribute(new Float32Array(uvs), 2));
   geometry.setAttribute('atlasRect', new BufferAttribute(new Float32Array(rects), 4));
   geometry.setAttribute('wall', new BufferAttribute(new Float32Array(walls), 1));
-  if (cache.terrainMap?.paintedWaterline) {
+  if (cache.terrainMap) {
     // Hard shores of a mask that follows the painted waterline (hardShore.ts), per vertex like the contact shading.
     const mask = cache.terrainMap.waterMask.image as { data: ArrayLike<number>; width: number; height: number };
     const field = hardShoreField(
@@ -333,12 +360,23 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
       mask,
       cache.terrainMap.ref,
     );
-    const hard = new Float32Array(count);
+    const small = paintedWaterMask(mask, (cache.terrainMap.ref.scale * mask.width) / cache.terrainMap.ref.width);
+    const hard = new Float32Array(count * 2);
     for (let v = 0; v < count; v++) {
       if (walls[v] === 1) continue;
-      hard[v] = field[Math.round(positions[v * 3 + 2]! * SUB) * (W * SUB + 1) + Math.round(positions[v * 3]! * SUB)]!;
+      hard[v * 2] =
+        field[Math.round(positions[v * 3 + 2]! * SUB) * (W * SUB + 1) + Math.round(positions[v * 3]! * SUB)]!;
     }
-    geometry.setAttribute('hardShore', new BufferAttribute(hard, 1));
+    for (let v = 0; v < count; v++) {
+      if (walls[v] === 1) continue;
+      const [sx, sy] = ra2Screen(positions[v * 3]!, positions[v * 3 + 2]!, positions[v * 3 + 1]! / LEVEL_HEIGHT);
+      const ref = cache.terrainMap.ref;
+      const px = Math.floor(((sx - ref.originX) * ref.scale * small.width) / ref.width);
+      const py = Math.floor(((sy - ref.originY) * ref.scale * small.height) / ref.height);
+      if (px >= 0 && py >= 0 && px < small.width && py < small.height)
+        hard[v * 2 + 1] = small.data[py * small.width + px]! / 255;
+    }
+    geometry.setAttribute('hardShore', new BufferAttribute(hard, 2));
   }
   geometry.setAttribute('atlasUv2', new BufferAttribute(new Float32Array(uvs2), 2));
   geometry.setAttribute('atlasRect2', new BufferAttribute(new Float32Array(rects2), 4));
@@ -361,16 +399,32 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
 
   const wetness = uniform(0);
   const water = createWaterUniforms();
+  const tuning = createWaterTuning(waterPreset.style);
+  water.artToneForce = tuning.artToneForce;
   const waterLevels = groupWaterCells(waterCells);
-  const materials = createMaterials(cache, wetness, water, waterLevels);
-  // Never a missing ground: if the GPU refuses the ground's pipeline the renderer swaps in the same ground without
-  // mirrored reflections, and if that is refused too, the painted art alone (materialFallback.ts).
-  setMaterialFallback(materials.ground, () => {
-    const simpler = createMaterials(cache, wetness, water, waterLevels, { mirrors: false });
-    simpler.wall.dispose();
-    setMaterialFallback(simpler.ground, () => createPlainGround(cache));
-    return simpler.ground;
-  });
+  const makeMaterials = (style: WaterStyle) => {
+    const construct = (mirrors = true) => {
+      const previous = waterPreset.style;
+      waterPreset.style = style;
+      try {
+        return withWaterTuning(tuning, () => createMaterials(cache, wetness, water, waterLevels, { mirrors, tuning }));
+      } finally {
+        waterPreset.style = previous;
+      }
+    };
+    const family = construct();
+    // Every structural family retains the established two-stage GPU refusal fallback.
+    setMaterialFallback(family.ground, () => {
+      const simpler = construct(false);
+      simpler.wall.dispose();
+      setMaterialFallback(simpler.ground, () => createPlainGround(cache));
+      return simpler.ground;
+    });
+    return family;
+  };
+  let materials = makeMaterials(waterPreset.style);
+  let activeStyle = waterPreset.style;
+  const families = new Map([[activeStyle === 'classic', materials]]);
   const mesh = new Mesh(geometry, [materials.ground, materials.wall]);
   mesh.name = 'ra2-terrain';
   mesh.receiveShadow = true;
@@ -413,8 +467,53 @@ export function buildRa2Terrain(cache: Ra2Cache): Ra2TerrainBuild {
     wetness,
     waterY: null,
     water,
-    reflectionTarget: materials.reflectionTarget,
-    mirrorAtlas: materials.mirrorAtlas,
+    waterTuning: tuning,
+    get reflectionTarget() {
+      return materials.reflectionTarget;
+    },
+    get mirrorAtlas() {
+      return materials.mirrorAtlas;
+    },
+    disposeWaterLooks() {
+      const seen = new Set<ShaderNode>();
+      const mirrors = new Set<ReflectorNode>();
+      const visit = (node: ShaderNode) => {
+        if (!node?.getChildren || seen.has(node)) return;
+        seen.add(node);
+        if (node instanceof ReflectorNode) mirrors.add(node.getBase() as ReflectorNode);
+        for (const child of node.getChildren()) visit(child);
+      };
+      for (const family of families.values()) {
+        family.reflectionTarget?.removeFromParent();
+        family.mirrorAtlas?.dispose();
+        for (const material of [family.ground, family.wall]) {
+          visit(material.emissiveNode);
+          visit(material.colorNode);
+          material.dispose();
+        }
+      }
+      for (const mirror of mirrors) mirror.dispose();
+      families.clear();
+    },
+    setWaterLook(value: string) {
+      const style = parseWaterStyle(value);
+      const classic = style === 'classic';
+      if (classic !== (activeStyle === 'classic')) {
+        let next = families.get(classic);
+        if (!next) {
+          next = makeMaterials(style);
+          families.set(classic, next);
+        }
+        const parent = materials.reflectionTarget?.parent ?? mesh.parent;
+        materials.reflectionTarget?.removeFromParent();
+        materials = next;
+        if (materials.reflectionTarget && parent) parent.add(materials.reflectionTarget);
+        mesh.material = [materials.ground, materials.wall];
+      }
+      activeStyle = style;
+      writeWaterTuning(tuning, style);
+      return style;
+    },
   };
 }
 
@@ -828,7 +927,7 @@ function createMaterials(
   waterLevels: readonly WaterLevel[],
   // mirrors: false builds the same ground without mirrored reflections (the water reflects sky only): the first
   // stand-in when the GPU refuses the full material, two sampled textures lighter.
-  { mirrors = true }: { mirrors?: boolean } = {},
+  { mirrors = true, tuning = createWaterTuning(waterPreset.style) }: { mirrors?: boolean; tuning?: WaterTuning } = {},
 ): {
   ground: MeshStandardNodeMaterial;
   wall: MeshStandardNodeMaterial;
@@ -905,14 +1004,14 @@ function createMaterials(
     // shores its tiles mark (hardShore.ts: the height step is often more than a cell behind the painted foot of a
     // cliff) joined with the cliff feet the height step does find. Other maps keep the look's beach everywhere, and
     // so does the painted lake bed, whose shoreline (beach profile, cliff field, swash) is built on its own mask.
-    const lakeBed = map.waterBed && waterPreset.style === 'enhanced';
+    const lakeBed = map.waterBed && waterPreset.style !== 'classic';
     const hard: ShaderNode | null = lakeBed
-      ? null
+      ? max(attribute('hardShore', 'vec2').x, nearCliff).mul(tuning.newShore)
       : BEACHLESS_THEATERS.has(cache.manifest.theater ?? '')
         ? float(1)
         : map.paintedWaterline
-          ? max(attribute('hardShore', 'float'), nearCliff)
-          : null;
+          ? max(attribute('hardShore', 'vec2').x, nearCliff)
+          : max(attribute('hardShore', 'vec2').x, nearCliff).mul(tuning.newShore);
     const waterline = hard ? hardShoreInputs(deepened, hard, sheltered, waterness) : null;
     const shore: ShaderNode = waterline ? waterline.shore : deepened;
     weatherLand = float(1).sub(waterness);
@@ -964,6 +1063,10 @@ function createMaterials(
       reflectionTarget = mirror.target;
     }
     const calm: ShaderNode = waterline ? waterline.calm : sheltered;
+    const tone: ShaderNode = max(
+      lakeBed ? water.artTone.mul(tuning.newShore) : water.artTone,
+      max(tuning.artToneForce, smoothstep(0.1, 0.8, attribute('hardShore', 'vec2').y).mul(tuning.newShore)),
+    );
     if (lakeBed) {
       // No inland band replacement: the mask includes the old shallows and the composite already paints real sand.
       const bedAt = (offsetXZ: ShaderNode): ShaderNode => {
@@ -979,30 +1082,60 @@ function createMaterials(
         // Share rain darkening with the adjacent land, including at exactly zero optical depth.
         return wetGround(bed, groundWetness, paved, nodes).albedo;
       };
+      const originalSize = cache.manifest.terrainAtlas;
+      const originalRect: ShaderNode = attribute('atlasRect2', 'vec4');
+      const originalHalf = originalSize ? vec2(0.5 / originalSize.width, 0.5 / originalSize.height) : vec2(0);
+      const originalWater: ShaderNode =
+        cache.terrainAtlas && originalSize
+          ? wetGround(
+              srgbScale(
+                texture(
+                  cache.terrainAtlas,
+                  clamp(
+                    attribute('atlasUv2', 'vec2'),
+                    originalRect.xy.add(originalHalf),
+                    originalRect.zw.sub(originalHalf),
+                  ),
+                ).rgb,
+                grade,
+              ),
+              groundWetness,
+              paved,
+              nodes,
+            ).albedo
+          : albedo;
       const look = bedWaterLook(
         {
           position: positionWorld,
           shore,
           waterness,
-          art: albedo,
-          uniforms: water,
+          art: originalWater,
+          uniforms: { ...water, artTone: tone },
           reflection,
           calm,
           bedAt,
           detail: map.waterDetail ? texture(map.waterDetail, uv) : undefined,
           surface: map.waterSurface ?? undefined,
           cliff: map.cliff ? texture(map.cliff, uv).r : undefined,
-          columnForDisplay: (column) => waterForDisplay(column, nodes),
-          reflectionLevel: mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay),
+          columnForDisplay: (column) => waterForDisplay(column, nodes, tuning),
+          reflectionLevel: mix(float(1), tuning.level, nodes.faithfulDisplay),
         },
         nodes,
       );
       // The same sheet and foam cross onto land, independently of the static water mask.
-      albedo = mix(mix(look.land, look.body, look.coverage), look.foamColour, look.foam);
+      const paintedBody = originalWater.mul(
+        float(1).add(sin(time.mul(Math.PI * 2).div(tuning.swellPeriod)).mul(tuning.swellAmplitude)),
+      );
+      albedo = mix(
+        mix(mix(look.land, look.body, look.coverage), look.foamColour, look.foam),
+        mix(albedo, paintedBody, waterness),
+        tone,
+      );
+      contactRelief = artToneContactRelief(painted, tone);
       roughness = mix(roughness, look.roughness, look.wetness.max(waterness));
       gloss = max(gloss, look.gloss);
       sheen = sheen.mul(float(1).sub(look.openWater));
-      ground.emissiveNode = look.emission;
+      ground.emissiveNode = tonedReflection(look.emission, look.body, albedo, tone, max(painted, 0));
     } else {
       const look = waterLook(
         {
@@ -1010,7 +1143,7 @@ function createMaterials(
           shore,
           waterness,
           art: art.rgb,
-          uniforms: water,
+          uniforms: { ...water, artTone: tone },
           reflection,
           calm,
           maskShore: painted,
@@ -1037,20 +1170,26 @@ function createMaterials(
       // reflected light is kept, at the painted water's level (waterLook.ts tonedReflection), and the cliff-foot
       // contact shading is dropped near that water (artToneContactRelief).
       // Nor at a hard shore: the rock at the water's edge is the map's own art, not a beach to dress.
-      const ownShore: ShaderNode = waterline
-        ? float(1).sub(water.artTone).mul(waterline.beach)
-        : float(1).sub(water.artTone);
+      const ownShore: ShaderNode = waterline ? float(1).sub(tone).mul(waterline.beach) : float(1).sub(tone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
         mix(float(1), float(0.8), sand),
       );
-      albedo = mix(land, tonedWaterBody(waterForDisplay(look.body, nodes), albedo, water.artTone), waterness);
-      contactRelief = artToneContactRelief(painted, water.artTone);
+      albedo = mix(
+        land,
+        tonedWaterBody(
+          waterForDisplay(look.body, nodes, tuning),
+          albedo.mul(float(1).add(sin(time.mul(Math.PI * 2).div(tuning.swellPeriod)).mul(tuning.swellAmplitude))),
+          tone,
+        ),
+        waterness,
+      );
+      contactRelief = artToneContactRelief(painted, tone);
       if (waterline) contactRelief = max(contactRelief, waterline.relief);
       roughness = mix(mix(roughness, float(0.35), sand), float(1), waterness);
       sheen = sheen.mul(float(1).sub(waterness));
-      ground.emissiveNode = look.emission.mul(mix(float(1), float(WATER_LEVEL), nodes.faithfulDisplay));
+      ground.emissiveNode = look.emission.mul(mix(float(1), tuning.level, nodes.faithfulDisplay));
     }
   } else {
     // Per-tile atlas fallback: the painted water with sky reflection and glints, as before.

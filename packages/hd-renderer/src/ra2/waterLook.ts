@@ -27,7 +27,7 @@ import {
   vec2,
   vec3,
 } from 'three/tsl';
-import type { Texture } from 'three/webgpu';
+import { Color, type Texture } from 'three/webgpu';
 import { DEFAULT_ATMOSPHERE_NODES, moonlit, sampleLightField } from '../atmosphere';
 import type { MirrorSource } from '../mirrorAtlas';
 import type { ShaderNode } from '../tsl';
@@ -38,7 +38,7 @@ import { LEVEL_HEIGHT } from '../world';
 
 /**
  * Open water for original maps, built to read as real water rather than a glossy sheet. Two looks share one interface
- * (waterPreset.style, chosen when the terrain material is built):
+ * (waterPreset.style selects the initial structural family; live tuning uniforms drive the enhanced family):
  *
  * 'enhanced' (opt-in, like every modern effect: sandbox ?water=enhanced or ?look=golden, in game hd-water=enhanced),
  * the remaster's modern water, tuned against the approved river concept (concept A, RiverRam):
@@ -61,7 +61,106 @@ import { LEVEL_HEIGHT } from '../world';
  * (glints stay tight and sparse, reflections capped), no dark or white rings around cliff-foot rocks.
  */
 
-export type WaterStyle = 'enhanced' | 'classic';
+export { WATER_STYLES, parseWaterStyle, type WaterStyle } from './waterStyles';
+import type { WaterStyle } from './waterStyles';
+
+/** Values are in the legacy shader's linear lighting space; colour() converts the sRGB slate. */
+const LEGACY_TUNING = {
+  saturation: 1.8,
+  level: 0.67,
+  artHue: 0.15,
+  artToneForce: 0,
+  artToneReflection: 0.12,
+  reflectMax: 0.26,
+  sheenGain: 0.9,
+  sheenTrains: 5,
+  crest: 1,
+  glitterGain: 6,
+  gust: 1,
+  rippleSlope: 1,
+  rippleDrift: 1,
+  windOverride: -1,
+  shallowMix: 0.9,
+  shallowSandOnly: 0,
+  foam: 1,
+  colourBlend: 0,
+  swellAmplitude: 0,
+  swellPeriod: 10,
+  newShore: 0,
+};
+export const WATER_TUNING: Record<WaterStyle, Readonly<typeof LEGACY_TUNING>> = {
+  classic: { ...LEGACY_TUNING },
+  enhanced: { ...LEGACY_TUNING },
+  faithful: {
+    ...LEGACY_TUNING,
+    artToneForce: 1,
+    artToneReflection: 0.06,
+    rippleSlope: 0.3,
+    rippleDrift: 0.5,
+    sheenGain: 0,
+    crest: 0,
+    glitterGain: 0,
+    gust: 0,
+    shallowMix: 0,
+    foam: 0,
+    swellAmplitude: 0.001,
+    newShore: 1,
+  },
+  muted: {
+    ...LEGACY_TUNING,
+    saturation: 1,
+    artHue: 0.6,
+    colourBlend: 0.6,
+    sheenGain: 0.35,
+    sheenTrains: 2,
+    crest: 0,
+    reflectMax: 0.12,
+    glitterGain: 1.5,
+    rippleDrift: 0.5,
+    rippleSlope: 0.5,
+    shallowMix: 0.3,
+    shallowSandOnly: 1,
+    foam: 0.5,
+    newShore: 1,
+  },
+  calm: { ...LEGACY_TUNING, windOverride: 0.1, gust: 0, sheenGain: 0.36, newShore: 1 },
+};
+export type WaterTuning = { [K in keyof typeof LEGACY_TUNING]: ShaderNode } & {
+  deepOverride: ShaderNode;
+  midOverride: ShaderNode;
+};
+export function createWaterTuning(style: WaterStyle = 'classic'): WaterTuning {
+  return {
+    ...Object.fromEntries(Object.entries(WATER_TUNING[style]).map(([k, v]) => [k, uniform(v)])),
+    deepOverride: uniform(new Color(0x282c3e)),
+    midOverride: uniform(new Color(0x282c3e)),
+  } as WaterTuning;
+}
+export function writeWaterTuning(tuning: WaterTuning, style: WaterStyle): void {
+  for (const key of Object.keys(WATER_TUNING[style]) as (keyof typeof LEGACY_TUNING)[])
+    tuning[key].value = WATER_TUNING[style][key];
+}
+// Synchronous construction scope only: every graph captures its terrain's own uniform nodes.
+// Restored even on failure; no global mutable uniforms are read during rendering.
+let tuning = createWaterTuning();
+export function withWaterTuning<T>(value: WaterTuning, build: () => T): T {
+  const previous = tuning;
+  tuning = value;
+  try {
+    return build();
+  } finally {
+    tuning = previous;
+  }
+}
+function tunedWind(wind: ShaderNode): ShaderNode {
+  return tuning.windOverride.lessThan(0).select(wind, tuning.windOverride);
+}
+function deepColour(): ShaderNode {
+  return mix(color(DEEP), tuning.deepOverride, tuning.colourBlend);
+}
+function midColour(): ShaderNode {
+  return mix(color(MID), tuning.midOverride, tuning.colourBlend);
+}
 
 /**
  * Build-time choice of the water look; set before the world's terrain materials are created (sandbox ?water=, live
@@ -307,11 +406,11 @@ const MID = 0x0f4a5c;
 const SHALLOW = 0x1f9e93;
 const BED = 0xd6c092;
 /** Share of the original painted water's hue kept in the column (snow, desert and lunar water keep their character). */
-const ART_HUE = 0.15;
+
 /** Reflection: strength = Fresnel x REFLECT_GAIN + REFLECT_BASE, at most REFLECT_MAX (see the header's owner notes). */
 const REFLECT_GAIN = 1.7;
 const REFLECT_BASE = 0.025;
-const REFLECT_MAX = 0.26;
+
 /**
  * The analytic sky as the water shows it: dimmer than the sky and without most of its red, so open water reads as the
  * concept's deep blue-teal instead of slate grey (the column's colour shows through the weak reflection).
@@ -429,7 +528,7 @@ export function tonedReflection(
   const luma = (c: ShaderNode): ShaderNode => dot(c, vec3(0.2126, 0.7152, 0.0722));
   const relative: ShaderNode = clamp(luma(reflected).div(max(luma(body), 0.02)), 0, 1);
   const open: ShaderNode = smoothstep(ART_TONE_SHORE.near, ART_TONE_SHORE.far, depth);
-  return mix(reflected, art.mul(relative.mul(ART_TONE_REFLECTION)).mul(open), tone);
+  return mix(reflected, art.mul(relative.mul(tuning.artToneReflection)).mul(open), tone);
 }
 /** Ground direction towards the fixed camera, and how far behind a point its mirrored local light is sampled. */
 const TOWARDS_CAMERA = vec2(Math.SQRT1_2, Math.SQRT1_2);
@@ -447,7 +546,7 @@ const BREAKER_FAR = 0.42;
 function gustAt(p: ShaderNode): ShaderNode {
   const tex = waterTextures();
   const drift = vec2(Math.cos(WIND_ANGLE), Math.sin(WIND_ANGLE)).mul(time.mul(0.045));
-  return smoothstep(0.36, 0.68, texture(tex.noise, p.div(18).sub(drift)).r);
+  return smoothstep(0.36, 0.68, texture(tex.noise, p.div(18).sub(drift)).r).mul(tuning.gust);
 }
 
 /** Surface slope (d height / dx, d height / dz) of scrolled ripple normal-map layers. */
@@ -459,6 +558,7 @@ function rippleSlope(
   roughMultiplier: ShaderNode | number = 1,
   source: 'ripple' | 'chop' = 'ripple',
 ): ShaderNode {
+  wind = tunedWind(wind);
   const tex = waterTextures();
   const map = source === 'chop' ? tex.chop : tex.ripple;
   const norm = Math.sqrt(RIPPLE_LAYERS.reduce((sum, layer) => sum + layer[3] * layer[3], 0));
@@ -476,14 +576,14 @@ function rippleSlope(
     // Layer coordinates: u along the layer's wind axis (the texture's x, where its waves travel), v across.
     const u: ShaderNode = p.x.mul(c).add(p.y.mul(s));
     const v: ShaderNode = p.y.mul(c).sub(p.x.mul(s));
-    const texel: ShaderNode = texture(map, vec2(u.sub(time.mul(drift)), v).div(tile));
+    const texel: ShaderNode = texture(map, vec2(u.sub(time.mul(tuning.rippleDrift).mul(drift)), v).div(tile));
     const du: ShaderNode = texel.r.mul(2).sub(1).mul(RIPPLE_SLOPE_RANGE);
     const dv: ShaderNode = texel.g.mul(2).sub(1).mul(RIPPLE_SLOPE_RANGE);
     const w = (weight * RIPPLE_SLOPE) / norm;
     sx = sx.add(du.mul(c).sub(dv.mul(s)).mul(w));
     sz = sz.add(du.mul(s).add(dv.mul(c)).mul(w));
   }
-  return vec2(sx, sz).mul(rough);
+  return vec2(sx, sz).mul(rough).mul(tuning.rippleSlope);
 }
 
 /** Crest sharpness (ripple A channel) of the two broadest ripple layers, at the same drifting coordinates. */
@@ -496,7 +596,7 @@ function rippleCrest(p: ShaderNode): ShaderNode {
     const s = Math.sin(angle);
     const u: ShaderNode = p.x.mul(c).add(p.y.mul(s));
     const v: ShaderNode = p.y.mul(c).sub(p.x.mul(s));
-    const a: ShaderNode = texture(tex.ripple, vec2(u.sub(time.mul(drift)), v).div(tile)).a;
+    const a: ShaderNode = texture(tex.ripple, vec2(u.sub(time.mul(tuning.rippleDrift).mul(drift)), v).div(tile)).a;
     crest = crest.max(i === 0 ? a : a.mul(0.85));
   });
   return crest;
@@ -504,6 +604,7 @@ function rippleCrest(p: ShaderNode): ShaderNode {
 
 /** Slope of the long swells (analytic). */
 function swellSlope(p: ShaderNode, wind: ShaderNode): ShaderNode {
+  wind = tunedWind(wind);
   const strength: ShaderNode = float(0.5).add(wind.mul(1.4));
   let sx: ShaderNode = float(0);
   let sz: ShaderNode = float(0);
@@ -536,6 +637,7 @@ function sharpCrestPeak(sharp: number): number {
  * axis with sharpened crests, bent by a slow domain warp and broken into short crests by per-train noise envelopes.
  */
 function sheenTrains(p: ShaderNode, wind: ShaderNode, gust: ShaderNode): { slope: ShaderNode; crest: ShaderNode } {
+  wind = tunedWind(wind);
   const S = WATER_SHEEN;
   const tex = waterTextures();
   const warpSample: ShaderNode = texture(tex.noise, p.div(S.warpScale).add(vec2(time.mul(0.004), time.mul(-0.003))));
@@ -564,7 +666,9 @@ function sheenTrains(p: ShaderNode, wind: ShaderNode, gust: ShaderNode): { slope
       .sub(time.mul(speed))
       .mul(k)
       .add(i * 1.7);
-    const env: ShaderNode = mix(float(S.envelopeLow), float(S.envelopeHigh), smoothstep(0.3, 0.8, channels[i]!));
+    const env: ShaderNode = mix(float(S.envelopeLow), float(S.envelopeHigh), smoothstep(0.3, 0.8, channels[i]!)).mul(
+      tuning.sheenTrains.greaterThan(i).select(1, 0),
+    );
     const s: ShaderNode = cos(phase)
       .mul(exp(sin(phase).sub(1).mul(S.sharp)))
       .mul(slope * norm)
@@ -671,12 +775,12 @@ function waterSheen(
     ? smoothstep(S.web.crestLow, S.web.crestHigh, trains.crest)
     : sheenWeb(xz, trains.slope);
   return {
-    strength: fresnel.add(web.mul(S.web.fresnel)).min(1).mul(open),
+    strength: fresnel.add(web.mul(tuning.crest).mul(S.web.fresnel)).min(1).mul(open),
     sky,
     reflected,
     fresnel,
     mirrorDir: vec3(v.x.negate(), v.y, v.z.negate()),
-    crest: trains.crest,
+    crest: trains.crest.mul(tuning.crest),
   };
 }
 
@@ -722,13 +826,19 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
 
   // Water column: dark blue-teal within half a cell of the bank already, a narrow turquoise shallow band, and the sandy
   // bed showing through right at the shore.
-  let column: ShaderNode = mix(color(DEEP), color(MID), smoothstep(1.3, 0.35, depth));
-  column = mix(column, color(SHALLOW), smoothstep(0.42, 0.03, depth).mul(0.9));
+  let column: ShaderNode = mix(deepColour(), midColour(), smoothstep(1.3, 0.35, depth));
+  column = mix(
+    column,
+    color(SHALLOW),
+    smoothstep(0.42, 0.03, depth)
+      .mul(tuning.shallowMix)
+      .mul(mix(float(1), surf, tuning.shallowSandOnly)),
+  );
   const artLevel = max(dot(art, vec3(0.2126, 0.7152, 0.0722)), 0.002);
   const columnLevel = dot(column, vec3(0.2126, 0.7152, 0.0722));
   // Only away from the bank: the painted water's white sparkle pixels, brought to the bright shallows' level, showed as
   // grey specks all over the turquoise band.
-  column = mix(column, art.mul(columnLevel.div(artLevel)), smoothstep(0.1, 0.6, depth).mul(ART_HUE));
+  column = mix(column, art.mul(columnLevel.div(artLevel)), smoothstep(0.1, 0.6, depth).mul(tuning.artHue));
   // Caustics: two scrolled copies of the caustic web, bent by the ripples; their sum is a moving net of light lines,
   // brightest where the two cross (the minimum or product of two thin webs leaves only the crossings: white specks).
   const t: ShaderNode = time;
@@ -758,7 +868,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   // Reflection: Schlick Fresnel for water (F0 = 0.02), lifted slightly so reflections still read at RTS distance.
   const view: ShaderNode = normalize(cameraPosition.sub(p));
   const fresnel: ShaderNode = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
-  const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(REFLECT_MAX);
+  const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(tuning.reflectMax);
   const r: ShaderNode = reflect(view.negate(), normal);
   const skyLevel: ShaderNode = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
   const sky: ShaderNode = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(
@@ -773,7 +883,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   const E = WATER_SHEEN.enhanced;
   const open: ShaderNode = smoothstep(E.openNear, E.openFar, depth);
   const sh = waterSheen(p, slope, gust, uniforms, skyLevel.mul(skyFilter(uniforms)).div(SKY_IN_WATER_LUMA), float(1));
-  const reflectance: ShaderNode = mix(strength, sh.strength.mul(E.gain), open);
+  const reflectance: ShaderNode = mix(strength, sh.strength.mul(tuning.sheenGain), open);
   const skyMirror: ShaderNode = mix(sky, sh.sky, open);
   body = body.mul(mix(vec3(1), vec3(...E.bodyTint).mul(E.bodyScale), open));
   const mirrored: ShaderNode =
@@ -782,8 +892,8 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   // gathered in gusts, none in rain or right at the bank.
   const sunDot: ShaderNode = max(dot(r, uniforms.sunDirection), 0);
   const glitter: ShaderNode = pow(sunDot, 600)
-    .mul(6)
-    .add(pow(sunDot, 110).mul(0.3))
+    .mul(tuning.glitterGain)
+    .add(pow(sunDot, 110).mul(tuning.glitterGain.mul(0.05)))
     .mul(mix(float(0.3), float(1.35), gust))
     .mul(float(1).sub(uniforms.rain))
     .mul(float(1).sub(night.mul(0.75)))
@@ -833,7 +943,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
       .mul(smoothstep(-0.01, 0.01, shore)),
     0,
     1,
-  );
+  ).mul(tuning.foam);
 
   // Foam and wet sand are lit like the ground; foam is kept greyer at night so shorelines do not outline every water
   // body in white.
@@ -851,7 +961,7 @@ function enhancedWaterLook(inputs: WaterLookInputs, nodes = DEFAULT_ATMOSPHERE_N
   body = mix(body, bed.mul(0.55), exposed);
   body = mix(body.mul(float(1).sub(reflectance)), foamColour, foam);
   const emission: ShaderNode = reflectedLight
-    .add(lights)
+    .add(mix(lights, art.mul(min(lights, tuning.artToneReflection)), uniforms.artTone))
     .mul(float(1).sub(foam.mul(ownShore)))
     .mul(float(1).sub(exposed.mul(0.75).mul(ownShore)))
     .mul(waterness);
@@ -1411,12 +1521,18 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     .mul(surf);
   const refracted: ShaderNode = mix(art, bedAt(boundedOffset), smoothstep(0, BED_REFRACTION_FADE, abs(shore)));
   const bedLit: ShaderNode = wetSand(refracted).mul(float(BED_AMBIENT).add(caustics));
-  // Preserve the enhanced deep/mid character; the sand supplies the shallow colour, never ART_HUE or a constant BED.
+  // Preserve the enhanced column by default; muted can borrow the original water hue. Transmitted sand is separate.
   const offshore: ShaderNode = max(shore, 0);
   const column: ShaderNode = mix(
-    mix(color(DEEP), color(MID), smoothstep(1.3, 0.35, offshore)),
+    mix(deepColour(), midColour(), smoothstep(1.3, 0.35, offshore)),
     color(BED_SCATTER.colour),
-    smoothstep(BED_SCATTER.far, BED_SCATTER.near, offshore).mul(BED_SCATTER.amount),
+    smoothstep(BED_SCATTER.far, BED_SCATTER.near, offshore).mul(BED_SCATTER.amount).mul(tuning.shallowMix.div(0.9)),
+  );
+  const artLuma: ShaderNode = max(dot(art, vec3(0.2126, 0.7152, 0.0722)), 0.002);
+  const tonedColumn: ShaderNode = mix(
+    column,
+    art.mul(dot(column, vec3(0.2126, 0.7152, 0.0722)).div(artLuma)),
+    tuning.artHue.mul(tuning.colourBlend.div(0.6)),
   );
   const nightLevel: ShaderNode = mix(float(1), float(0.7), night);
   let displayedColumn: ShaderNode;
@@ -1425,7 +1541,7 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
       float(1).sub(smoothstep(WATER_DETAIL.shallowReach, 0, offshore).mul(WATER_DETAIL.shallowKeep)),
     );
     // The repaint already describes a display colour: compensate only the constant column, then dim both at night.
-    displayedColumn = mix(columnForDisplay(column), detail.rgb.mul(WATER_DETAIL.columnGain), weight);
+    displayedColumn = mix(columnForDisplay(tonedColumn), detail.rgb.mul(WATER_DETAIL.columnGain), weight);
     if (inputs.surface) {
       // Luminous turquoise over the sandy shelf (the approved target's beaches): sunlight scattered back from the bed
       // through clear shallow water, widest within about three quarters of a cell of the bank.
@@ -1437,7 +1553,7 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     displayedColumn = displayedColumn.mul(nightLevel);
   } else {
     // Keep the original operation order (including compensation after night dimming) without a detail layer.
-    displayedColumn = columnForDisplay(column.mul(nightLevel));
+    displayedColumn = columnForDisplay(tonedColumn.mul(nightLevel));
   }
   let body: ShaderNode = bedLit.mul(transmission).add(displayedColumn.mul(vec3(1).sub(transmission)));
   {
@@ -1515,7 +1631,7 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   }
   const view: ShaderNode = normalize(cameraPosition.sub(p));
   const fresnel: ShaderNode = float(0.02).add(float(0.98).mul(pow(float(1).sub(max(dot(normal, view), 0)), 5)));
-  const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(REFLECT_MAX).mul(open);
+  const strength: ShaderNode = fresnel.mul(REFLECT_GAIN).add(REFLECT_BASE).min(tuning.reflectMax).mul(open);
   const r: ShaderNode = reflect(view.negate(), normal);
   const skyLevel: ShaderNode = mix(float(1), sceneBrightness.min(1).mul(0.6), night);
   const sky: ShaderNode = mix(uniforms.skyHorizon, uniforms.skyZenith, smoothstep(0.0, 0.6, r.y)).mul(skyLevel);
@@ -1532,8 +1648,8 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     reflected && inputs.reflection ? mix(waterSky, reflected, inputs.reflection.coverage) : waterSky;
   const sunDot: ShaderNode = max(dot(r, uniforms.sunDirection), 0);
   let glitter: ShaderNode = pow(sunDot, 600)
-    .mul(6)
-    .add(pow(sunDot, 110).mul(0.3))
+    .mul(tuning.glitterGain)
+    .add(pow(sunDot, 110).mul(tuning.glitterGain.mul(0.05)))
     .mul(mix(float(0.3), float(1.35), gust))
     .mul(float(1).sub(uniforms.rain))
     .mul(float(1).sub(night.mul(0.75)))
@@ -1554,6 +1670,7 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
   if (detail) {
     const S = WATER_SHEEN;
     const sh = waterSheen(p, slope, gust, uniforms, skyLevel, open);
+    sh.strength = sh.strength.mul(tuning.sheenGain.div(0.9));
     crestLine = sh.crest;
     mirrorDir = sh.mirrorDir;
     body = body.mul(float(1).sub(sh.strength)).mul(mix(vec3(1), vec3(...S.bodyTint).mul(S.bodyScale), open));
@@ -1562,6 +1679,7 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
     glitter = glitter.add(
       pow(max(dot(sh.reflected, uniforms.sunDirection), 0), S.sunBroadPower)
         .mul(S.sunBroadGain)
+        .mul(tuning.glitterGain.div(6))
         .mul(sh.fresnel.mul(4).min(1))
         .mul(float(1).sub(uniforms.rain))
         .mul(float(1).sub(night.mul(0.75)))
@@ -1781,6 +1899,8 @@ export function bedWaterLook(inputs: BedWaterInputs, nodes = DEFAULT_ATMOSPHERE_
         .mul(float(1).sub(night.mul(0.8))),
     );
   }
+  foam = foam.mul(tuning.foam).mul(mix(float(1), surf, tuning.newShore));
+  sparkle = sparkle.mul(tuning.glitterGain.div(6));
   const foamColour: ShaderNode = color(0xf2f6f5).mul(mix(float(1), float(0.5), night));
   const sandSheen: ShaderNode = sky.mul(wetness).mul(float(1).sub(open)).mul(BEACH_WET.sheen);
   const sheetSheen: ShaderNode = sky.mul(sheet).mul(filmFade).mul(BED_SWASH.sheen);
