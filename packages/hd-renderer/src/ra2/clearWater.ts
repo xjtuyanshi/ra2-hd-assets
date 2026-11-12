@@ -64,10 +64,10 @@ export const CLEAR_WATER = {
  * (exp(k(sin - 1)) profile), which is what reads as waves rather than blotches.
  */
 export const CLEAR_WAVES = [
-  [12, 0.9, 0.06, 1],
-  [57, 0.74, -0.052, 1],
-  [103, 0.62, 0.048, 1],
-  [148, 0.52, -0.044, 1],
+  [12, 0.9, 0.02, 1],
+  [57, 0.74, -0.018, 1],
+  [103, 0.62, 0.016, 1],
+  [148, 0.52, -0.015, 1],
 ] as const;
 /** Crest sharpness of the wave profile and its mean/derivative spread (for unit-variance terms). */
 const CREST = { sharpness: 2.4, mean: 0.277, spread: 0.333, slope: 0.186 } as const;
@@ -176,8 +176,8 @@ function clearFine(ground: ShaderNode): ShaderNode {
       .sub(1);
     return vec2(t.x.mul(c).sub(t.y.mul(si)), t.x.mul(si).add(t.y.mul(c)));
   };
-  return at(0.4, 0.45, [0.03, -0.04])
-    .add(at(2.1, 0.35, [-0.035, 0.025]))
+  return at(0.4, 0.45, [0.015, -0.02])
+    .add(at(2.1, 0.35, [-0.018, 0.012]))
     .mul(0.5 * RIPPLE_SLOPE_RANGE);
 }
 
