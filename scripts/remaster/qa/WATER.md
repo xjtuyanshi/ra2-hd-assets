@@ -46,8 +46,10 @@ clock (prototype A's change per second per unit of local contrast in open water)
 where the bed and moving caustics carry the texture (caustics only by day: under the moon they drew a honeycomb); half of it shaded by tilt alone, because slope shading along one
 light streaks a round sea across the light) and sharp, sparse glints are lit by a fixed light ahead of the camera at prototype A's sun angle in
 the scene sun's colour (at night the relief light is raised toward overhead), with the orthographic camera's single view
-direction; a fine mask, round on screen, breaks the glints into sparse points. Small compression-mask whitecaps and a low, capped sky/object reflection with a Fresnel sky tint
-toward the top of the screen. Beaches have no white outline: the sand runs into wet sand and clear shallows, and white
+direction; a fine mask, round on screen, breaks the glints into sparse, dim points. No whitecaps on open water (grey specks read as
+debris). A low, capped sky reflection with a Fresnel sky tint toward the top of the screen; mirrored objects (bridge decks,
+piers, ships) replace up to 0.4 of the water with an image held below the water's brightness, so they mirror as a
+darker shape. Beaches have no white outline: the sand runs into wet sand and clear shallows, and white
 water appears only as a sparse, broken wash line while a wave runs up (seven-second cycle), on the few stretches of
 coast a broad drifting mask gives a set of waves at that moment, never along the whole coast. The wet band on land
 beside a beach is darkened, so ground copied from further inland does not draw a pale rim at the waterline. Caustics lie about a third
@@ -57,9 +59,9 @@ beside paved cells or masonry shoreline art (quays, seawalls, bridges) keeps its
 wet line. The shore class and tone are computed once per map on the CPU from the terrain composite's land just inland of
 the waterline and spread onto the water with the shore distance field (`shoreField.ts`, carried in its G/B/A channels),
 so they follow the nearest shore smoothly; a per-pixel tap stepped back along the field's gradient drew blocky dark
-drips and cyan wisps where the gradient pointed at the wrong shore. Shadows on open water are softened and capped at
-about x0.94 brightness. Painted pools remain protected. The scene-wide cinematic grade is unchanged. Bridge and wall
-mirror silhouettes use a five-tap premultiplied feather on clear only, probed at the undistorted mirror position;
+drips and cyan wisps where the gradient pointed at the wrong shore. Shadows on open water are capped at about x0.62
+brightness (the engine's own is x0.5): at the earlier x0.94 cap bridges and piers cast none and seemed to float. Painted pools remain protected. The scene-wide cinematic grade is unchanged. Bridge and wall
+mirror silhouettes use a narrow five-tap premultiplied feather on clear only, probed at the undistorted mirror position;
 legacy looks retain their existing sampling. Surface metrics require fresh rendered measurement; coefficient changes
 alone do not establish acceptance.
 

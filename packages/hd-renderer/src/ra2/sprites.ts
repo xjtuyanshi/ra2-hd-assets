@@ -341,11 +341,13 @@ export function infantryShadowAlpha(coverage: number, opacity = INFANTRY_SHADOW_
 }
 
 /**
- * Shadow opacity cap on clear water: shadowDisplayRatio(0.12) is about 0.94. At 0.39 the overlapping static bridge
- * shadows read as pale glass slabs with hard vertical seams under the deck, and at 0.25 their overlaps still drew
- * faint vertical slabs.
+ * Shadow opacity cap on clear water: shadowDisplayRatio(0.65) is about 0.62 (the engine's own 0.78 gives 0.5). The
+ * earlier cap of 0.12 (about 0.94) removed the shadow of bridges, piers and ships from the water altogether, so a
+ * bridge seemed to float; the plane-depth ground pass darkens each pixel once, and in the sandbox the Golden Gate's
+ * overlapping deck shadows show no seams at this strength. The lit clear water column keeps it a little lighter than
+ * the engine's shadow.
  */
-export const CLEAR_WATER_SHADOW_ALPHA = 0.12;
+export const CLEAR_WATER_SHADOW_ALPHA = 0.65;
 
 /** 0..1 open water under a ground point while the clear water look is on (per-cell surface class, bilinear). */
 function shadowOnClearWater(xz: ShaderNode, nodes: AtmosphereNodes): ShaderNode {

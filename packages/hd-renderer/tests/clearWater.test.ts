@@ -16,6 +16,8 @@ import {
   clearTransmission,
 } from '../src/ra2/clearWater';
 import { buildShoreField, SHORE_MAX, SHORE_MIN, type ShoreLandValue } from '../src/ra2/shoreField';
+import { CLEAR_WATER_SHADOW_ALPHA, shadowDisplayRatio } from '../src/ra2/sprites';
+import { ENGINE_SHADOW_OPACITY } from '../src/ra2/voxelShadow';
 
 describe('clear water optical policy', () => {
   it('deepens monotonically within the shallow band and drops steeply beside rocks', () => {
@@ -145,6 +147,18 @@ describe('clear water optical policy', () => {
     expect(CLEAR_WATER.reflectionMax).toBeLessThanOrEqual(0.15);
     expect(CLEAR_WATER.reflection + CLEAR_WATER.fresnelGain * 0.1).toBeLessThan(0.1);
     expect(CLEAR_WATER.sparkle).toBeLessThanOrEqual(4);
+  });
+  it('keeps objects grounded on the water: their shadow and a darker mirror image (bridges must not float)', () => {
+    // Shadows on clear water: clearly visible (displayed ratio well below 0.8) but no darker than the engine's own.
+    expect(shadowDisplayRatio(CLEAR_WATER_SHADOW_ALPHA)).toBeLessThan(0.75);
+    expect(CLEAR_WATER_SHADOW_ALPHA).toBeLessThanOrEqual(ENGINE_SHADOW_OPACITY);
+    // A mirrored bridge or hull replaces a visible share of the water, capped, and is darker than the water.
+    expect(CLEAR_WATER.objectReflection).toBeGreaterThanOrEqual(0.2);
+    expect(CLEAR_WATER.objectReflection).toBeLessThanOrEqual(0.5);
+    expect(CLEAR_WATER.objectShade).toBeLessThan(1);
+  });
+  it('has no grey whitecap specks on open water (owner 2026-11-13: they read as debris)', () => {
+    expect(CLEAR_WATER.whitecap).toBe(0);
   });
 });
 

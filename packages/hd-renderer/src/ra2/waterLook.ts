@@ -1095,15 +1095,16 @@ export function rippledReflection(
       ];
   for (const [x, y] of taps) {
     const uv: ShaderNode = clear
-      ? uv1.add(vec2(x!, y!).mul(h.mul(0.1).add(0.03)).mul(uvPerWorld))
+      ? uv1.add(vec2(x!, y!).mul(h.mul(0.03).add(0.012)).mul(uvPerWorld))
       : uv1.add(vec2(0, h.mul(y! * RIPPLED_REFLECTION.spread).mul(uvPerWorld.y)));
     const covered = coverageAt(uv);
     // Average premultiplied taps so cleared/sky texels cannot darken the silhouette before coverage is applied.
     colour = colour.add(mirror.sample(uv).rgb.mul(covered));
     coverage = coverage.add(covered);
   }
-  // Clear keeps less of tall mirrored objects (bridge decks, walls): their static pale slabs read as glass panes.
-  const keep: ShaderNode = mix(float(1), float(clear ? 0.3 : RIPPLED_REFLECTION.keepTop), heightFade);
+  // Clear keeps a little less of tall mirrored objects (bridge decks, walls); clearWater.ts darkens their image so it
+  // does not read as pale glass panes. At 0.3 with a wide feather the deck's image vanished and the bridge floated.
+  const keep: ShaderNode = mix(float(1), float(clear ? 0.7 : RIPPLED_REFLECTION.keepTop), heightFade);
   // Folding keep into average coverage is exactly mix(waterSky, mix(waterSky, reflected, keep), coverage).
   // bedWaterLook supplies its own sky AFTER the existing moonlight grade, avoiding a second grade on that sky.
   return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(taps.length).mul(keep) };

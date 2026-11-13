@@ -48,15 +48,19 @@ export const CLEAR_WATER = {
   fresnelGain: 0.45,
   skyTop: 0.06,
   shininess: 700,
-  sparkle: 2.8,
+  sparkle: 1.2,
   relief: 1.65,
   /** Share of the water's relief shaded by tilt alone (direction-free), its gain, and the mean it adds back. */
   tiltShare: 0.5,
   tiltShade: 11,
   tiltMean: 0.12,
-  whitecap: 0.32,
+  whitecap: 0,
   cliffContact: 0.55,
   mirrorKeep: 0.55,
+  /** Share of the water a mirrored object (bridge deck, pier, ship hull) replaces at full mirror coverage. */
+  objectReflection: 0.4,
+  /** Brightest a mirrored object may be, relative to the water around it. */
+  objectShade: 0.55,
   /** Seabed dapple: rock/weed threshold of the 0..1 field (lower = more patches) and how much they darken. */
   dappleFrom: 0.52,
   dappleDark: 0.26,
@@ -458,6 +462,8 @@ export function clearWaterLook(
   // The mirrored scene: at a cliff only the foot of the rock is mirrored (fading within about 0.4 cells) and in the
   // water's own colour, so tall walls do not smear brown far out over the deep water.
   let mirror: ShaderNode = sky;
+  let objectMirror: ShaderNode = float(0);
+  let objectColour: ShaderNode = vec3(0);
   if (inputs.reflection) {
     const mirrored = moonlit(inputs.reflection.colour, nodes);
     const toned = mix(
@@ -469,6 +475,19 @@ export function clearWaterLook(
       .mul(CLEAR_WATER.mirrorKeep)
       .mul(mix(float(1), smoothstep(0.45, 0.05, edge), hard));
     mirror = mix(sky, toned, coverage);
+    // Bridges, piers and ships: at the clear look's low Fresnel strength their mirror image vanished into the bright
+    // water body and the bridge seemed to float. Where the mirror holds an object, it replaces up to objectReflection
+    // of the water, as in the enhanced look's OBJECT_REFLECT; cliffs keep their short, water-toned foot image.
+    objectMirror = inputs.reflection.coverage
+      .mul(CLEAR_WATER.objectReflection)
+      .mul(float(1).sub(hard))
+      .mul(float(1).sub(night.mul(0.5)));
+    // The mirror shows the art's lit face, but water mirrors an object's shaded underside: pale rails and road
+    // markings mirrored at full brightness read as glass slabs. The image is held below the water's own brightness,
+    // so a bridge or hull mirrors as a darker shape, as in the original and enhanced looks.
+    const waterLuma = dot(body, vec3(0.2126, 0.7152, 0.0722));
+    const imageLuma = max(dot(toned, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+    objectColour = toned.mul(waterLuma.mul(CLEAR_WATER.objectShade).div(imageLuma).min(1));
   }
   // A's sharp Phong glints, lit from ahead (CLEAR_GLINT_LIGHT) in the sun's colour.
   const sunDot = max(dot(reflectedDirection, light), 0);
@@ -483,7 +502,7 @@ export function clearWaterLook(
   ).b;
   const sparkle = uniforms.sunColor
     .mul(glint)
-    .mul(smoothstep(0.5, 0.68, twinkle).mul(1.5))
+    .mul(smoothstep(0.6, 0.74, twinkle).mul(1.5))
     .mul(smoothstep(0.4, 2, metres))
     .mul(float(1).sub(uniforms.rain))
     .mul(float(1).sub(night));
@@ -543,8 +562,16 @@ export function clearWaterLook(
     .min(1)
     .mul(waterness)
     .mul(float(1).sub(night.mul(0.5)));
-  body = mix(body.mul(float(1).sub(strength.mul(open))), color(0xe8eeec), foam);
-  const emission = mirror.mul(strength).add(sparkle).add(lights).mul(open).mul(waterness).mul(float(1).sub(foam));
+  const objectShare = objectMirror.mul(open);
+  body = mix(body.mul(float(1).sub(strength.mul(open)).sub(objectShare)), color(0xe8eeec), foam);
+  const emission = mirror
+    .mul(strength)
+    .add(sparkle)
+    .add(lights)
+    .mul(open)
+    .add(objectColour.mul(objectShare))
+    .mul(waterness)
+    .mul(float(1).sub(foam));
   return { normal, body, emission, foam };
 }
 
