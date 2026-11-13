@@ -3,10 +3,13 @@ import { Color } from 'three/webgpu';
 import { LOOK_PRESETS } from '../src/HdRenderer';
 import { cinematicGradeRgb } from '../src/post';
 import {
+  CLEAR_GLINT_LIGHT,
+  CLEAR_LAYER_TURN,
   CLEAR_WATER,
   CLEAR_LAYERS,
   CLEAR_SURFACE,
   clearDepth,
+  clearMetres,
   clearPalette,
   clearTransmission,
 } from '../src/ra2/clearWater';
@@ -27,15 +30,44 @@ describe('clear water optical policy', () => {
       previous = clearDepth(shore);
     }
   });
-  it('keeps the bed at zero depth, absorbs red fastest and hides the deep bed', () => {
+  it('keeps the bed at zero depth, absorbs red fastest and lets the open-water bed show only faintly', () => {
     expect(clearTransmission(0)).toEqual([1, 1, 1]);
-    for (const depth of [0.1, 0.4, 1]) {
-      const [r, g, b] = clearTransmission(depth) as [number, number, number];
+    for (const metres of [0.5, 2, 6]) {
+      const [r, g, b] = clearTransmission(metres) as [number, number, number];
       expect(r).toBeLessThan(g);
       expect(g).toBeLessThan(b);
       expect(b).toBeLessThan(1);
     }
-    expect(Math.max(...clearTransmission(1))).toBeLessThan(0.07);
+    // Open shelf water: the bed's red is gone and its green and blue are well below half (dapple, not a glow).
+    const [r, g, b] = clearTransmission(clearMetres(4)) as [number, number, number];
+    expect(r).toBeLessThan(0.01);
+    expect(Math.max(g, b)).toBeLessThan(0.45);
+  });
+  it('slopes the bed narrowly: sand shows within half a cell, open teal by about one and a half cells', () => {
+    let previous = -1;
+    for (let shore = -1; shore <= 9; shore += 0.1) {
+      expect(clearMetres(shore)).toBeGreaterThanOrEqual(previous);
+      previous = clearMetres(shore);
+    }
+    expect(clearMetres(0)).toBe(0);
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.15))).toBeGreaterThan(0.4);
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.5))).toBeLessThan(0.2);
+    expect(clearMetres(1.6)).toBeGreaterThanOrEqual(CLEAR_WATER.aquaEnd);
+    expect(clearMetres(9)).toBeLessThanOrEqual(CLEAR_WATER.maxMetres);
+    // Quays and cliff feet are deep up to the wall.
+    expect(clearMetres(0, 1)).toBeGreaterThanOrEqual(CLEAR_WATER.aquaEnd);
+    expect(clearMetres(0, 0, 1)).toBeGreaterThanOrEqual(CLEAR_WATER.aquaEnd);
+  });
+  it('lights the relief and glitter from ahead of the fixed camera, near the mirror direction', () => {
+    const [x, y, z] = CLEAR_GLINT_LIGHT;
+    expect(Math.hypot(x, y, z)).toBeCloseTo(1, 6);
+    // Mirror of the view over flat water (IsoCamera: 30 degree pitch, looking towards -x -z).
+    const c = Math.cos(Math.PI / 6) * Math.SQRT1_2;
+    const mirror = [-c, 0.5, -c];
+    const cos = mirror[0]! * x + mirror[1]! * y + mirror[2]! * z;
+    // About 21 degrees off the mirror: glints need a wave facet tilted about 10 degrees, as in prototype A.
+    expect(cos).toBeGreaterThan(0.92);
+    expect(cos).toBeLessThan(0.95);
   });
   it('keeps every theatre teal-blue (not cobalt or grey) and its open water darker than the shallows', () => {
     const luma = (c: Color) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
@@ -81,8 +113,13 @@ describe('clear water optical policy', () => {
       [8907, 9803, 1 / 101, 1 / 97],
       [1091, 1027, -1 / 109, 1 / 113],
     ]);
-    expect(CLEAR_WATER.shininess).toBe(900);
-    expect(CLEAR_WATER.sparkle).toBe(5);
-    expect(CLEAR_WATER.whitecap).toBeLessThanOrEqual(0.15);
+    // The second fine layer crosses the first; the large layers keep WaterMesh's frame except for a small turn.
+    expect(CLEAR_LAYER_TURN[0]).toBe(0);
+    expect(Math.abs(CLEAR_LAYER_TURN[1])).toBeGreaterThanOrEqual(45);
+    // Small, sharp glints a little larger than A's (RA3 references), and small whitecaps rather than foam sheets.
+    expect(CLEAR_WATER.shininess).toBeGreaterThanOrEqual(500);
+    expect(CLEAR_WATER.shininess).toBeLessThanOrEqual(900);
+    expect(CLEAR_WATER.sparkle).toBeLessThanOrEqual(8);
+    expect(CLEAR_WATER.whitecap).toBeLessThanOrEqual(0.35);
   });
 });

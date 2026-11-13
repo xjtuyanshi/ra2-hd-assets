@@ -212,6 +212,8 @@ export interface WaterLookInputs {
   maskShore?: ShaderNode;
   /** 0..1 water against a quay, seawall or pavement rather than a beach (clear look: no shallows or foam there). */
   quay?: ShaderNode;
+  /** 0..1 within about 1.5 cells of a real cliff (height step), as opposed to any hard shore (clear look). */
+  cliffNear?: ShaderNode;
 }
 
 export interface WaterLook {
@@ -1046,7 +1048,10 @@ export function rippledReflection(
   const uv0: ShaderNode = baseUv.add(offset);
   const depth = mirror.getDepthNode();
   const coverageAt = (uv: ShaderNode): ShaderNode => smoothstep(0.9999, 0.999, depth.sample(uv).x);
-  const seedDepth: ShaderNode = depth.sample(uv0).x;
+  // Clear: probe the mirrored height where the undistorted mirror lands. Probing at the per-pixel rippled UV made the
+  // height jump between a wall's top and the empty sky across neighbouring pixels at every silhouette, which drew
+  // fish-scale dither along sea walls.
+  const seedDepth: ShaderNode = depth.sample(clear ? baseUv : uv0).x;
   const h: ShaderNode = smoothstep(0.9999, 0.999, seedDepth)
     .greaterThan(0)
     .select(clamp(seedDepth.mul(worldPerDepth), 0, RIPPLED_REFLECTION.maxHeight), float(RIPPLED_REFLECTION.maxHeight));
@@ -1063,9 +1068,12 @@ export function rippledReflection(
     .mul(float(RIPPLED_REFLECTION.baseRippleMax).div(max(offsetWorld.length(), RIPPLED_REFLECTION.baseRippleMax)))
     .mul(heightFade)
     .mul(uvPerWorld);
+  // Clear stretches tall reflections much less along the view: the full stretch drew the teeth of a zigzag sea wall as
+  // tall dark spikes.
+  const alongStretch = clear ? RIPPLED_REFLECTION.along * 0.3 : RIPPLED_REFLECTION.along;
   const uv1: ShaderNode = baseUv
     .add(residual)
-    .add(vec2(across.mul(RIPPLED_REFLECTION.across), along.mul(RIPPLED_REFLECTION.along)).mul(h).mul(uvPerWorld));
+    .add(vec2(across.mul(RIPPLED_REFLECTION.across), along.mul(alongStretch)).mul(h).mul(uvPerWorld));
   let colour: ShaderNode = vec3(0);
   let coverage: ShaderNode = float(0);
   const taps = clear
@@ -1083,14 +1091,15 @@ export function rippledReflection(
       ];
   for (const [x, y] of taps) {
     const uv: ShaderNode = clear
-      ? uv1.add(vec2(x!, y!).mul(h.mul(0.16).add(0.018)).mul(uvPerWorld))
+      ? uv1.add(vec2(x!, y!).mul(h.mul(0.1).add(0.03)).mul(uvPerWorld))
       : uv1.add(vec2(0, h.mul(y! * RIPPLED_REFLECTION.spread).mul(uvPerWorld.y)));
     const covered = coverageAt(uv);
     // Average premultiplied taps so cleared/sky texels cannot darken the silhouette before coverage is applied.
     colour = colour.add(mirror.sample(uv).rgb.mul(covered));
     coverage = coverage.add(covered);
   }
-  const keep: ShaderNode = mix(float(1), float(RIPPLED_REFLECTION.keepTop), heightFade);
+  // Clear keeps less of tall mirrored objects (bridge decks, walls): their static pale slabs read as glass panes.
+  const keep: ShaderNode = mix(float(1), float(clear ? 0.3 : RIPPLED_REFLECTION.keepTop), heightFade);
   // Folding keep into average coverage is exactly mix(waterSky, mix(waterSky, reflected, keep), coverage).
   // bedWaterLook supplies its own sky AFTER the existing moonlight grade, avoiding a second grade on that sky.
   return { colour: colour.div(max(coverage, 0.00001)), coverage: coverage.div(taps.length).mul(keep) };

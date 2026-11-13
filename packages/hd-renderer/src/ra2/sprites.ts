@@ -340,8 +340,11 @@ export function infantryShadowAlpha(coverage: number, opacity = INFANTRY_SHADOW_
   return t * t * (3 - 2 * t) * INFANTRY_SHADOW_OPACITY * opacity;
 }
 
-/** Shadow opacity cap on clear water: shadowDisplayRatio(0.39) is about 0.8. */
-export const CLEAR_WATER_SHADOW_ALPHA = 0.39;
+/**
+ * Shadow opacity cap on clear water: shadowDisplayRatio(0.25) is about 0.88. At 0.39 the overlapping static bridge
+ * shadows read as pale glass slabs with hard vertical seams under the deck.
+ */
+export const CLEAR_WATER_SHADOW_ALPHA = 0.25;
 
 /** 0..1 open water under a ground point while the clear water look is on (per-cell surface class, bilinear). */
 function shadowOnClearWater(xz: ShaderNode, nodes: AtmosphereNodes): ShaderNode {
@@ -1138,7 +1141,7 @@ class SpriteGraph {
         If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(sunShare.notEqual(1)), () => {
           result.a.mulAssign(sunShare);
         });
-        // Clear water: shadows on open water darken it to no less than about 0.8 of its brightness (the lit water
+        // Clear water: shadows on open water darken it to no less than about 0.88 of its brightness (the lit water
         // column still glows); the hard near-black bridge frames read as rendering faults against the lighter water.
         If(isShadow.greaterThan(0.5).and(nodes.clearWater.greaterThan(0.5)), () => {
           result.a.assign(

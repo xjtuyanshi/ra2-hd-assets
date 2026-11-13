@@ -1147,6 +1147,7 @@ function createMaterials(
           reflection,
           calm,
           quay,
+          cliffNear: sheltered,
           bedAt,
           detail: map.waterDetail ? texture(map.waterDetail, uv) : undefined,
           surface: map.waterSurface ?? undefined,
@@ -1177,16 +1178,20 @@ function createMaterials(
       // beach band read as pasted onto city seawalls).
       let shoreQuay = quay;
       if (clear && quay) {
-        const texelU = 1 / map.shore.image.width;
-        const texelV = 1 / map.shore.image.height;
+        // A gradient over a few texels: the one-texel difference of the 8-bit field flipped direction from pixel to
+        // pixel in flat parts of the field, which dithered the beach/quay class into a fish-scale pattern.
+        const texelU = 3 / map.shore.image.width;
+        const texelV = 3 / map.shore.image.height;
         const gradient = vec2(
           texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r),
           texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r),
         ).normalize();
-        const back = max(painted, 0).add(1.0);
+        // Just behind the waterline: a tap a cell inland passed the wall into the plaza behind it at the inside
+        // corners of zigzag seawalls and classified them differently from the wall beside them (dark spikes).
+        const back = max(painted, 0).add(0.4);
         const cellUv = vec2((42 * map.ref.scale) / map.ref.width, (21 * map.ref.scale) / map.ref.height);
-        // Three taps fanned about 40 degrees either side of the gradient: a beach is a beach if any of them finds
-        // sand, so the distance field's medial lines do not draw quay streaks across a beach.
+        // Three taps fanned about 40 degrees either side of the gradient, so the distance field's medial lines do not
+        // draw quay streaks across a beach.
         const sandAt = (turn: number): ShaderNode => {
           const c = Math.cos(turn),
             si = Math.sin(turn);
@@ -1194,19 +1199,29 @@ function createMaterials(
           const land = texture(colourMap, uv.sub(dir.mul(cellUv).mul(back))).level(float(3)).rgb;
           const hi = max(land.r, max(land.g, land.b));
           const lo = min(land.r, min(land.g, land.b));
-          const sand = smoothstep(0.38, 0.55, hi.sub(lo).div(max(hi, 0.02))).mul(
-            smoothstep(0.0, 0.08, land.r.sub(land.b)),
+          const saturation = hi.sub(lo).div(max(hi, 0.02));
+          const sand = smoothstep(0.38, 0.55, saturation).mul(smoothstep(0.0, 0.08, land.r.sub(land.b)));
+          // Dark ground (rocks, reefs, scree, the original's grey-blue wet band) is not masonry either: small rocks keep
+          // the beach dressing, whose shallows the critique found free of streaks, instead of flipping class along the
+          // medial lines. Only warm or green dark ground counts: neutral and blue-leaning taps are water (the tap
+          // overshot the waterline) or grey masonry, near-black ones the shaded faces of walls and piers, and all of
+          // them marked seawalls as beaches in streaks.
+          const water = smoothstep(0.04, 0.01, max(land.r, land.g).sub(land.b));
+          return max(
+            sand,
+            smoothstep(0.45, 0.3, hi)
+              .mul(smoothstep(0.04, 0.07, hi))
+              .mul(float(1).sub(water)),
           );
-          // Dark ground (rocks, reefs, scree) is not masonry either: small rocks keep the beach dressing, whose
-          // shallows the critique found free of streaks, instead of flipping class along the medial lines.
-          return max(sand, smoothstep(0.45, 0.3, hi));
         };
-        const sandy = max(sandAt(0), max(sandAt(0.7), sandAt(-0.7)));
+        // The straight tap decides; the fanned pair only together (one fanned tap alone finding sand along a medial line
+        // drew turquoise wisps off seawalls).
+        const sandy = max(sandAt(0), sandAt(0.7).add(sandAt(-0.7)).mul(0.5));
         shoreQuay = max(
           quay,
           float(1)
             .sub(sandy)
-            .mul(smoothstep(1.4, 0.8, painted)),
+            .mul(smoothstep(2.2, 1.2, painted)),
         );
       }
       const look = waterLook(
@@ -1221,6 +1236,7 @@ function createMaterials(
           reflection,
           calm,
           quay: shoreQuay,
+          cliffNear: sheltered,
         },
         nodes,
       );
