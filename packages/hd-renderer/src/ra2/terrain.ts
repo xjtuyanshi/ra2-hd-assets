@@ -1182,10 +1182,14 @@ function createMaterials(
         // pixel in flat parts of the field, which dithered the beach/quay class into a fish-scale pattern.
         const texelU = 3 / map.shore.image.width;
         const texelV = 3 / map.shore.image.height;
-        const gradient = vec2(
+        const rawGradient = vec2(
           texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r),
           texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r),
-        ).normalize();
+        );
+        const gradient = rawGradient.normalize();
+        // On the medial line between two shores the field is flat and its direction arbitrary: take neither class there
+        // (a random tap drew dotted deep lines across turquoise bays and turquoise wisps off seawalls).
+        const directed = smoothstep(0.003, 0.009, rawGradient.length());
         // Just behind the waterline: a tap a cell inland passed the wall into the plaza behind it at the inside
         // corners of zigzag seawalls and classified them differently from the wall beside them (dark spikes).
         const back = max(painted, 0).add(0.4);
@@ -1216,7 +1220,7 @@ function createMaterials(
         };
         // The straight tap decides; the fanned pair only together (one fanned tap alone finding sand along a medial line
         // drew turquoise wisps off seawalls).
-        const sandy = max(sandAt(0), sandAt(0.7).add(sandAt(-0.7)).mul(0.5));
+        const sandy = mix(float(0.5), max(sandAt(0), sandAt(0.7).add(sandAt(-0.7)).mul(0.5)), directed);
         shoreQuay = max(
           quay,
           float(1)
