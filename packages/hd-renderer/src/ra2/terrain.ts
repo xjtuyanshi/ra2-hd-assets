@@ -1229,8 +1229,10 @@ function createMaterials(
       const ownShore: ShaderNode = waterline ? float(1).sub(tone).mul(waterline.beach) : float(1).sub(tone);
       const band = smoothstep(-0.55, -0.12, shore).mul(ownShore);
       const sand = wetShore(shore).mul(ownShore);
+      // Clear: the ground stepped to inland is often brighter sand behind a darker grass or rock bank, and at its full
+      // brightness it drew a pale rim along the waterline; the band is wet, so darker than the dry ground it copies.
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
-        mix(float(1), float(clear ? 0.88 : 0.8), sand),
+        clear ? mix(float(1), float(0.8), max(band.mul(0.7), sand)) : mix(float(1), float(0.8), sand),
       );
       albedo = mix(
         land,

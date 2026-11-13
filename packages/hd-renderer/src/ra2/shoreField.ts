@@ -188,8 +188,9 @@ function* shoreValueSteps(
     for (let i = 0; i < out.length; i++) {
       const d = den[i]!;
       const mean = d > 1e-6 ? num[i]! / d : fallback;
-      // A shore only partly in reach blends towards the default instead of deciding alone.
-      const trust = Math.min(1, d / 0.02);
+      // Only the last fringe of the reach blends towards the default: a wider blend let a quay's class fade to a beach
+      // about two cells out, and the shallows' warp then raised a pale turquoise shoal in the gap of a broken bridge.
+      const trust = Math.min(1, d / 0.002);
       out[i] = Math.round((fallback + (mean - fallback) * trust) * 255);
     }
     return out;

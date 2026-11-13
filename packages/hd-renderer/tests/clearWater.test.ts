@@ -46,7 +46,7 @@ describe('clear water optical policy', () => {
     expect(r).toBeLessThan(0.01);
     expect(Math.max(g, b)).toBeLessThan(0.45);
   });
-  it('slopes the bed narrowly: sand shows within half a cell, open teal by about one and a half cells', () => {
+  it('slopes the bed gently: the bed shows through most of the shallows, open teal by about one and a half cells', () => {
     let previous = -1;
     for (let shore = -1; shore <= 9; shore += 0.1) {
       expect(clearMetres(shore)).toBeGreaterThanOrEqual(previous);
@@ -55,7 +55,9 @@ describe('clear water optical policy', () => {
     expect(clearMetres(0)).toBe(0);
     expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.15))).toBeGreaterThan(0.4);
     expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.5))).toBeGreaterThan(0.2);
-    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.8))).toBeLessThan(0.2);
+    // The owner's reviewer saw no sand or ripples through the shallows at 1:1: the bed stays visible to about a cell.
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.8))).toBeGreaterThan(0.2);
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(1.6))).toBeLessThan(0.05);
     expect(clearMetres(1.6)).toBeGreaterThanOrEqual(CLEAR_WATER.aquaEnd);
     expect(clearMetres(9)).toBeLessThanOrEqual(CLEAR_WATER.maxMetres);
     // Quays and cliff feet are deep up to the wall.
@@ -109,7 +111,10 @@ describe('clear water optical policy', () => {
   it('keeps A at its approved physical scale, scroll directions and comfort clock', () => {
     // Slowed to prototype A's 1-second change per unit of local contrast (A 3.67 / 3.55; 0.8 moved about 1.45x A).
     expect(CLEAR_SURFACE.timeScale).toBe(0.5);
-    expect(CLEAR_SURFACE.normalGain).toBe(1.5);
+    // The wave field is stretched along the view's ground direction so its crests read round on screen; the gain
+    // makes up for the slopes that stretch flattens (day local std back in 3-5).
+    expect(CLEAR_SURFACE.viewStretch).toBe(1.5);
+    expect(CLEAR_SURFACE.normalGain).toBe(1.7);
     expect(CLEAR_SURFACE.tileMetres / CLEAR_SURFACE.metresPerCell).toBe(3.25);
     expect(CLEAR_SURFACE.tileMetres / 9 / CLEAR_SURFACE.metresPerCell).toBeCloseTo(0.3611, 4);
     expect(CLEAR_LAYERS).toEqual([

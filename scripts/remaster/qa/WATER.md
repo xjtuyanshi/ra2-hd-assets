@@ -15,24 +15,32 @@ than treating the sand composite as water. Terrain artwork is never rewritten by
 
 Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
 `hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its seabed slopes from the
-shore distance (about 1.3 m per cell, then a shelf drop to about 6 m by 2.2 cells). The slope is warped by a broad and
-a mid-scale noise and by the shore mass (how much shoreline lies around that stretch of coast), so the shallows are
-wide in bays and along long coasts and narrow around islets and off headlands, never more than about 1.6 times wider.
-The bed seen through the shallows is the theatre's sand with grain and long ripple marks, at the brightness of the
-nearest shore's land (dark rock islets sit in dark-floored water), plus low-frequency rock and weed patches from about
-0.15 cells out and deeper holes further out; all of it waver with the refraction. The sand's own colour shows within
-about half a metre and takes the turquoise hue beyond that; its light and dark stay visible over the first few metres.
+shore distance (about 1.1 m per cell, then a shelf drop to about 6 m by 2.2 cells). The slope is warped by a broad and
+a mid-scale noise, by one very broad noise that changes the shelf over tens of cells (a narrow fringe on some stretches
+of a straight coast, wide sand flats on others) and by the shore mass (how much shoreline lies around that stretch of
+coast), so the shallows are wide in bays and narrow around islets and off headlands. The bed seen through the shallows
+is the theatre's sand with a fine grain and a coarser mottle, laid out round on screen, at the brightness of the
+nearest shore's land (dark rock islets sit in dark-floored water), plus low-frequency rock and weed patches (also round
+on screen) from about 0.15 cells out, or right up to quays and bridge heads, and deeper holes further out; all of it
+wavers with the refraction. The sand's own colour shows within about 0.3 m and takes the turquoise hue beyond that; the
+bed stays visible to about a cell out and its light and dark over the first few metres. Even a weak masonry class
+takes deep water, so a bridge head does not sit in a pale turquoise arc. At night the bed does not show (the night
+transform turned a lit bed into pale lace) and the whole water body takes the night transform, without a dark rim.
 The approved turquoise turns to the approved teal (25% lighter than the palette entry, which keeps deep L* in band
 with the weaker reflection) at a depth perturbed by the rock field, so the edge of the shallows is ragged. The surface
 uses four equal samples of one procedurally generated 256-square FFT normal tile, with the three.js WaterMesh scales
 and scroll rates (the second fine layer turned 75 degrees across the first so the 2:1 camera does not read one crest
-direction as horizontal streaks), a 26 m primary tile (3.25 cells), roughly 0.36-cell dominant waves and a 0.5-speed
+direction as horizontal streaks), the whole field stretched 1.5 times along the view's ground direction (x + z) with
+its slopes flattened to match, so crests read round rather than as horizontal streaks under the 2:1 camera, a 26 m
+primary tile (3.25 cells), roughly 0.36-cell dominant waves across the screen and a 0.5-speed
 clock (prototype A's change per second per unit of local contrast). Relief (weaker over the shallows, where the bed
 carries the texture) and sharp, sparse glints are lit by a fixed light ahead of the camera at prototype A's sun angle in
-the scene sun's colour, with the orthographic camera's single view direction; a fine screen-isotropic mask breaks the
-glints into points. Small compression-mask whitecaps and a low, capped sky/object reflection with a Fresnel sky tint
+the scene sun's colour (at night the relief light is raised toward overhead), with the orthographic camera's single view
+direction; a fine mask, round on screen, breaks the glints into sparse points. Small compression-mask whitecaps and a low, capped sky/object reflection with a Fresnel sky tint
 toward the top of the screen. Beaches have no white outline: the sand runs into wet sand and clear shallows, and white
-water appears only as a sparse, broken wash line while a wave runs up (seven-second cycle). Caustics lie about a third
+water appears only as a sparse, broken wash line while a wave runs up (seven-second cycle), on the few stretches of
+coast a broad drifting mask gives a set of waves at that moment, never along the whole coast. The wet band on land
+beside a beach is darkened, so ground copied from further inland does not draw a pale rim at the waterline. Caustics lie about a third
 of a cell to a cell and a half from a beach; real cliff feet get a darker foot, a feathered cliff mirror that fades
 within about 0.4 cells and a little broken white water. Hard shores without a cliff (snow) keep their colour. Water
 beside paved cells or masonry shoreline art (quays, seawalls, bridges) keeps its deep colour up to the wall with a dark
