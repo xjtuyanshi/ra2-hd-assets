@@ -7,7 +7,7 @@ export const HD_PLAY_OPTIONS = Object.freeze({
   hd: '1',
   'hd-look': 'cinematic',
   'hd-fx': 'enhanced',
-  'hd-water': 'enhanced',
+  'hd-water': 'clear',
   'hd-vlook': 'remaster',
   'hd-vproj': 'vehicles-hd',
   'hd-ui': '1',

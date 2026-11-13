@@ -42,7 +42,7 @@ import { LEVEL_HEIGHT } from '../world';
  * one interface (waterPreset.style selects the family; live tuning uniforms drive enhanced and its variants):
  *
  * 'clear' is the opt-in modern candidate in clearWater.ts: low-chroma absorption, shallow bed transmission and calm
- * normal-map motion on the existing terrain/mirror passes. The launcher default remains enhanced until owner review.
+ * normal-map motion on the existing terrain/mirror passes. The play launcher selects it since the owner's 2026-11-13 review.
  *
  * 'enhanced' (opt-in, like every modern effect: sandbox ?water=enhanced or ?look=golden, in game hd-water=enhanced),
  * the remaster's modern water, tuned against the approved river concept (concept A, RiverRam):

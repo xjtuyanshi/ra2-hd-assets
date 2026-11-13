@@ -1,7 +1,7 @@
 # Water look review
 
 The renderer accepts `hd-water=classic|enhanced|clear|faithful|muted|calm`. Unknown values select classic. Code defaults to
-classic; the play launcher still selects enhanced. In the development console, use
+classic; the play launcher selects clear (owner decision 2026-11-13). In the development console, use
 `__hdBridge.water.set('clear')` or `__hdBridge.water.cycle()`. Neither moves the camera. Enhanced, faithful, muted
 and calm share the same material and mirror graph. Clear uses a third, cheaper shader family with the same existing
 mirror/light passes. Each family is built once and parked until view disposal; first-crossing compilation is expected.
@@ -13,8 +13,8 @@ looks; this geometric heuristic also protects small ponds. The classifier works 
 Inspect pools at 1:1, including lane markings. Bed maps recover painted water from the original tile atlas rather
 than treating the sand composite as water. Terrain artwork is never rewritten by these scripts.
 
-Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
-`hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its seabed slopes from the
+Clear is the launcher default. To compare, replace `hd-water=clear` in the launcher's printed URL with another look
+(for example `hd-water=enhanced`); keep all resource/cache parameters. No INI flag is added. Its seabed slopes from the
 shore distance (about 1.1 m per cell, then a shelf drop to about 6 m by 2.2 cells). The slope is warped by a broad and
 a mid-scale noise, by one very broad noise that changes the shelf over tens of cells (a narrow fringe on some stretches
 of a straight coast, wide sand flats on others) and by the shore mass (how much shoreline lies around that stretch of

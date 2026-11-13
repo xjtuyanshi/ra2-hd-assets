@@ -21,7 +21,7 @@ describe.skipIf(process.platform === 'win32')('scripts/remaster/play.sh', () => 
       hd: '1',
       'hd-look': 'cinematic',
       'hd-fx': 'enhanced',
-      'hd-water': 'enhanced',
+      'hd-water': 'clear',
       'hd-vlook': 'remaster',
       'hd-vproj': 'vehicles-hd',
       'hd-ui': '1',

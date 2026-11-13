@@ -287,7 +287,7 @@ try {
       'Immutable emulator relay build must already exist',
     );
     url =
-      'http://localhost:15452/?hd=1&hd-look=cinematic&hd-fx=enhanced&hd-water=enhanced&hd-vlook=remaster&hd-vproj=vehicles-hd&hd-ui=1&resolution=display&game-speed=3&mouse-lock=0';
+      'http://localhost:15452/?hd=1&hd-look=cinematic&hd-fx=enhanced&hd-water=clear&hd-vlook=remaster&hd-vproj=vehicles-hd&hd-ui=1&resolution=display&game-speed=3&mouse-lock=0';
     launch = spawn(
       process.execPath,
       [join(wt, 'scripts/remaster/native/phase8-emulator-server.mjs'), emulatorWt, join(out, 'vite-cache')],
