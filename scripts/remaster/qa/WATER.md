@@ -18,11 +18,20 @@ Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher'
 shore distance (about 1.1 m per cell, then a shelf drop to about 6 m by 2.2 cells). The slope is warped by a broad and
 a mid-scale noise, by one very broad noise that changes the shelf over tens of cells (a narrow fringe on some stretches
 of a straight coast, wide sand flats on others) and by the shore mass (how much shoreline lies around that stretch of
-coast), so the shallows are wide in bays and narrow around islets and off headlands. The bed seen through the shallows
+coast), so the shallows are wide in bays and narrow around islets and off headlands; islets take most of their wander
+from the mid-scale noise, a shelf about a sixth of a straight coast's and a darker rock bed patched from the waterline,
+so their fringe hugs the rock instead of a round pale collar.
+Whatever the warp, the shelf reaches open water by about 2.6 cells: the spread shore values end in a round footprint a
+few cells out and read as a long sandy coast beyond it, which drew discs around islets and pale blobs off cliffs. Beside
+very dark ground (asphalt ramps, shaded bridge heads) the water is deep to the edge and keeps the deep colour; partial
+masonry or dark-ground classes count in full, so a bridge gap holds no greener patch. The bed seen through the shallows
 is the theatre's sand with a fine grain and a coarser mottle, laid out round on screen, at the brightness of the
-nearest shore's land (dark rock islets sit in dark-floored water), plus low-frequency rock and weed patches (also round
-on screen) from about 0.15 cells out, or right up to quays and bridge heads, and deeper holes further out; all of it
-wavers with the refraction. The sand's own colour shows within about 0.3 m and takes the turquoise hue beyond that; the
+nearest shore's land (dark rock islets sit in dark-floored water), plus fine, low-contrast rock and weed patches (also
+round on screen) from about 0.15 cells out that fade out with depth by about 6.5 m, so deep water is an even teal with
+waves and glints; all of it wavers with the refraction. The last few centimetres over a beach are slightly darker wet
+sand, and the wet band on land is only lightly darkened (a stronger one outlined the coast in grey-brown). The sand's
+own colour shows within about 0.2 m and takes the turquoise hue beyond that, keeping the sand's grain and ripples as
+light and dark; the
 bed stays visible to about a cell out and its light and dark over the first few metres. Even a weak masonry class
 takes deep water, so a bridge head does not sit in a pale turquoise arc. At night the bed does not show (the night
 transform turned a lit bed into pale lace) and the whole water body takes the night transform, without a dark rim.
@@ -32,9 +41,10 @@ uses four equal samples of one procedurally generated 256-square FFT normal tile
 and scroll rates (the second fine layer turned 75 degrees across the first so the 2:1 camera does not read one crest
 direction as horizontal streaks), the whole field stretched 1.5 times along the view's ground direction (x + z) with
 its slopes flattened to match, so crests read round rather than as horizontal streaks under the 2:1 camera, a 26 m
-primary tile (3.25 cells), roughly 0.36-cell dominant waves across the screen and a 0.5-speed
-clock (prototype A's change per second per unit of local contrast). Relief (weaker over the shallows, where the bed
-carries the texture) and sharp, sparse glints are lit by a fixed light ahead of the camera at prototype A's sun angle in
+primary tile (3.25 cells), roughly 0.36-cell dominant waves across the screen and a 0.6-speed
+clock (prototype A's change per second per unit of local contrast in open water). Relief (weaker over the shallows,
+where the bed and moving caustics carry the texture (caustics only by day: under the moon they drew a honeycomb); half of it shaded by tilt alone, because slope shading along one
+light streaks a round sea across the light) and sharp, sparse glints are lit by a fixed light ahead of the camera at prototype A's sun angle in
 the scene sun's colour (at night the relief light is raised toward overhead), with the orthographic camera's single view
 direction; a fine mask, round on screen, breaks the glints into sparse points. Small compression-mask whitecaps and a low, capped sky/object reflection with a Fresnel sky tint
 toward the top of the screen. Beaches have no white outline: the sand runs into wet sand and clear shallows, and white

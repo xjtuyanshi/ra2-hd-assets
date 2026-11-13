@@ -1232,7 +1232,7 @@ function createMaterials(
       // Clear: the ground stepped to inland is often brighter sand behind a darker grass or rock bank, and at its full
       // brightness it drew a pale rim along the waterline; the band is wet, so darker than the dry ground it copies.
       const land = mix(albedo, wetGround(inland, groundWetness, paved, nodes).albedo, band).mul(
-        clear ? mix(float(1), float(0.8), max(band.mul(0.7), sand)) : mix(float(1), float(0.8), sand),
+        clear ? mix(float(1), float(0.8), max(band.mul(0.35), sand.mul(0.6))) : mix(float(1), float(0.8), sand),
       );
       albedo = mix(
         land,

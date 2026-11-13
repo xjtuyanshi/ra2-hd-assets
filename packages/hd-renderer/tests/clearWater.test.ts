@@ -109,8 +109,9 @@ describe('clear water optical policy', () => {
     expect(clearPalette('urban')).toEqual(clearPalette('newurban'));
   });
   it('keeps A at its approved physical scale, scroll directions and comfort clock', () => {
-    // Slowed to prototype A's 1-second change per unit of local contrast (A 3.67 / 3.55; 0.8 moved about 1.45x A).
-    expect(CLEAR_SURFACE.timeScale).toBe(0.5);
+    // Prototype A's 1-second change per unit of local contrast (A 3.67 / 3.55): 0.8 moved about 1.45x A, 0.5 about
+    // 0.9x A in open water once the half-direction-free relief lowered the contrast.
+    expect(CLEAR_SURFACE.timeScale).toBe(0.6);
     // The wave field is stretched along the view's ground direction so its crests read round on screen; the gain
     // makes up for the slopes that stretch flattens (day local std back in 3-5).
     expect(CLEAR_SURFACE.viewStretch).toBe(1.5);
@@ -131,6 +132,14 @@ describe('clear water optical policy', () => {
     expect(CLEAR_WATER.shininess).toBeLessThanOrEqual(900);
     expect(CLEAR_WATER.sparkle).toBeLessThanOrEqual(8);
     expect(CLEAR_WATER.whitecap).toBeLessThanOrEqual(0.35);
+  });
+  it('keeps deep water even and the relief free of one dominant direction', () => {
+    // The seabed dapple has faded out before the open shelf's depth: no dark stains on the open sea.
+    expect(CLEAR_WATER.dappleDeep).toBeLessThan(clearMetres(3));
+    expect(CLEAR_WATER.dappleDark).toBeLessThanOrEqual(0.3);
+    // Shading by slope along one light alone streaks a round sea across the light (anisotropy about 0.5).
+    expect(CLEAR_WATER.tiltShare).toBeGreaterThanOrEqual(0.4);
+    expect(CLEAR_WATER.tiltShare).toBeLessThan(1);
   });
   it('keeps the sky reflection and glare low (owner: the reflection read too strong)', () => {
     expect(CLEAR_WATER.reflectionMax).toBeLessThanOrEqual(0.15);

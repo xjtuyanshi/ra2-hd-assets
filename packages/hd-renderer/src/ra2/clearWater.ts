@@ -38,8 +38,8 @@ export const CLEAR_WATER = {
   shelfStart: 0.4,
   shelfEnd: 2.2,
   maxMetres: 8,
-  refraction: 0.04,
-  maxRefraction: 0.05,
+  refraction: 0.06,
+  maxRefraction: 0.08,
   foamPeriod: 7,
   causticGain: 0.4,
   reflection: 0.03,
@@ -49,13 +49,19 @@ export const CLEAR_WATER = {
   skyTop: 0.06,
   shininess: 700,
   sparkle: 2.8,
-  relief: 1.35,
+  relief: 1.65,
+  /** Share of the water's relief shaded by tilt alone (direction-free), its gain, and the mean it adds back. */
+  tiltShare: 0.5,
+  tiltShade: 11,
+  tiltMean: 0.12,
   whitecap: 0.32,
   cliffContact: 0.55,
   mirrorKeep: 0.55,
   /** Seabed dapple: rock/weed threshold of the 0..1 field (lower = more patches) and how much they darken. */
   dappleFrom: 0.52,
-  dappleDark: 0.38,
+  dappleDark: 0.26,
+  /** Depth (m) by which the seabed dapple has faded out: deep water is an even teal. */
+  dappleDeep: 6.5,
   /** Turquoise level over sand, depth (m) at which it has become the deep teal, and how fast the bed fades (1/m). */
   shallowLevel: 0.78,
   deepGain: 1.55,
@@ -70,7 +76,7 @@ export const CLEAR_WATER = {
 } as const;
 
 /** One ground world unit is one cell (world.ts); eight metres per cell is the chosen visual scale. */
-export const CLEAR_SURFACE = { tileMetres: 26, metresPerCell: 8, timeScale: 0.5, normalGain: 1.7, viewStretch: 1.5 } as const;
+export const CLEAR_SURFACE = { tileMetres: 26, metresPerCell: 8, timeScale: 0.6, normalGain: 1.7, viewStretch: 1.5 } as const;
 /** WaterMesh.getNoise: divisor (x,z), signed scroll rate (tiles per surface-clock second), equal weights. */
 export const CLEAR_LAYERS = [
   [103, 103, 1 / 17, 1 / 29],
@@ -235,7 +241,7 @@ export function clearWaterLook(
   // where the bed drops away quickly.
   // Shore mass 0.5 is a straight coast (shoreField.ts SHORE_MASS_FULL).
   const width: ShaderNode = inputs.shoreMass
-    ? mix(float(0.45), float(1.3), smoothstep(0.15, 0.62, inputs.shoreMass))
+    ? mix(float(0.16), float(1.3), smoothstep(0.25, 0.62, inputs.shoreMass))
     : float(1);
   const shelfCells = cells.div(width);
   const field = clearField(p.xz);
@@ -243,27 +249,44 @@ export function clearWaterLook(
   const groundTilt = normal.xz.negate().div(max(normal.y, 0.01));
   const light = vec3(...CLEAR_GLINT_LIGHT);
   const noise = waterTextures().noise;
-  // One broad noise tap serves the seabed holes (r) and the wandering shelf edge (g, plus a second, smaller wander
-  // from a mid-scale tap): the shore distance is warped before the shelf profile, so the shallows widen in some places
-  // and narrow in others instead of an even ring, without raising shoals out in open water.
+  // One broad noise tap (g) and a mid-scale one wander the shelf edge: the shore distance is warped before the shelf
+  // profile, so the shallows widen in some places and narrow in others instead of an even ring.
   const broad = texture(noise, p.xz.mul(0.043).add(vec2(0.57, 0.21)));
   const mid = texture(noise, p.xz.mul(0.16).add(vec2(0.13, 0.71))).g;
-  const wander = broad.g.sub(0.5).mul(3.2).add(mid.sub(0.5).mul(2.2)).clamp(-0.5, 1.6);
-  // The factor stays at least 0.5: wider shallows still end within about two cells of the shore.
+  // The factor stays at least 0.5, and the shelf reaches open water by about 2.6 cells whatever the warp: the shore
+  // values (mass, tone) spread from the coast end in a round box-blur footprint a few cells out, beyond which they read
+  // as a long sandy coast; a wider shelf there drew turquoise discs around islets and pale blobs off cliffs.
   // Along a long coast the shelf also changes over tens of cells: a narrow fringe where the bed drops steeply, wide
   // sand flats elsewhere (one very broad tap), so a straight coast does not carry an even band.
   const reach = smoothstep(0.3, 0.7, texture(noise, p.xz.mul(0.011).add(vec2(0.31, 0.83))).r);
-  const flats = mix(float(0.6), float(1.9), reach);
-  const warped = cells.mul(
-    float(1)
-      .add(wander.mul(smoothstep(0.1, 0.7, shelfCells)))
-      .div(width.mul(flats))
-      .max(0.5),
+  const longCoast: ShaderNode = inputs.shoreMass ? smoothstep(0.25, 0.55, inputs.shoreMass) : float(1);
+  const flats = mix(float(1), mix(float(0.6), float(1.9), reach), longCoast);
+  // Islets take most of their wander from the mid-scale tap (features under a cell), so their fringe follows the
+  // rock's outline and changes width around it instead of drawing a round, even collar.
+  const wander = broad.g
+    .sub(0.5)
+    .mul(longCoast.mul(2.4).add(0.8))
+    .add(mid.sub(0.5).mul(mix(float(3.4), float(2.2), longCoast)))
+    .clamp(-0.5, 1.6);
+  const warped = max(
+    cells.mul(
+      float(1)
+        .add(wander.mul(smoothstep(0.1, 0.7, shelfCells)))
+        .div(width.mul(flats))
+        .max(0.5),
+    ),
+    cells.sub(0.6).mul(1.1),
   );
   const shelf = warped
     .mul(CLEAR_WATER.shelfSlope)
     .add(smoothstep(CLEAR_WATER.shelfStart, CLEAR_WATER.shelfEnd, warped).mul(CLEAR_WATER.shelfDrop));
-  const metres = max(shelf, max(hard.mul(6), quayDeep.mul(5)))
+  // Beside very dark ground (asphalt ramps, shaded bridge heads; clearShoreTone near 0) there is no sand bed: the water
+  // is deep up to the edge (a partial depth there let the bed's turquoise float as a greener patch in a bridge gap).
+  const darkShore: ShaderNode = inputs.shoreTone ? smoothstep(0.3, 0.05, inputs.shoreTone) : float(0);
+  // Partial classes count in full: a bridge head between masonry and dark asphalt gave a few metres, whose turquoise
+  // read as a greener patch.
+  const masonry = smoothstep(0.08, 0.4, max(quayDeep, darkShore));
+  const metres = max(shelf, max(hard.mul(6), masonry.mul(6)))
     .max(0)
     .min(CLEAR_WATER.maxMetres);
   // Refracted bed: the lake bed's own art where the cache has one, else the theatre's sand with a faint ripple-mark
@@ -277,10 +300,14 @@ export function clearWaterLook(
   const sandTap = texture(noise, p.xz.add(bounded).mul(vec2(0.42, 0.42)));
   const rippleAt = p.xz.add(bounded).add(vec2(sandTap.g.mul(0.35), 0));
   const ripple = texture(noise, vec2(rippleAt.x.sub(rippleAt.y), rippleAt.x.add(rippleAt.y).mul(0.5)).mul(0.6)).b;
-  const sandGrain = sandTap.b.sub(0.5).mul(0.5).add(ripple.sub(0.5).mul(1.0)).add(1);
+  const sandGrain = sandTap.b.sub(0.5).mul(0.5).add(sandTap.g.sub(0.5).mul(1.4)).add(ripple.sub(0.5).mul(1.1)).add(1);
   // The bed near a shore takes the brightness of that shore's land (dark rock islands sit in dark-floored water).
+  // Islets and headlands (short shores) sit on a darker rock bed than a beach of the same land brightness.
   const tone: ShaderNode = inputs.shoreTone
-    ? inputs.shoreTone.mul(CLEAR_SHORE_TONE[1] - CLEAR_SHORE_TONE[0]).add(CLEAR_SHORE_TONE[0])
+    ? inputs.shoreTone
+        .mul(CLEAR_SHORE_TONE[1] - CLEAR_SHORE_TONE[0])
+        .add(CLEAR_SHORE_TONE[0])
+        .mul(longCoast.mul(0.35).add(0.65))
     : float(1);
   const bed = inputs.bedAt ? inputs.bedAt(bounded) : color(palette.bed).mul(sandGrain).mul(tone);
   // Seabed dapple: low-frequency, static patches of rock and weed and deeper holes, seen through the water as the
@@ -288,21 +315,15 @@ export function clearWaterLook(
   const shifted = p.xz.add(bounded.mul(3));
   const under = vec2(shifted.x.sub(shifted.y), shifted.x.add(shifted.y).mul(0.5));
   // Rock and weed from one tap: the broad field shaped by the medium one (the noise texture's r and g octaves).
-  const rockTap = texture(noise, under.mul(0.06));
+  const rockTap = texture(noise, under.mul(0.11));
   const rockField = rockTap.r.mul(0.6).add(rockTap.g.mul(0.4));
-  const holeField = broad.r;
-  // Rocks start in the shallows, so the bed there is not a bare even colour.
-  // Beside quays and bridge heads the bed is as patchy as the open sea: a bare near-shore strip there read as a pale
-  // patch in the gap of a broken bridge.
-  const masonry = max(quayDeep, hard);
-  const rock = smoothstep(CLEAR_WATER.dappleFrom, CLEAR_WATER.dappleFrom + 0.07, rockField).mul(
-    max(smoothstep(0.15, 0.8, cells), masonry),
-  );
-  const hole = smoothstep(0.54, 0.66, holeField).mul(max(smoothstep(1.2, 2.5, cells), masonry));
+  // Rocks start in the shallows, so the bed there is not a bare even colour, and fade out with depth: the bed of deep
+  // water is not seen, and patches tens of cells wide there read as dark stains or cloud shadows on the open sea.
+  const rock = smoothstep(CLEAR_WATER.dappleFrom, CLEAR_WATER.dappleFrom + 0.1, rockField)
+    .mul(max(smoothstep(0.15, 0.8, cells), float(1).sub(longCoast)))
+    .mul(smoothstep(CLEAR_WATER.dappleDeep, CLEAR_WATER.dappleDeep * 0.55, metres));
   const dapple = mix(
-    float(1)
-      .sub(rock.mul(CLEAR_WATER.dappleDark))
-      .mul(float(1).sub(hole.mul(CLEAR_WATER.dappleDark * 0.6))),
+    float(1).sub(rock.mul(CLEAR_WATER.dappleDark)),
     float(1),
     max(hard.mul(0.5), quay.mul(0.2), night.mul(0.45)),
   );
@@ -327,8 +348,10 @@ export function clearWaterLook(
   const tintDepth = metres.mul(float(1).add(max(tintWarp, tintWarp.mul(smoothstep(3.2, 1.8, metres)))));
   // At night the shallows keep the deep colour: the night transform below brightens the water body, and a turquoise
   // band brightened with it glowed as a pale ring (a lace of rings where the reef edge wanders).
+  // Islets and headlands (short shores) have steep rock sides and no sand flats: their narrow fringe is a darker,
+  // clearer turquoise than a beach's, so it does not read as a pale collar around each rock.
   const aqua = mix(
-    color(palette.shallow).mul(CLEAR_WATER.shallowLevel),
+    color(palette.shallow).mul(CLEAR_WATER.shallowLevel).mul(longCoast.mul(0.3).add(0.7)),
     color(palette.deep).mul(CLEAR_WATER.deepGain),
     night.mul(0.85),
   );
@@ -339,7 +362,9 @@ export function clearWaterLook(
     color(palette.deep).mul(CLEAR_WATER.deepGain),
     // Even a partial quay class (shaded bridge and pier faces read as mixed ground) takes the deep colour: the
     // turquoise of a partial depth there drew cyan wisps under bridges.
-    max(smoothstep(CLEAR_WATER.aquaEnd * 0.3, CLEAR_WATER.aquaEnd, tintDepth), quayDeep),
+    // Beside very dark ground (asphalt ramps, shaded bridge heads; clearShoreTone near 0) there is no sand bed to
+    // light the water: a turquoise patch there floated in the gap of a broken bridge.
+    max(smoothstep(CLEAR_WATER.aquaEnd * 0.3, CLEAR_WATER.aquaEnd, tintDepth), masonry),
   )
     .mul(dapple)
     .mul(bedShade);
@@ -350,12 +375,14 @@ export function clearWaterLook(
     p.xz
       .div(1.3)
       .add(bounded.mul(4))
-      .add(vec2(time.mul(0.014), time.mul(-0.01))),
+      .add(vec2(time.mul(0.045), time.mul(-0.033))),
   )
     .r.sub(0.45)
     .mul(CLEAR_WATER.causticGain)
     .mul(smoothstep(0.1, 0.4, edge).mul(smoothstep(1.6, 0.8, edge)))
-    .mul(float(1).sub(hard).mul(float(1).sub(quayDeep)));
+    .mul(float(1).sub(hard).mul(float(1).sub(quayDeep)))
+    // Caustics need sunlight: under the moon they drew a regular honeycomb over the night shallows.
+    .mul(float(1).sub(night));
   const transmission = exp(vec3(...CLEAR_WATER.absorption).mul(metres.negate()));
   // The bed seen through the first metre keeps its own light and dark but takes the water's turquoise hue within about
   // half a metre (sand colour mixed straight into turquoise read as a grey, milky rim).
@@ -364,22 +391,32 @@ export function clearWaterLook(
     new Color(palette.shallow).g * 0.7152 +
     new Color(palette.shallow).b * 0.0722;
   // Wet sand and rock under the water are darker than the dry beach beside it.
-  const bedSeen = bed.mul(dapple).mul(0.66);
+  const bedSeen = bed.mul(dapple).mul(smoothstep(0.0, 0.6, metres).mul(0.18).add(0.5));
   const cyanBed = color(palette.shallow)
     .div(aquaLuma)
     .mul(dot(bedSeen, vec3(0.2126, 0.7152, 0.0722)).mul(1.05));
-  const throughWater = mix(bedSeen.mul(transmission), cyanBed, smoothstep(0.0, 0.3, metres));
+  const throughWater = mix(bedSeen.mul(transmission), cyanBed, smoothstep(0.0, 0.2, metres).mul(0.92));
   // At night the bed is not lit enough to show: the night transform below would turn a lit bed into pale lace.
-  let body: ShaderNode = mix(column, throughWater, seen.mul(float(1).sub(night.mul(0.85)))).mul(float(1).add(caustic));
+  // The last few centimetres over a beach are wet sand under a film of water, darker than both the dry sand and the
+  // shallows: mixing the sand's orange with the turquoise there otherwise drew a pale grey line along the coast.
+  const wetEdge = mix(float(0.86), float(1), smoothstep(0.02, 0.3, metres).max(quayDeep).max(hard));
+  let body: ShaderNode = mix(column, throughWater, seen.mul(float(1).sub(night.mul(0.85))))
+    .mul(float(1).add(caustic))
+    .mul(wetEdge);
   // A's relief is illumination by the same normal used for glints, not a separate crest/height pattern.
   // Over the shallows the bed, not the surface relief, carries the texture.
   // At night the moon stands higher than the day's glint light: lit from low ahead, the relief alone (no bed,
   // glints or seabed patches to break it up) read as diagonal streaks.
   const reliefLight = normalize(mix(light, vec3(0, 1, 0), night.mul(0.3)));
+  // Shading by a slope along one light direction weights the waves' spectrum by cos^2 of the angle to the light, so
+  // even a round sea reads as streaks across the light (spectral anisotropy about 0.5 wherever nothing else breaks it
+  // up: open deep water, night, snow). Half of the relief is shaded by tilt alone, which has no direction.
+  const lit = max(dot(normal, reliefLight), 0).div(reliefLight.y);
+  const tilted = float(1).sub(float(1).sub(normal.y).mul(CLEAR_WATER.tiltShade)).add(CLEAR_WATER.tiltMean);
   const relief = mix(
     float(1),
-    max(dot(normal, reliefLight), 0).div(reliefLight.y),
-    smoothstep(0, 3, metres).mul(0.55).add(0.45).mul(CLEAR_WATER.relief),
+    mix(lit, tilted, CLEAR_WATER.tiltShare),
+    smoothstep(0.5, 3.5, metres).mul(0.92).add(0.2).mul(CLEAR_WATER.relief),
   );
   body = body.mul(relief);
   // Cliff feet: the wall drops into deep, shaded water, darkest within half a cell of real rock walls (a snowy or
