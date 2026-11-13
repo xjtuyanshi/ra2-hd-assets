@@ -1,3 +1,4 @@
+import { parseWaterStyle, WATER_STYLES, type WaterStyle } from '../../../../packages/hd-renderer/src/ra2/waterStyles';
 import type { VmShell } from '../../../adapter/vmShell';
 import type { VmFrame } from '../../../vm86/win32';
 import type { GameRenderEffects, GameRenderSidebar, GameRenderState } from '../../../games/renderState';
@@ -1282,8 +1283,8 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
           nativeDetail: params.get('hd-native-detail') === 'mirror' ? 'mirror' : 'ignore',
           // Development opt-in: retain the default effect cards unless explicitly selected.
           volumetricEffects: params.get('hd-fxvol') === 'ray' ? 'ray' : 'off',
-          // hd-water=enhanced: the remaster's modern water (default: the earlier HD water).
-          water: params.get('hd-water') === 'enhanced' ? 'enhanced' : 'classic',
+          // Explicit water preset; unknown values retain the classic default.
+          water: parseWaterStyle(params.get('hd-water')),
           // hd-glints=off: leave out the engine's ore/gem glints; hd-sparkle=0..1: the HD star twinkle on crystals.
           ...(params.get('hd-glints') === 'off' ? { oreGlints: false } : {}),
           ...(params.has('hd-sparkle') && Number.isFinite(Number(params.get('hd-sparkle')))
@@ -1889,7 +1890,26 @@ export function startHdBridge(host: HdBridgeHost): HdBridgeControl {
   if (native) poll(performance.now());
 
   // Console handle for A/B checks: __hdBridge.toggle() switches between the HD view and the original picture.
+  let activeWaterLook = parseWaterStyle(params.get('hd-water'));
   const handle = {
+    ...(import.meta.env.DEV
+      ? {
+          water: {
+            get style() {
+              return activeWaterLook;
+            },
+            set(value: WaterStyle) {
+              if (stopped || !live) throw new Error('HD view is not ready');
+              activeWaterLook = live.setWaterLook(parseWaterStyle(value));
+              console.info('[HD water]', activeWaterLook);
+              return activeWaterLook;
+            },
+            cycle() {
+              return this.set(WATER_STYLES[(WATER_STYLES.indexOf(activeWaterLook) + 1) % WATER_STYLES.length]!);
+            },
+          },
+        }
+      : {}),
     ...(diagnostics ? { diagnostics: diagnostics.handle } : {}),
     toggle() {
       if (stopped) return enabled;

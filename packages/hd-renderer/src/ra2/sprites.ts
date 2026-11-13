@@ -56,6 +56,7 @@ import {
 } from 'three/tsl';
 import type { LightingClass, MapObject, SpriteFrame } from '../../../ra2-assets/src/manifest';
 import {
+  type AtmosphereNodes,
   DEFAULT_ATMOSPHERE_NODES,
   moonlit,
   LOCAL_LIGHT_HEIGHT_FALLOFF,
@@ -337,6 +338,20 @@ export function infantryShadowAlpha(coverage: number, opacity = INFANTRY_SHADOW_
     Math.max(0, (coverage - INFANTRY_SHADOW_RAMP.from) / (INFANTRY_SHADOW_RAMP.to - INFANTRY_SHADOW_RAMP.from)),
   );
   return t * t * (3 - 2 * t) * INFANTRY_SHADOW_OPACITY * opacity;
+}
+
+/**
+ * Shadow opacity cap on clear water: shadowDisplayRatio(0.65) is about 0.62 (the engine's own 0.78 gives 0.5). The
+ * earlier cap of 0.12 (about 0.94) removed the shadow of bridges, piers and ships from the water altogether, so a
+ * bridge seemed to float; the plane-depth ground pass darkens each pixel once, and in the sandbox the Golden Gate's
+ * overlapping deck shadows show no seams at this strength. The lit clear water column keeps it a little lighter than
+ * the engine's shadow.
+ */
+export const CLEAR_WATER_SHADOW_ALPHA = 0.65;
+
+/** 0..1 open water under a ground point while the clear water look is on (per-cell surface class, bilinear). */
+function shadowOnClearWater(xz: ShaderNode, nodes: AtmosphereNodes): ShaderNode {
+  return texture(nodes.surfaceTexture, xz.div(nodes.surfaceSize)).g.mul(nodes.clearWater);
 }
 
 /**
@@ -1042,11 +1057,21 @@ class SpriteGraph {
           // stair-stepped bands along every edge (live construction yards on XMP27T8). (Turning the rings per pixel
           // traded the bands for visible grain at 1:1.)
           If(
-            isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(look.shadowSoftness.greaterThan(1e-4)),
+            isShadow
+              .greaterThan(0.5)
+              .and(isInfantryShadow.lessThan(0.5))
+              .and(
+                look.shadowSoftness.greaterThan(1e-4).or(shadowOnClearWater(positionWorld.xz, nodes).greaterThan(0.01)),
+              ),
             () => {
               const offset: ShaderNode = vec2(px.div(60).add(py.div(30)), py.div(30).sub(px.div(60)));
               const reach: ShaderNode = length(max(offset.sub(baseCentre).abs().sub(foundationHalf), vec2(0, 0)));
-              const radius: ShaderNode = look.shadowSoftness.mul(reach).mul(2.2).min(SHADOW_PENUMBRA_TEXELS);
+              // Clear water: a shadow on open water has a soft edge of the full penumbra (the light scatters in the
+              // water column), so a bridge's shadow is not a hard black frame.
+              const radius: ShaderNode = max(
+                look.shadowSoftness.mul(reach).mul(2.2),
+                shadowOnClearWater(positionWorld.xz, nodes).mul(SHADOW_PENUMBRA_TEXELS),
+              ).min(SHADOW_PENUMBRA_TEXELS);
               const occupiedAt = (k: ShaderNode): ShaderNode => {
                 const inside: ShaderNode = step(lo, k).mul(float(1).sub(step(hi, k)));
                 const index: ShaderNode = texture(atlasPage, k.add(0.5).div(atlasSize)).r.mul(255);
@@ -1118,6 +1143,13 @@ class SpriteGraph {
         const sunShare = nodes.weatherSunShare.mul(nodes.sceneSunShadow);
         If(isShadow.greaterThan(0.5).and(isInfantryShadow.lessThan(0.5)).and(sunShare.notEqual(1)), () => {
           result.a.mulAssign(sunShare);
+        });
+        // Clear water: shadows on open water darken it to no less than about 0.94 of its brightness (the lit water
+        // column still glows); the hard near-black bridge frames read as rendering faults against the lighter water.
+        If(isShadow.greaterThan(0.5).and(nodes.clearWater.greaterThan(0.5)), () => {
+          result.a.assign(
+            mix(result.a, result.a.min(CLEAR_WATER_SHADOW_ALPHA), shadowOnClearWater(positionWorld.xz, nodes)),
+          );
         });
         // The object's picture tint last: the game darkens, flashes and colours the whole finished picture. On the
         // unlit colours its light factor is already in unlitLevel (the converter ignores the intensity from 0.236 up

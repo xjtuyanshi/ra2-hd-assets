@@ -360,7 +360,7 @@ describe('hard shores in the terrain material', () => {
   it('treats every shore of a snow map as a hard one, whatever its mask: ice is not a beach', () => {
     for (const painted of [false, true]) {
       const { build, inputs } = terrain('enhanced', painted, 'snow');
-      expect(!!build.mesh.geometry.getAttribute('hardShore')).toBe(painted);
+      expect(build.mesh.geometry.getAttribute('hardShore')).toBeTruthy();
       expect(inputs).toHaveBeenCalledTimes(1);
       // The weight is the constant 1: no tile or height test can turn the look's sand beach back on.
       const hard = inputs.mock.calls[0]![1] as unknown as { value?: number; node?: { value?: number } };
@@ -382,23 +382,30 @@ describe('hard shores in the terrain material', () => {
   it.each(['temperate', 'urban', 'newurban', 'desert', undefined])(
     "keeps the look's beach on %s maps with the whole-cell mask",
     (theater) => {
-      const { inputs } = terrain('enhanced', false, theater);
-      expect(inputs).not.toHaveBeenCalled();
+      const { inputs, build } = terrain('enhanced', false, theater);
+      expect(inputs).toHaveBeenCalledTimes(1);
+      expect(build.waterTuning.newShore.value).toBe(0);
+      const material = build.mesh.material;
+      build.setWaterLook('muted');
+      expect(build.waterTuning.newShore.value).toBe(1);
+      expect(build.mesh.material).toBe(material);
     },
   );
 
   it('leaves the painted lake bed its own shoreline, even on a snow map', () => {
     const bed = terrain('enhanced', false, 'snow', true);
-    expect(bed.inputs).not.toHaveBeenCalled();
+    expect(bed.inputs).toHaveBeenCalledTimes(1);
+    expect(bed.build.waterTuning.newShore.value).toBe(0);
     bed.inputs.mockClear();
     // The classic look has no bed optics: a snow lake map drawn with it has ice shores like any other snow map.
     expect(terrain('classic', false, 'snow', true).inputs).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves a map with the whole-cell mask exactly as it was: no attribute, no hard-shore inputs', () => {
+  it('prepares the hard-shore field on whole-cell maps with the legacy override disabled', () => {
     const { build, inputs, attributes } = terrain('enhanced', false);
-    expect(build.mesh.geometry.getAttribute('hardShore')).toBeUndefined();
-    expect(inputs).not.toHaveBeenCalled();
-    expect(attributes).not.toContain('hardShore');
+    expect(build.mesh.geometry.getAttribute('hardShore')).toBeTruthy();
+    expect(inputs).toHaveBeenCalledTimes(1);
+    expect(attributes).toContain('hardShore');
+    expect(build.waterTuning.newShore.value).toBe(0);
   });
 });

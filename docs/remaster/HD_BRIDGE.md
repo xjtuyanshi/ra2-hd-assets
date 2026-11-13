@@ -758,8 +758,9 @@ Snow stays dry and ground weather excludes building foundations and steep cells.
 `hd-look=<preset>` (`faithful|golden|cinematic`)
 applies the preset and its suggested hour unless `hd-time` is given (authored dusk maps keep their own hour; night
 maps are day maps with night dressing and take it; `cinematic` is the approved look with medium cooling, whose
-vehicles take their own exposure, top gain and grade balance share, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=enhanced` the modern water
-(on maps staged as dusk or night, water keeps the tone the map paints it in under either setting; see the water notes
+vehicles take their own exposure, top gain and grade balance share, see "Vehicle look gains" in `packages/hd-renderer/README.md`); `hd-fx=enhanced` selects the enhanced effect style (point 4); `hd-water=classic|enhanced|clear|faithful|muted|calm` the water surface preset
+(clear is an opt-in modern candidate with its own darker night variant and protected painted pools; other looks
+retain their existing dusk/night art tone; see the capture workflow in `scripts/remaster/qa/WATER.md` and water notes
 in `packages/hd-renderer/README.md`); `hd-glints=off` leaves out the engine's ore/gem glints and `hd-sparkle=0..1`
 sets the HD star twinkle on crystals (0 by default while the glints are drawn);
 `hd-vlook=remaster` selects the remaster voxel look; `hd-vproj=<dir>` selects vehicle redraw projection atlases under
@@ -1269,3 +1270,17 @@ presentation phase is `UNCERTAIN`.
 - The normalized anim rate (`NORMALIZED_RATE_FACTOR`), the build-up rate, the smoke kinematics and the shroud edge
   (`EDGE_INSET`, `EDGE_SOFTNESS`) were fitted on XMP29U2 skirmishes at the development settings; other game speeds may
   need the bridge's exact values. The build-up rate estimate is used only when engine H2 state is unavailable.
+
+### Runtime water review
+
+Code still defaults to classic and the play launcher to enhanced. Faithful keeps painted water with subdued motion;
+muted reduces chroma, reflections and sheen; calm isolates reduced wind while retaining enhanced colours. New looks
+use tile/mask-derived hard shores and protect small disconnected water bodies. In a development session use
+`__hdBridge.water.set('faithful')` or `__hdBridge.water.cycle()` without moving the camera. The enhanced family shares
+uniform nodes; first crossing to or from classic may compile the other structural material once.
+
+Run `pnpm exec node scripts/remaster/qa/water_boards.mjs "$WATER_MANIFEST"`, then
+`python3 scripts/remaster/qa/water_analyze.py "$WATER_MANIFEST" --measure "$WATER_MEASURE" --font "$CJK_FONT"`.
+See [Water review instructions](../../scripts/remaster/qa/WATER.md) for native save restoration, capture configuration,
+mask review, lossless/4 Mb/s encodes, per-gate metrics and the separate 60-second fleet logic-FPS runs. Captures and
+terrain artwork stay outside Git. Asset-free regressions do not establish GPU equivalence or visual acceptance.

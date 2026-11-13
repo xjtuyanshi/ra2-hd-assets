@@ -906,33 +906,44 @@ describe('r186 vertex and uniform binding budget', () => {
     },
   );
 
-  it.each(['classic', 'enhanced'] as const)('audits %s shoreline water with and without scene reflections', (style) => {
-    const source = cache();
-    source.terrainMap = {
-      ref: { width: 256, height: 4, originX: 0, originY: 0, scale: 1 },
-      texture: texture(),
-      waterMask: texture(),
-      shore: texture(),
-    } as Ra2Cache['terrainMap'];
-    const previous = waterPreset.style;
-    try {
-      waterPreset.style = style;
-      for (const reflections of [false, true]) {
-        source.manifest.tiles[0]!.terrainType = reflections ? 9 : 0;
-        const terrain = buildRa2Terrain(source);
-        expect(terrain.reflectionTarget !== null).toBe(reflections);
-        for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
-          const mesh = new Mesh(terrain.mesh.geometry, material);
-          assertLimits(mesh);
-          assertLimits(mesh, 16384);
+  it.each(['classic', 'enhanced', 'clear', 'faithful', 'muted', 'calm'] as const)(
+    'audits %s shoreline water with and without scene reflections',
+    (style) => {
+      const source = cache();
+      source.manifest.grid = { width: 4, height: 4 };
+      source.exists = new Uint8Array(16).fill(1);
+      source.height = new Uint8Array(16);
+      source.tile = new Uint16Array(16);
+      source.terrainMap = {
+        ref: { width: 256, height: 4, originX: 0, originY: 0, scale: 1 },
+        texture: texture(),
+        waterMask: texture(),
+        shore: texture(),
+        waterBed: true,
+      } as Ra2Cache['terrainMap'];
+      const previous = waterPreset.style;
+      try {
+        waterPreset.style = style;
+        for (const reflections of [false, true]) {
+          for (const bed of style === 'clear' ? [false, true] : [true]) {
+            source.terrainMap!.waterBed = bed;
+            source.manifest.tiles[0]!.terrainType = reflections ? 9 : 0;
+            const terrain = buildRa2Terrain(source);
+            expect(terrain.reflectionTarget !== null).toBe(reflections);
+            for (const material of terrain.mesh.material as MeshBasicNodeMaterial[]) {
+              const mesh = new Mesh(terrain.mesh.geometry, material);
+              assertLimits(mesh);
+              assertLimits(mesh, 16384);
+            }
+            dispose(terrain.mesh);
+          }
         }
-        dispose(terrain.mesh);
+      } finally {
+        waterPreset.style = previous;
+        source.nodes!.dispose();
       }
-    } finally {
-      waterPreset.style = previous;
-      source.nodes!.dispose();
-    }
-  });
+    },
+  );
 
   it('compiles scene multipliers after physical lighting and on every sprite lighting class', () => {
     const source = cache();

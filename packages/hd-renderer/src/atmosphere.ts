@@ -60,6 +60,8 @@ export class AtmosphereNodes extends SceneLightingUniforms {
   readonly weatherGroundSize = uniform(new Vector2(1, 1));
   readonly moonNeutral = uniform(new Color(1, 1, 1));
   readonly faithfulDisplay = uniform(1);
+  /** 1 while the terrain draws the clear water look: shadows on open water are softened and lightened. */
+  readonly clearWater = uniform(0);
 
   constructor() {
     super();
@@ -91,6 +93,7 @@ export class AtmosphereNodes extends SceneLightingUniforms {
     this.weatherGroundSize.value.copy(source.weatherGroundSize.value);
     this.moonNeutral.value.copy(source.moonNeutral.value);
     this.faithfulDisplay.value = source.faithfulDisplay.value;
+    this.clearWater.value = source.clearWater.value;
   }
 
   /** Only the fallback textures belong here; worlds and light fields own the textures they bind. */

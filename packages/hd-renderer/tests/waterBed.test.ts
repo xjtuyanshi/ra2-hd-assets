@@ -130,7 +130,8 @@ describe('painted-bed shader graph', () => {
     expect(bedAt).toHaveBeenCalledTimes(1);
     expect(columnForDisplay).toHaveBeenCalledTimes(1);
     const compensated = dependencies(columnForDisplay.mock.calls[0]![0]);
-    expect(compensated.has(art)).toBe(false);
+    // Muted can mix the original painted water hue into the column; the transmitted sand remains excluded.
+    expect(compensated.has(art)).toBe(true);
     expect(compensated.has(bed)).toBe(false);
     expect(compensated.has(nodes.night)).toBe(true);
     expect(dependencies(look.body).has(bed)).toBe(true);

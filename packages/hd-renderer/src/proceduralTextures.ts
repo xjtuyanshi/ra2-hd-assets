@@ -263,3 +263,212 @@ export function waterTextures(): WaterTextures {
   };
   return shared;
 }
+
+/** Candidate A: integer Fourier modes repeat over one tile; all distances below are tile fractions. */
+export const OCEAN_NORMAL = {
+  size: 256,
+  seed: 777,
+  windDegrees: 200,
+  rmsSlope: 0.24,
+  peakCycles: 9,
+  cutoffCycles: 110,
+  foamCycles: 30,
+} as const;
+const G = 9.81;
+function fft1(re: Float32Array, im: Float32Array, n: number, off: number, stride: number, inv: boolean) {
+  for (let i = 1, j = 0; i < n; i++) {
+    let b = n >> 1;
+    for (; j & b; b >>= 1) j ^= b;
+    j ^= b;
+    if (i < j) {
+      const a = off + i * stride,
+        c = off + j * stride;
+      let t = re[a]!;
+      re[a] = re[c]!;
+      re[c] = t;
+      t = im[a]!;
+      im[a] = im[c]!;
+      im[c] = t;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inv ? 2 : -2) * Math.PI) / len,
+      wr = Math.cos(ang),
+      wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1,
+        ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = off + (i + k) * stride,
+          b = off + (i + k + len / 2) * stride;
+        const tr = re[b]! * cr - im[b]! * ci,
+          ti = re[b]! * ci + im[b]! * cr;
+        re[b] = re[a]! - tr;
+        im[b] = im[a]! - ti;
+        re[a] += tr;
+        im[a] += ti;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+}
+function ifft2(re: Float32Array, im: Float32Array, N: number) {
+  for (let r = 0; r < N; r++) fft1(re, im, N, r * N, 1, true);
+  for (let c = 0; c < N; c++) fft1(re, im, N, c, N, true);
+}
+// ---------- wind-wave spectrum (Pierson-Moskowitz-like in k, cos^2s spreading) ----------
+function makeSpectrum(
+  N: number,
+  L: number,
+  lambdaPeak: number,
+  windDeg: number,
+  spreadPow: number,
+  lMin: number,
+  randn: () => number,
+) {
+  const kp = (2 * Math.PI) / lambdaPeak,
+    wd = (windDeg * Math.PI) / 180,
+    wx = Math.cos(wd),
+    wz = Math.sin(wd);
+  const h0r = new Float32Array(N * N),
+    h0i = new Float32Array(N * N),
+    kx = new Float32Array(N * N),
+    kz = new Float32Array(N * N),
+    om = new Float32Array(N * N);
+  for (let m = 0; m < N; m++)
+    for (let n = 0; n < N; n++) {
+      const i = m * N + n;
+      const ix = n < N / 2 ? n : n - N,
+        iz = m < N / 2 ? m : m - N;
+      const KX = (2 * Math.PI * ix) / L,
+        KZ = (2 * Math.PI * iz) / L,
+        k = Math.hypot(KX, KZ);
+      kx[i] = KX;
+      kz[i] = KZ;
+      om[i] = Math.sqrt(G * k);
+      const g1 = randn(),
+        g2 = randn();
+      if (k < 1e-6 || k > (2 * Math.PI) / lMin) continue;
+      const c = (KX * wx + KZ * wz) / k;
+      const D =
+        0.92 * Math.pow(Math.max(0, (1 + c) * 0.5), spreadPow) + 0.08 * Math.pow(Math.max(0, (1 - c) * 0.5), spreadPow);
+      const S = Math.pow(k, -4) * Math.exp(-1.25 * Math.pow(kp / k, 2)) * D;
+      const a = Math.sqrt(S / 2);
+      h0r[i] = g1 * a;
+      h0i[i] = g2 * a;
+    }
+  return { N, L, h0r, h0i, kx, kz, om };
+}
+// fields at time t: (slopeX, slopeZ, Jacobian, height); chop = horizontal displacement factor
+function synth(sp: ReturnType<typeof makeSpectrum>, t: number, chop: number, kFoam = 1e9) {
+  const { N, h0r, h0i, kx, kz, om } = sp,
+    n2 = N * N;
+  const ar = new Float32Array(n2),
+    ai = new Float32Array(n2),
+    br = new Float32Array(n2),
+    bi = new Float32Array(n2),
+    cr = new Float32Array(n2),
+    ci = new Float32Array(n2);
+  for (let m = 0; m < N; m++)
+    for (let n = 0; n < N; n++) {
+      const i = m * N + n,
+        j = ((N - m) % N) * N + ((N - n) % N);
+      const co = Math.cos(om[i]! * t),
+        si = -Math.sin(om[i]! * t); // e^{-iwt}: waves travel along +k (downwind)
+      const hr = h0r[i]! * co - h0i[i]! * si + h0r[j]! * co - h0i[j]! * si; // h0 e^{iwt} + conj(h0(-k)) e^{-iwt}
+      const hi = h0r[i]! * si + h0i[i]! * co - (h0r[j]! * si + h0i[j]! * co);
+      const KX = kx[i]!,
+        KZ = kz[i]!,
+        k = Math.hypot(KX, KZ) || 1;
+      const sxr = -KX * hi,
+        sxi = KX * hr,
+        szr = -KZ * hi,
+        szi = KZ * hr; // i k h
+      ar[i] = sxr - szi;
+      ai[i] = sxi + szr; // Sx + i Sz
+      const kf = k > kFoam ? 0 : 1 / k; // whitecap Jacobian from the longer waves only
+      const fxx = KX * KX * kf,
+        fzz = KZ * KZ * kf,
+        fxz = KX * KZ * kf;
+      br[i] = fxx * hr - fzz * hi;
+      bi[i] = fxx * hi + fzz * hr; // Dxx + i Dzz
+      cr[i] = fxz * hr - hi;
+      ci[i] = fxz * hi + hr; // Dxz + i h
+    }
+  ifft2(ar, ai, N);
+  ifft2(br, bi, N);
+  ifft2(cr, ci, N);
+  const out = new Float32Array(n2 * 4);
+  for (let i = 0; i < n2; i++) {
+    const dxx = br[i]! * chop,
+      dzz = bi[i]! * chop,
+      dxz = cr[i]! * chop;
+    out[i * 4] = ar[i]!;
+    out[i * 4 + 1] = ai[i]!;
+    out[i * 4 + 2] = (1 - dxx) * (1 - dzz) - dxz * dxz;
+    out[i * 4 + 3] = ci[i]!;
+  }
+  return out;
+}
+function rmsSlope(f: Float32Array) {
+  let s = 0;
+  const n = f.length / 4;
+  for (let i = 0; i < n; i++) s += f[i * 4]! ** 2 + f[i * 4 + 1]! ** 2;
+  return Math.sqrt(s / n);
+}
+function scaleSpectrum(sp: ReturnType<typeof makeSpectrum>, s: number) {
+  for (let i = 0; i < sp.h0r.length; i++) {
+    sp.h0r[i] *= s;
+    sp.h0i[i] *= s;
+  }
+}
+function pct(f: Float32Array, ch: number, p: number) {
+  const n = f.length / 4,
+    a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = f[i * 4 + ch]!;
+  a.sort();
+  return a[Math.floor(n * p)]!;
+}
+
+/** Generate RGB tangent normals (x,z,up), A = long-wave compression. No evolving FFT or per-frame upload. */
+export function oceanNormalTile(size = OCEAN_NORMAL.size, seed: number = OCEAN_NORMAL.seed): Uint8Array {
+  if (size < 8 || size > 1024 || (size & (size - 1)) !== 0 || !Number.isInteger(size))
+    throw new RangeError('Ocean tile size must be a power of two from 8 to 1024');
+  // Match the approved prototype's LCG and Gaussian sequence exactly, without mutable global RNG state.
+  let state = seed >>> 0;
+  const random = () => (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const randn = () => Math.sqrt(-2 * Math.log(random() + 1e-9)) * Math.cos(2 * Math.PI * random());
+  const sp = makeSpectrum(
+    size,
+    1,
+    1 / OCEAN_NORMAL.peakCycles,
+    OCEAN_NORMAL.windDegrees,
+    2,
+    1 / OCEAN_NORMAL.cutoffCycles,
+    randn,
+  );
+  scaleSpectrum(sp, OCEAN_NORMAL.rmsSlope / rmsSlope(synth(sp, 0, 0)));
+  const field = synth(sp, 0, 0);
+  // Only wavelengths longer than 26/30 m contribute to the whitecap Jacobian.
+  const caps = synth(sp, 0, 1, 2 * Math.PI * OCEAN_NORMAL.foamCycles);
+  const low = pct(caps, 2, 0.004)!,
+    high = pct(caps, 2, 0.15)!;
+  const data = new Uint8Array(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    const sx = field[i * 4]!,
+      sz = field[i * 4 + 1]!;
+    const length = Math.hypot(sx, sz, 1);
+    data[i * 4] = toByte(0.5 - (sx / length) * 0.5);
+    data[i * 4 + 1] = toByte(0.5 - (sz / length) * 0.5);
+    data[i * 4 + 2] = toByte(0.5 + 0.5 / length);
+    data[i * 4 + 3] = toByte(Math.pow(Math.max(0, Math.min(1, (high - caps[i * 4 + 2]!) / (high - low))), 0.7));
+  }
+  return data;
+}
+let sharedOceanNormal: DataTexture | undefined;
+/** Lazy cache is independent of enhanced/muted textures, so their load cost and data stay unchanged. */
+export function oceanNormalTexture(): DataTexture {
+  return (sharedOceanNormal ??= repeatTexture(oceanNormalTile(), OCEAN_NORMAL.size, true));
+}
