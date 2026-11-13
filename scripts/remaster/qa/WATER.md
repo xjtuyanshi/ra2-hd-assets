@@ -15,25 +15,35 @@ than treating the sand composite as water. Terrain artwork is never rewritten by
 
 Clear is a candidate, not the default. Append `&hd-water=clear` to the launcher's printed URL (or replace its existing
 `hd-water=enhanced` parameter); keep all resource/cache parameters. No INI flag is added. Its seabed slopes from the
-shore distance (about 1.3 m per cell, then a shelf drop to about 6 m by 2.2 cells, its edge wandering with a broad
-noise); the sand shows through within about half a cell and the approved turquoise, shaded by the bed's own light and
-dark, turns to the approved teal by about 1.5 cells. Static, low-frequency dark patches of rock and weed and deeper
-holes dapple the open-water bed and waver with the refraction. The surface uses four equal samples of one
-procedurally generated 256-square FFT normal tile, with the three.js WaterMesh scales and scroll rates (the second fine
-layer turned 75 degrees across the first so the 2:1 camera does not read one crest direction as horizontal streaks), a
-26 m primary tile (3.25 cells), roughly 0.36-cell dominant waves and a 0.8-speed clock. Relief and sharp glints are lit
-by a fixed light ahead of the camera at prototype A's sun angle in the scene sun's colour (the scene sun sits behind
-the camera, where flat water shows no glitter), with the orthographic camera's single view direction. Small
-compression-mask whitecaps, a capped sky/object reflection with a Fresnel sky tint toward the top of the screen, broken
-white water at the beach edge that thins into lace plus a swash line that runs up and back over seven seconds,
-caustics about a third of a cell to a cell and a half from a beach, and at real cliff feet a darker foot, a feathered
-cliff mirror that fades within about 0.4 cells and a broken line of white water. Hard shores without a cliff (snow)
-keep their colour. Water beside paved cells or neutral, pale shoreline art (quays, seawalls) keeps its deep colour up
-to the wall with a dark wet line. Shadows on open water are softened and capped at about x0.88 brightness. Painted
-pools remain protected. The scene-wide cinematic grade is unchanged. Bridge and wall mirror silhouettes use a
-five-tap premultiplied feather on clear only, probed at the undistorted mirror position; legacy looks retain their
-existing sampling. Surface metrics require fresh rendered measurement; coefficient changes alone do not establish
-acceptance.
+shore distance (about 1.3 m per cell, then a shelf drop to about 6 m by 2.2 cells). The slope is warped by a broad and
+a mid-scale noise and by the shore mass (how much shoreline lies around that stretch of coast), so the shallows are
+wide in bays and along long coasts and narrow around islets and off headlands, never more than about 1.6 times wider.
+The bed seen through the shallows is the theatre's sand with grain and long ripple marks, at the brightness of the
+nearest shore's land (dark rock islets sit in dark-floored water), plus low-frequency rock and weed patches from about
+0.15 cells out and deeper holes further out; all of it waver with the refraction. The sand's own colour shows within
+about half a metre and takes the turquoise hue beyond that; its light and dark stay visible over the first few metres.
+The approved turquoise turns to the approved teal (25% lighter than the palette entry, which keeps deep L* in band
+with the weaker reflection) at a depth perturbed by the rock field, so the edge of the shallows is ragged. The surface
+uses four equal samples of one procedurally generated 256-square FFT normal tile, with the three.js WaterMesh scales
+and scroll rates (the second fine layer turned 75 degrees across the first so the 2:1 camera does not read one crest
+direction as horizontal streaks), a 26 m primary tile (3.25 cells), roughly 0.36-cell dominant waves and a 0.5-speed
+clock (prototype A's change per second per unit of local contrast). Relief (weaker over the shallows, where the bed
+carries the texture) and sharp, sparse glints are lit by a fixed light ahead of the camera at prototype A's sun angle in
+the scene sun's colour, with the orthographic camera's single view direction; a fine screen-isotropic mask breaks the
+glints into points. Small compression-mask whitecaps and a low, capped sky/object reflection with a Fresnel sky tint
+toward the top of the screen. Beaches have no white outline: the sand runs into wet sand and clear shallows, and white
+water appears only as a sparse, broken wash line while a wave runs up (seven-second cycle). Caustics lie about a third
+of a cell to a cell and a half from a beach; real cliff feet get a darker foot, a feathered cliff mirror that fades
+within about 0.4 cells and a little broken white water. Hard shores without a cliff (snow) keep their colour. Water
+beside paved cells or masonry shoreline art (quays, seawalls, bridges) keeps its deep colour up to the wall with a dark
+wet line. The shore class and tone are computed once per map on the CPU from the terrain composite's land just inland of
+the waterline and spread onto the water with the shore distance field (`shoreField.ts`, carried in its G/B/A channels),
+so they follow the nearest shore smoothly; a per-pixel tap stepped back along the field's gradient drew blocky dark
+drips and cyan wisps where the gradient pointed at the wrong shore. Shadows on open water are softened and capped at
+about x0.94 brightness. Painted pools remain protected. The scene-wide cinematic grade is unchanged. Bridge and wall
+mirror silhouettes use a five-tap premultiplied feather on clear only, probed at the undistorted mirror position;
+legacy looks retain their existing sampling. Surface metrics require fresh rendered measurement; coefficient changes
+alone do not establish acceptance.
 
 ## Prepare one session
 
@@ -135,10 +145,11 @@ full match require visual review. No capture script changes or denoises private 
 The analyzer exits nonzero for missing/error evidence or a FAIL/UNVERIFIED numeric gate. Written boards and measured
 rows remain available for review even when acceptance is incomplete.
 
-Clear's numeric gates use the owner's modern-water brief: core HSV saturation <= 0.55, one-second mean absolute
-L* change <= 1.5, anisotropy <= 0.35 and highlight share <= 2%. The one-second change of any travelling surface with
-the 3-5 L* local contrast the owner asked for is far above 1.5 (the approved prototype A itself measures about 3.8), so
-that gate and the contrast target cannot both pass; report both rather than tuning one away. They do not require matching the original mean L*.
+Clear's numeric gates use the owner's modern-water brief as revised on 2026-11-12: open-water core HSV saturation
+0.50-0.60 (raised at the owner's request), one-second mean absolute L* change about equal to its local contrast as in
+prototype A (A measures 3.67 at local std 3.55), anisotropy <= 0.35 and highlight share <= 2%. The older one-second
+change gate of 1.5 cannot pass with the 3-5 L* local contrast the owner asked for; report both rather than tuning one
+away. They do not require matching the original mean L*.
 Other existing calmness and coastline gates remain. These are capture gates, not guarantees from parameter values.
 Enhanced is retained as a comparison baseline and may fail the calmness gates. Board labels are Chinese, at native
 pixel size; comparison video is side by side. Each look and the comparison produce four-second FFV1 lossless masters

@@ -214,6 +214,10 @@ export interface WaterLookInputs {
   quay?: ShaderNode;
   /** 0..1 within about 1.5 cells of a real cliff (height step), as opposed to any hard shore (clear look). */
   cliffNear?: ShaderNode;
+  /** 0..1 brightness of the nearest shore's land (clear look: clearWater.ts clearShoreTone, tints the shallows' bed). */
+  shoreTone?: ShaderNode;
+  /** 0..1 shoreline within reach (shoreField.ts shore mass): low around islets and off headlands, high in bays. */
+  shoreMass?: ShaderNode;
 }
 
 export interface WaterLook {

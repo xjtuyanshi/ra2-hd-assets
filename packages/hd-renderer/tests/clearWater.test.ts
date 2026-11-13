@@ -11,8 +11,11 @@ import {
   clearDepth,
   clearMetres,
   clearPalette,
+  clearShoreSandiness,
+  clearShoreTone,
   clearTransmission,
 } from '../src/ra2/clearWater';
+import { buildShoreField, SHORE_MAX, SHORE_MIN, type ShoreLandValue } from '../src/ra2/shoreField';
 
 describe('clear water optical policy', () => {
   it('deepens monotonically within the shallow band and drops steeply beside rocks', () => {
@@ -51,7 +54,8 @@ describe('clear water optical policy', () => {
     }
     expect(clearMetres(0)).toBe(0);
     expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.15))).toBeGreaterThan(0.4);
-    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.5))).toBeLessThan(0.2);
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.5))).toBeGreaterThan(0.2);
+    expect(Math.exp(-CLEAR_WATER.clarity * clearMetres(0.8))).toBeLessThan(0.2);
     expect(clearMetres(1.6)).toBeGreaterThanOrEqual(CLEAR_WATER.aquaEnd);
     expect(clearMetres(9)).toBeLessThanOrEqual(CLEAR_WATER.maxMetres);
     // Quays and cliff feet are deep up to the wall.
@@ -103,7 +107,8 @@ describe('clear water optical policy', () => {
     expect(clearPalette('urban')).toEqual(clearPalette('newurban'));
   });
   it('keeps A at its approved physical scale, scroll directions and comfort clock', () => {
-    expect(CLEAR_SURFACE.timeScale).toBe(0.8);
+    // Slowed to prototype A's 1-second change per unit of local contrast (A 3.67 / 3.55; 0.8 moved about 1.45x A).
+    expect(CLEAR_SURFACE.timeScale).toBe(0.5);
     expect(CLEAR_SURFACE.normalGain).toBe(1.5);
     expect(CLEAR_SURFACE.tileMetres / CLEAR_SURFACE.metresPerCell).toBe(3.25);
     expect(CLEAR_SURFACE.tileMetres / 9 / CLEAR_SURFACE.metresPerCell).toBeCloseTo(0.3611, 4);
@@ -121,5 +126,58 @@ describe('clear water optical policy', () => {
     expect(CLEAR_WATER.shininess).toBeLessThanOrEqual(900);
     expect(CLEAR_WATER.sparkle).toBeLessThanOrEqual(8);
     expect(CLEAR_WATER.whitecap).toBeLessThanOrEqual(0.35);
+  });
+  it('keeps the sky reflection and glare low (owner: the reflection read too strong)', () => {
+    expect(CLEAR_WATER.reflectionMax).toBeLessThanOrEqual(0.15);
+    expect(CLEAR_WATER.reflection + CLEAR_WATER.fresnelGain * 0.1).toBeLessThan(0.1);
+    expect(CLEAR_WATER.sparkle).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('clear water shore class', () => {
+  it('tells natural ground from masonry by hue, as measured in the sandbox', () => {
+    // Linear colours sampled from the enhanced sandbox stills (g2 beach and islet, XGoldSt plaza and seawall).
+    expect(clearShoreSandiness(0.305, 0.211, 0.086)).toBeGreaterThan(0.95); // sand
+    expect(clearShoreSandiness(0.088, 0.066, 0.05)).toBeGreaterThan(0.95); // dark islet rock
+    expect(clearShoreSandiness(0.106, 0.134, 0.08)).toBeGreaterThan(0.95); // olive coast grass
+    expect(clearShoreSandiness(0.316, 0.325, 0.172)).toBeLessThan(0.05); // seawall
+    expect(clearShoreSandiness(0.597, 0.566, 0.27)).toBeLessThan(0.2); // plaza
+    expect(clearShoreSandiness(0.2, 0.2, 0.2)).toBe(0); // grey masonry
+  });
+  it('encodes the shore tone around the theatre sand', () => {
+    const sand = new Color(clearPalette('temperate').bed);
+    const mid = clearShoreTone(sand.r, sand.g, sand.b);
+    expect(clearShoreTone(-1, -1, -1)).toBeCloseTo(mid, 6);
+    expect(clearShoreTone(0.02, 0.02, 0.02)).toBeLessThan(mid);
+    expect(clearShoreTone(1, 1, 1)).toBe(1);
+  });
+  it('spreads the land class onto the water smoothly, with the shore mass of islets below a coast', () => {
+    // 160 x 120 mask, scale 1, step 1: water everywhere except a coast along the bottom (left half masonry, right half
+    // sand) and a 30 x 14 pixel islet (about 0.7 cells across) near the top.
+    const w = 160,
+      h = 120;
+    const mask = new Uint8Array(w * h).fill(255);
+    for (let y = 90; y < h; y++) for (let x = 0; x < w; x++) mask[y * w + x] = 0;
+    for (let y = 15; y < 29; y++) for (let x = 90; x < 120; x++) mask[y * w + x] = 0;
+    const land: ShoreLandValue = {
+      defaults: [1, 0.5],
+      read: (x0) => [x0 < 80 ? 0 : 1, 0.5],
+    };
+    const { data, values } = buildShoreField(mask, w, h, 1, 1, false, undefined, land);
+    expect(values).not.toBeNull();
+    const [sandy, , mass] = values!;
+    const at = (x: number, y: number) => y * w + x;
+    const cells = (x: number, y: number) => (data[at(x, y)]! / 255) * (SHORE_MAX - SHORE_MIN) + SHORE_MIN;
+    // Water a third of a cell off each half of the coast takes that half's class.
+    expect(cells(20, 80)).toBeGreaterThan(0);
+    expect(sandy![at(20, 80)]! / 255).toBeLessThan(0.1);
+    expect(sandy![at(140, 80)]! / 255).toBeGreaterThan(0.9);
+    // Across the boundary the class changes gradually, without a step between neighbouring texels.
+    for (let x = 1; x < w; x++) expect(Math.abs(sandy![at(x, 80)]! - sandy![at(x - 1, 80)]!)).toBeLessThan(20);
+    // The islet's water has less shore mass than the coast's, and both have some.
+    const islet = mass![at(105, 32)]!;
+    const coast = mass![at(140, 85)]!;
+    expect(islet).toBeGreaterThan(0);
+    expect(islet).toBeLessThan(coast * 0.6);
   });
 });

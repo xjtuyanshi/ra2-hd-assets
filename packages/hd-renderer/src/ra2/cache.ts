@@ -20,7 +20,8 @@ import { MAP_MATERIALS_FILE, type MapMaterials } from '../../../ra2-assets/src/m
 import { MapLightGrade, setPaletteGrade, setPaletteNodes } from './mapLighting';
 import { AtmosphereNodes } from '../atmosphere';
 import { withDecodedPage, type PageUpload } from '../pageUpload';
-import { cliffFieldSteps, shoreFieldSteps } from './shoreField';
+import { cliffFieldSteps, shoreFieldSteps, type ShoreLandValue } from './shoreField';
+import { clearShoreSandiness, clearShoreTone } from './clearWater';
 import { defaultSliceClock, runStepsSliced, type SliceClock, type Steps } from '../timeSlice';
 
 /** windows.json next to a lit-window mask (packages/ra2-assets src/node/lights.ts WindowsSidecar). */
@@ -499,7 +500,18 @@ export async function loadRa2Cache(base: string, options: Ra2CacheOptions = {}):
     const shore = mask
       ? (
           await sliced(
-            shoreFieldSteps(mask.bytes, mask.width, mask.height, ref.scale, downsample, material.waterBed, shoreIgnore),
+            shoreFieldSteps(
+              mask.bytes,
+              mask.width,
+              mask.height,
+              ref.scale,
+              downsample,
+              material.waterBed,
+              shoreIgnore,
+              material.waterBed
+                ? undefined
+                : compositeShoreClass(texture, mask.width, mask.height, manifest.theater ?? ''),
+            ),
           )
         ).texture
       : emptyMask();
@@ -750,6 +762,62 @@ export function screenToCell(sx: number, sy: number, level: number): [x: number,
   const diff = sx / 30;
   const sum = (sy + level * 15) / 15;
   return [(sum + diff) / 2, (sum - diff) / 2];
+}
+
+/**
+ * The clear look's shore class (clearShoreSandiness) and the land's brightness relative to the theatre's sand
+ * (clearShoreTone, which tints the bed seen through the shallows), from the composite's land in mask pixel rectangles;
+ * the composite may be stored at another size than its water mask. Mean of the opaque pixels' linear colour.
+ */
+function compositeShoreClass(
+  composite: DataTexture,
+  maskWidth: number,
+  maskHeight: number,
+  theater: string,
+): ShoreLandValue | undefined {
+  const { data, width, height } = composite.image as { data: Uint8Array; width: number; height: number };
+  if (!data || !width || !height) return undefined;
+  const linear = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const c = i / 255;
+    linear[i] = c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }
+  const sx = width / maskWidth;
+  const sy = height / maskHeight;
+  const read = (x0: number, y0: number, x1: number, y1: number): number[] | null => {
+    const px0 = Math.floor(x0 * sx);
+    const px1 = Math.min(width, Math.max(px0 + 1, Math.ceil(x1 * sx)));
+    const py0 = Math.floor(y0 * sy);
+    const py1 = Math.min(height, Math.max(py0 + 1, Math.ceil(y1 * sy)));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    const lumas: number[] = [];
+    // At most 4 x 4 samples per rectangle: a mean colour does not need every pixel of an upscaled composite.
+    const dx = Math.max(1, Math.floor((px1 - px0) / 4));
+    const dy = Math.max(1, Math.floor((py1 - py0) / 4));
+    for (let y = py0; y < py1; y += dy)
+      for (let x = px0; x < px1; x += dx) {
+        const i = (y * width + x) * 4;
+        if (data[i + 3]! < 128) continue;
+        const pr = linear[data[i]!]!;
+        const pg = linear[data[i + 1]!]!;
+        const pb = linear[data[i + 2]!]!;
+        r += pr;
+        g += pg;
+        b += pb;
+        lumas.push(0.2126 * pr + 0.7152 * pg + 0.0722 * pb);
+        n++;
+      }
+    if (!n) return null;
+    // The tone from the darker quarter of the samples: the original paints white surf and pale highlights along the
+    // edge of dark rock, which would otherwise make a rock islet read as sand.
+    lumas.sort((a, z) => a - z);
+    const dark = lumas[Math.floor((lumas.length - 1) / 4)]!;
+    return [clearShoreSandiness(r / n, g / n, b / n), clearShoreTone(dark, dark, dark, theater)];
+  };
+  return { defaults: [1, clearShoreTone(-1, -1, -1, theater)], read };
 }
 
 /**

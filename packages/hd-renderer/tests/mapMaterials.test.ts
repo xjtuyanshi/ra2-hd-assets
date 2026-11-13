@@ -2,6 +2,7 @@ import {
   ClampToEdgeWrapping,
   DataUtils,
   HalfFloatType,
+  RGBAFormat,
   LinearFilter,
   LinearMipmapLinearFilter,
   NoColorSpace,
@@ -14,6 +15,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MapMaterials } from '../../ra2-assets/src/mapMaterials';
 import { loadRa2Cache, resolveTerrainMaterials } from '../src/ra2/cache';
 import { buildShoreField } from '../src/ra2/shoreField';
+
+/** The signed distance bytes of a loaded shore field: its R channel (G/B/A carry the clear look's shore values). */
+function shoreDistance(texture: { format: number; image: { data: unknown } }): Uint8Array | Uint16Array {
+  const data = texture.image.data as Uint8Array | Uint16Array;
+  return texture.format === RGBAFormat ? (data as Uint8Array).filter((_, i) => i % 4 === 0) : data;
+}
 
 const ref = {
   file: 'terrain.png',
@@ -288,7 +295,7 @@ describe('map material cache loading', () => {
     const cache = await loadRa2Cache('/map');
     const map = cache.terrainMap!;
     expect(map.waterMask.image.data).toEqual(water);
-    const values = map.shore.image.data as Uint8Array | Uint16Array;
+    const values = shoreDistance(map.shore);
     const width = waterBed ? 8 : 4;
     expect(Array.from(values)).toEqual(
       Array.from({ length: values.length }, (_, i) => (i % width < width / 2 ? 0 : waterBed ? 0x3c00 : 255)),
@@ -323,7 +330,7 @@ describe('map material cache loading', () => {
     for (let i = 0; i < width * height; i++)
       expect([...atlas.slice(i * 4, i * 4 + 4)]).toEqual(i % width < 8 ? [255, 0, 0, 255] : [255, 0, 0, 0]);
     const baseline = buildShoreField(water, width, height, ref.scale, 4, false, new Uint8Array(water.length).fill(255));
-    expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+    expect(shoreDistance(cache.terrainMap!.shore)).toEqual(baseline.data);
     baseline.texture.dispose();
   });
 
@@ -338,7 +345,7 @@ describe('map material cache loading', () => {
       else images.delete('cliffs.png');
       const cache = await loadRa2Cache('/map');
       const baseline = buildShoreField(water, width, height, ref.scale);
-      expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+      expect(shoreDistance(cache.terrainMap!.shore)).toEqual(baseline.data);
       expect(cache.terrainMap!.cliff).toBeNull();
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0]![0]).toContain('/map/cliffs.png');
@@ -362,7 +369,7 @@ describe('map material cache loading', () => {
       const cache = await loadRa2Cache('/map');
       const baseline = buildShoreField(water, width, height, ref.scale);
       expect(fetchFile).not.toHaveBeenCalledWith('/map/cliffs.png');
-      expect(cache.terrainMap!.shore.image.data).toEqual(baseline.texture.image.data);
+      expect(shoreDistance(cache.terrainMap!.shore)).toEqual(baseline.data);
       expect(cache.terrainMap!.cliff).toBeNull();
       expect(warn).not.toHaveBeenCalled();
       baseline.texture.dispose();

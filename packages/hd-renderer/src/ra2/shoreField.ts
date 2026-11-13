@@ -1,4 +1,12 @@
-import { DataTexture, DataUtils, HalfFloatType, LinearFilter, RedFormat, UnsignedByteType } from 'three/webgpu';
+import {
+  DataTexture,
+  DataUtils,
+  HalfFloatType,
+  LinearFilter,
+  RGBAFormat,
+  RedFormat,
+  UnsignedByteType,
+} from 'three/webgpu';
 import { runSteps, type Steps } from '../timeSlice';
 
 /** Encoded range of the signed shore distance, in cells: texel value 0..1 maps to SHORE_MIN..SHORE_MAX. */
@@ -44,9 +52,27 @@ export function buildShoreField(
   step = 4,
   precise = false,
   ignore?: Uint8Array,
-): { texture: DataTexture; data: Uint8Array; width: number; height: number } {
-  return runSteps(shoreFieldSteps(mask, width, height, scale, step, precise, ignore));
+  landValue?: ShoreLandValue,
+): { texture: DataTexture; data: Uint8Array; values: Uint8Array[] | null; width: number; height: number } {
+  return runSteps(shoreFieldSteps(mask, width, height, scale, step, precise, ignore, landValue));
 }
+
+/**
+ * Up to two properties of the land along the shoreline (each 0..1), read from the mask-space pixel rectangle
+ * [x0, x1) x [y0, y1) of one land texel a little inland of the waterline; null where the rectangle has nothing to read.
+ * `defaults` are the values where no shore is within reach.
+ */
+export interface ShoreLandValue {
+  defaults: readonly number[];
+  read(x0: number, y0: number, x1: number, y1: number): readonly number[] | null;
+}
+
+/** Land band (cells inland of the waterline) whose texels feed ShoreLandValue: past the painted wet band at the edge. */
+export const SHORE_VALUE_BAND = [0.15, 0.8] as const;
+/** Share of the spreading kernel covered by the land band along a straight coast; mass 0.5 encodes it (shoreValueSteps). */
+export const SHORE_MASS_FULL = 0.3;
+/** Radius (cells) of each of the three box passes that spread the land value onto the water (reach about 3x). */
+export const SHORE_VALUE_RADIUS = 0.9;
 
 /** buildShoreField as a pass that yields after every row or line of work (see timeSlice.ts). */
 export function* shoreFieldSteps(
@@ -57,7 +83,8 @@ export function* shoreFieldSteps(
   step = 4,
   precise = false,
   ignore?: Uint8Array,
-): Steps<{ texture: DataTexture; data: Uint8Array; width: number; height: number }> {
+  landValue?: ShoreLandValue,
+): Steps<{ texture: DataTexture; data: Uint8Array; values: Uint8Array[] | null; width: number; height: number }> {
   const { water, ignored, width: w, height: h } = yield* downsampleMasks(mask, width, height, step, ignore);
   yield* fillSpecksSteps(water, w, h, SPECK_TEXELS);
   const texel = step / scale;
@@ -84,13 +111,103 @@ export function* shoreFieldSteps(
     data[i] = Math.round(unit * 255);
     if (half) half[i] = DataUtils.toHalfFloat(unit);
   }
-  const texture = half
-    ? new DataTexture(half, w, h, RedFormat, HalfFloatType)
-    : new DataTexture(data, w, h, RedFormat, UnsignedByteType);
+  // The optional land values ride in the 8-bit field's G and B channels and the shore mass (shoreValueSteps) in A, so
+  // the material reads them with the distance tap it already makes.
+  const values = landValue && !half ? yield* shoreValueSteps(water, toWater, w, h, step, texel, landValue) : null;
+  let texture: DataTexture;
+  if (half) texture = new DataTexture(half, w, h, RedFormat, HalfFloatType);
+  else if (values) {
+    const rgba = new Uint8Array(w * h * 4).fill(255);
+    for (let i = 0; i < data.length; i++) {
+      rgba[i * 4] = data[i]!;
+      values.forEach((value, c) => (rgba[i * 4 + 1 + c] = value[i]!));
+    }
+    texture = new DataTexture(rgba, w, h, RGBAFormat, UnsignedByteType);
+  } else texture = new DataTexture(data, w, h, RedFormat, UnsignedByteType);
   texture.magFilter = LinearFilter;
   texture.minFilter = LinearFilter;
   texture.needsUpdate = true;
-  return { texture, data, width: w, height: h };
+  return { texture, data, values, width: w, height: h };
+}
+
+/**
+ * Spread land properties onto the water beside it. Each water texel takes the weighted mean of the values read on the
+ * land band of the nearby shoreline (normalised convolution: three box passes over value x weight and over weight),
+ * fading to the defaults where no shore is within reach; returns them followed by the shore mass. A per-pixel tap stepped back along the distance
+ * field's gradient cannot do this: away from the waterline the gradient points at the wrong shore (across straits,
+ * past small islands, along medial lines), so the tap read water or far land and drew hard-edged blocks and shards.
+ */
+function* shoreValueSteps(
+  water: Uint8Array,
+  toWater: Float64Array,
+  w: number,
+  h: number,
+  step: number,
+  texel: number,
+  landValue: ShoreLandValue,
+): Steps<Uint8Array[]> {
+  const channels = Math.min(2, landValue.defaults.length);
+  // One spread field per land value, then the shore mass, then the weight.
+  const nums = Array.from({ length: channels + 1 }, () => new Float32Array(w * h));
+  const den = new Float32Array(w * h);
+  const band = new Uint8Array(w * h);
+  const [near, far] = SHORE_VALUE_BAND;
+  for (let y = 0; y < h; y++, yield)
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (water[i]) continue;
+      const cells = Math.sqrt(toWater[i]!) / ISO_PIXELS_PER_CELL;
+      if (cells < near || cells > far) continue;
+      const v = landValue.read(x * step, y * step, (x + 1) * step, (y + 1) * step);
+      if (v === null) continue;
+      for (let c = 0; c < channels; c++) nums[c]![i] = Math.min(1, Math.max(0, v[c] ?? landValue.defaults[c]!));
+      den[i] = 1;
+      band[i] = 1;
+    }
+  // A vertical texel covers twice the ground of a horizontal one (see buildShoreField).
+  const rx = Math.max(1, Math.round((SHORE_VALUE_RADIUS * ISO_PIXELS_PER_CELL) / texel));
+  const ry = Math.max(1, Math.round(rx / 2));
+  const line = new Float32Array(Math.max(w, h));
+  const blur = function* (field: Float32Array): Steps<void> {
+    for (let pass = 0; pass < 3; pass++) {
+      for (let y = 0; y < h; y++, yield) boxLine(field, y * w, 1, w, rx, line);
+      for (let x = 0; x < w; x++, yield) boxLine(field, x, w, h, ry, line);
+    }
+  };
+  // Shore mass, measured on the land band itself: how much shoreline lies around that stretch of shore (SHORE_MASS_FULL
+  // for a straight coast, more in a bay, a fraction on a small islet or a headland). It is then spread like the land
+  // values, so the water keeps its shore's mass however far out it lies.
+  const local = den.slice();
+  yield* blur(local);
+  const mass = nums[channels]!;
+  for (let i = 0; i < mass.length; i++) if (band[i]) mass[i] = Math.min(1, local[i]! / (2 * SHORE_MASS_FULL));
+  for (const field of [...nums, den]) yield* blur(field);
+  const spread = nums.map((num, c) => {
+    const fallback = c < channels ? landValue.defaults[c]! : 0.5;
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) {
+      const d = den[i]!;
+      const mean = d > 1e-6 ? num[i]! / d : fallback;
+      // A shore only partly in reach blends towards the default instead of deciding alone.
+      const trust = Math.min(1, d / 0.02);
+      out[i] = Math.round((fallback + (mean - fallback) * trust) * 255);
+    }
+    return out;
+  });
+  while (spread.length < 3) spread.splice(spread.length - 1, 0, new Uint8Array(w * h).fill(255));
+  return spread;
+}
+
+/** In-place box mean of radius r along one line of `field` (start index, stride, length), edges clamped. */
+function boxLine(field: Float32Array, start: number, stride: number, n: number, r: number, line: Float32Array): void {
+  for (let i = 0; i < n; i++) line[i] = field[start + i * stride]!;
+  let sum = 0;
+  for (let k = -r; k <= r; k++) sum += line[Math.min(n - 1, Math.max(0, k))]!;
+  const norm = 1 / (2 * r + 1);
+  for (let i = 0; i < n; i++) {
+    field[start + i * stride] = sum * norm;
+    sum += line[Math.min(n - 1, i + r + 1)]! - line[Math.max(0, i - r)]!;
+  }
 }
 
 /**

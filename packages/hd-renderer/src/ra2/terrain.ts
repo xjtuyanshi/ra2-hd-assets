@@ -24,6 +24,7 @@ import {
   Vector3,
   type Object3D,
   type NodeBuilder,
+  RGBAFormat,
 } from 'three/webgpu';
 import {
   BRDF_GGX,
@@ -40,7 +41,6 @@ import {
   floor,
   fract,
   max,
-  min,
   mix,
   normalView,
   positionWorld,
@@ -1177,56 +1177,15 @@ function createMaterials(
       // grey or pale. Beaches keep the shallows and foam; the others take deep water up to the edge (the turquoise
       // beach band read as pasted onto city seawalls).
       let shoreQuay = quay;
+      // The shore class (clearShoreSandiness) and tone (clearShoreTone) of the nearest shoreline, spread onto the water
+      // when the shore field was built (shoreField.ts shoreValueSteps) and carried in its G and B channels: smooth, and
+      // the same on both sides of a medial line. Without them every shore is a sand beach.
+      const shoreLand: ShaderNode | null = clear && map.shore.format === RGBAFormat ? texture(map.shore, uv) : null;
       if (clear && quay) {
-        // A gradient over a few texels: the one-texel difference of the 8-bit field flipped direction from pixel to
-        // pixel in flat parts of the field, which dithered the beach/quay class into a fish-scale pattern.
-        const texelU = 3 / map.shore.image.width;
-        const texelV = 3 / map.shore.image.height;
-        const rawGradient = vec2(
-          texture(map.shore, uv.add(vec2(texelU, 0))).r.sub(texture(map.shore, uv.sub(vec2(texelU, 0))).r),
-          texture(map.shore, uv.add(vec2(0, texelV))).r.sub(texture(map.shore, uv.sub(vec2(0, texelV))).r),
-        );
-        const gradient = rawGradient.normalize();
-        // On the medial line between two shores the field is flat and its direction arbitrary: take neither class there
-        // (a random tap drew dotted deep lines across turquoise bays and turquoise wisps off seawalls).
-        const directed = smoothstep(0.003, 0.009, rawGradient.length());
-        // Just behind the waterline: a tap a cell inland passed the wall into the plaza behind it at the inside
-        // corners of zigzag seawalls and classified them differently from the wall beside them (dark spikes).
-        const back = max(painted, 0).add(0.4);
-        const cellUv = vec2((42 * map.ref.scale) / map.ref.width, (21 * map.ref.scale) / map.ref.height);
-        // Three taps fanned about 40 degrees either side of the gradient, so the distance field's medial lines do not
-        // draw quay streaks across a beach.
-        const sandAt = (turn: number): ShaderNode => {
-          const c = Math.cos(turn),
-            si = Math.sin(turn);
-          const dir = vec2(gradient.x.mul(c).sub(gradient.y.mul(si)), gradient.x.mul(si).add(gradient.y.mul(c)));
-          const land = texture(colourMap, uv.sub(dir.mul(cellUv).mul(back))).level(float(3)).rgb;
-          const hi = max(land.r, max(land.g, land.b));
-          const lo = min(land.r, min(land.g, land.b));
-          const saturation = hi.sub(lo).div(max(hi, 0.02));
-          const sand = smoothstep(0.38, 0.55, saturation).mul(smoothstep(0.0, 0.08, land.r.sub(land.b)));
-          // Dark ground (rocks, reefs, scree, the original's grey-blue wet band) is not masonry either: small rocks keep
-          // the beach dressing, whose shallows the critique found free of streaks, instead of flipping class along the
-          // medial lines. Only warm or green dark ground counts: neutral and blue-leaning taps are water (the tap
-          // overshot the waterline) or grey masonry, near-black ones the shaded faces of walls and piers, and all of
-          // them marked seawalls as beaches in streaks.
-          const water = smoothstep(0.04, 0.01, max(land.r, land.g).sub(land.b));
-          return max(
-            sand,
-            smoothstep(0.45, 0.3, hi)
-              .mul(smoothstep(0.04, 0.07, hi))
-              .mul(float(1).sub(water)),
-          );
-        };
-        // The straight tap decides; the fanned pair only together (one fanned tap alone finding sand along a medial line
-        // drew turquoise wisps off seawalls).
-        const sandy = mix(float(0.5), max(sandAt(0), sandAt(0.7).add(sandAt(-0.7)).mul(0.5)), directed);
-        shoreQuay = max(
-          quay,
-          float(1)
-            .sub(sandy)
-            .mul(smoothstep(2.2, 1.2, painted)),
-        );
+        const sandy: ShaderNode = shoreLand ? shoreLand.g : float(1);
+        // Mixed ground (a pale wet band beside grass) still counts as a beach; only clearly neutral ground is masonry.
+        // The spread class itself fades to a beach beyond about three cells; the gate only bounds it.
+        shoreQuay = max(quay, smoothstep(0.7, 0.3, sandy).mul(smoothstep(4, 3, painted)));
       }
       const look = waterLook(
         {
@@ -1241,6 +1200,8 @@ function createMaterials(
           calm,
           quay: shoreQuay,
           cliffNear: sheltered,
+          shoreTone: shoreLand ? shoreLand.b : undefined,
+          shoreMass: shoreLand ? shoreLand.a : undefined,
         },
         nodes,
       );
